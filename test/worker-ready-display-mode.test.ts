@@ -22,7 +22,7 @@ const updateMessageMock = vi.fn(async () => {});
 const deleteMessageMock = vi.fn(async () => {});
 const pinMessageMock = vi.fn(async () => true);
 const unpinMessageMock = vi.fn(async () => true);
-const { loggerInfoMock } = vi.hoisted(() => ({ loggerInfoMock: vi.fn() }));
+const loggerInfoMock = vi.fn();
 
 vi.mock('../src/im/lark/client.js', () => {
   class MessageWithdrawnError extends Error {
@@ -152,6 +152,8 @@ import { activeSessionKey, type DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
 import * as sessionStore from '../src/services/session-store.js';
 
+const getBotMock = getBot as ReturnType<typeof vi.fn>;
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 function makeFakeWorker() {
@@ -201,6 +203,15 @@ function flush(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+async function primaryEffectsBarrier(): Promise<void> {
+  await flush();
+}
+
+async function deferredAndIdleBarrier(): Promise<void> {
+  await __testOnly_waitForPinStreamingCardIdle();
+  await flush();
+}
+
 function activate(ds: DaemonSession): void {
   setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
 }
@@ -220,6 +231,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
     vi.clearAllMocks();
     pinMessageMock.mockResolvedValue(true);
     unpinMessageMock.mockResolvedValue(true);
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code' },
+      resolvedAllowedUsers: [],
+      botOpenId: 'ou_bot',
+      botName: 'TestBot',
+    } as any);
     sessionReplyMock = vi.fn(async () => 'om_new_card');
     closeSessionMock = vi.fn();
     initWorkerPool({
@@ -234,7 +251,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('does not let a stale ready Pin continuation recall the successor frozen cards', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -252,7 +269,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1' });
-    await flush();
+    await primaryEffectsBarrier();
     expect(ds.streamCardId).toBe('om_new_card');
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
     expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
@@ -261,7 +278,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     // already happened; the old continuation may only compensate its own Pin.
     ds.streamCardId = 'om_successor';
     resolvePin(true);
-    await __testOnly_waitForPinStreamingCardIdle();
+    await deferredAndIdleBarrier();
 
     expect(deleteMessageMock).toHaveBeenCalledTimes(1);
     expect(ds.frozenCards?.has('old')).toBe(false);
@@ -271,7 +288,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('does not let a stale persisted-card reuse recall or overwrite the successor', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -288,15 +305,14 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
-    await flush();
+    await primaryEffectsBarrier();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
     expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
 
     ds.streamCardId = 'om_successor';
     resolvePin(true);
-    await flush();
-    await flush();
+    await deferredAndIdleBarrier();
 
     expect(ds.streamCardId).toBe('om_successor');
     expect(ds.frozenCards?.has('old')).toBe(false);
@@ -332,7 +348,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('schedules the successor after a turn-start Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -358,7 +374,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('schedules the successor after a worker-ready Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -664,7 +680,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('schedules the successor after a screen-update Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -938,7 +954,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('silent recovery restores screenshot mode without touching the streaming card', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -953,7 +969,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
-    await flush();
+    await primaryEffectsBarrier();
 
     expect(updateMessageMock).not.toHaveBeenCalled();
     expect(sessionReplyMock).not.toHaveBeenCalled();
@@ -964,8 +980,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
 
     resolvePin(true);
-    await flush();
-    await flush();
+    await deferredAndIdleBarrier();
   });
 
   it('sentinel early-break (in-flight card POST) still sends set_display_mode', async () => {
@@ -1000,7 +1015,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
     // card will ever be posted" shape. The mode re-sync must not be tied to
     // card delivery. Implementation is restored in finally: clearAllMocks()
     // does not undo a leaked mockImplementation for later tests.
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', apiOnly: true },
@@ -1031,7 +1045,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('streamingCardDisabled ready still sends set_display_mode', async () => {
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', disableStreamingCard: true },
@@ -1064,7 +1077,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('suppressed managed turn screenshot never lands in currentImageKey', async () => {
     // With the early re-sync, a worker can be uploading during a managed/silent
     // turn — that frame must not become the next visible card's image.
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', apiOnly: true },
@@ -1533,7 +1545,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('prompt_ready keeps a staged-off follow-up legacy even if config is now on', async () => {
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'codex-app', codexAppCleanInput: true },
       resolvedAllowedUsers: [],
       botOpenId: 'ou_bot',

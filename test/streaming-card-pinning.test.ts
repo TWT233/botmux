@@ -43,6 +43,14 @@ import {
 } from '../src/core/worker-pool.js';
 import { getBot } from '../src/bot-registry.js';
 
+const getBotMock = getBot as ReturnType<typeof vi.fn>;
+
+async function drainMicrotasks(times = 2): Promise<void> {
+  for (let i = 0; i < times; i += 1) {
+    await Promise.resolve();
+  }
+}
+
 function makeDs(
   card = 'om_current',
   frozenCards?: Map<string, FrozenCard>,
@@ -60,13 +68,13 @@ describe('streaming-card pin policy', () => {
     setActiveSessionsRegistry(new Map());
     pinMessageMock.mockResolvedValue(true);
     unpinMessageMock.mockResolvedValue(true);
-    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
   });
   it('does nothing when disabled, sentinel, inactive, displaced, or changed', async () => {
     const ds = makeDs(); activate(ds);
-    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: false } } as any);
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: false } } as any);
     expect(await pinStreamingCardIfEnabled(ds, 'om_current')).toBe(false);
-    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
     ds.streamCardId = CARD_POSTING_SENTINEL; expect(await pinStreamingCardIfEnabled(ds, CARD_POSTING_SENTINEL)).toBe(false);
     ds.streamCardId = 'om_current'; ds.session.status = 'closed'; expect(await pinStreamingCardIfEnabled(ds, 'om_current')).toBe(false);
     ds.session.status = 'active'; setActiveSessionsRegistry(new Map()); expect(await pinStreamingCardIfEnabled(ds, 'om_current')).toBe(false);
@@ -86,6 +94,7 @@ describe('streaming-card pin policy', () => {
     const ds = makeDs(); activate(ds);
     let resolvePin!: (value: boolean) => void; pinMessageMock.mockImplementation(() => new Promise(resolve => { resolvePin = resolve; }));
     const pending = pinStreamingCardIfEnabled(ds, 'om_current');
+    await drainMicrotasks(1);
     ds.streamCardId = 'om_new'; resolvePin(true);
     expect(await pending).toBe(false);
     expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
@@ -173,7 +182,7 @@ describe('streaming-card pin policy', () => {
 
     setActiveSessionsRegistry(new Map([[activeSessionKey(first), first]]));
     reconcileBotStreamingCardPins('app-pin', false);
-    await vi.waitFor(() => expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current'));
+    await drainMicrotasks();
 
     expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
     expect(pinMessageMock).not.toHaveBeenCalled();
@@ -183,7 +192,7 @@ describe('streaming-card pin policy', () => {
       [activeSessionKey(second), second],
     ]));
     reconcileBotStreamingCardPins('app-pin', true);
-    await Promise.resolve();
+    await drainMicrotasks(1);
 
     expect(pinMessageMock).not.toHaveBeenCalled();
 
@@ -210,16 +219,16 @@ describe('streaming-card pin policy', () => {
       return Promise.resolve(true);
     });
 
-    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
     reconcileBotStreamingCardPins('app-pin', true);
-    await vi.waitFor(() => expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current'));
+    await drainMicrotasks();
 
     expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
     expect(unpinMessageMock).not.toHaveBeenCalled();
 
-    vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: false } } as any);
+    getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: false } } as any);
     reconcileBotStreamingCardPins('app-pin', false);
-    await Promise.resolve();
+    await drainMicrotasks(1);
 
     expect(unpinMessageMock).not.toHaveBeenCalled();
 

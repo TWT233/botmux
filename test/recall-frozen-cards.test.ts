@@ -131,6 +131,10 @@ import { MessageWithdrawnError } from '../src/im/lark/client.js';
 import { buildStreamingCard } from '../src/im/lark/card-builder.js';
 import { getBot, resolveUsageDisplay } from '../src/bot-registry.js';
 
+const buildStreamingCardMock = buildStreamingCard as ReturnType<typeof vi.fn>;
+const getBotMock = getBot as ReturnType<typeof vi.fn>;
+const resolveUsageDisplayMock = resolveUsageDisplay as ReturnType<typeof vi.fn>;
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 const APP_ID = 'app_test';
@@ -189,8 +193,8 @@ beforeEach(() => {
   loadFrozenCardsMock.mockReset();
   loadFrozenCardsMock.mockReturnValue(new Map());
   persistStreamCardStateMock.mockClear();
-  vi.mocked(buildStreamingCard).mockClear();
-  vi.mocked(getBot).mockReturnValue({
+  buildStreamingCardMock.mockClear();
+  getBotMock.mockReturnValue({
     config: { larkAppId: APP_ID, cliId: 'claude-code' },
   } as any);
   setTerminalProxyPort(8800);
@@ -199,12 +203,16 @@ beforeEach(() => {
 
 afterEach(() => {
   setActiveSessionsRegistry(undefined as any);
-  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
 function flush(): Promise<void> {
   return new Promise(resolve => setImmediate(resolve));
+}
+
+async function drainPinQueue(): Promise<void> {
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────────
@@ -365,9 +373,8 @@ describe('recallFrozenCards', () => {
 
 describe('restoreUsageLimitRuntimeState', () => {
   it('marks restored limit sessions limited and re-arms the retry timer', () => {
-    const now = new Date('2026-05-22T10:00:00Z').getTime();
     vi.useFakeTimers();
-    vi.setSystemTime(now);
+    const now = Date.now();
     const ds = makeDs();
     ds.streamCardId = 'om_live_limit';
     ds.streamCardNonce = 'nonce_limit';
@@ -423,9 +430,8 @@ describe('restoreUsageLimitRuntimeState', () => {
   });
 
   it('marks already-expired restored limits retry-ready immediately', () => {
-    const now = new Date('2026-05-22T10:00:00Z').getTime();
     vi.useFakeTimers();
-    vi.setSystemTime(now);
+    const now = Date.now();
     const ds = makeDs();
     ds.usageLimit = {
       limited: true,
@@ -444,9 +450,8 @@ describe('restoreUsageLimitRuntimeState', () => {
   });
 
   it('Plan B: a meeting-agent session patches its Lark card on retry-ready like a normal session', () => {
-    const now = new Date('2026-05-22T10:00:00Z').getTime();
     vi.useFakeTimers();
-    vi.setSystemTime(now);
+    const now = Date.now();
     const ds = makeDs();
     // The vcMeetingReceiver marker is now pure delivery metadata — it no longer
     // suppresses the streaming card, so a meeting agent's usage-limit card patch
@@ -502,7 +507,7 @@ describe('postFreshStreamingCard', () => {
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
       resolvePin = resolve;
     }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: APP_ID, cliId: 'claude-code', pinStreamingCard: true },
     } as any);
     const ds = makeDs(new Map());
@@ -520,8 +525,7 @@ describe('postFreshStreamingCard', () => {
       return value;
     });
 
-    await Promise.resolve();
-    await Promise.resolve();
+    await drainPinQueue();
 
     expect(typeof resolvePin).toBe('function');
     expect(settled).toBe(true);
@@ -556,7 +560,7 @@ describe('postFreshStreamingCard', () => {
   });
 
   it('fails closed for apiOnly sessions and never attempts /card Pinning', async () => {
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: APP_ID, cliId: 'claude-code', apiOnly: true, pinStreamingCard: true },
     } as any);
     const ds = makeDs();
@@ -589,7 +593,7 @@ describe('postTurnStartingCard', () => {
   });
 
   it('starts a live Grok turn as working instead of starting', async () => {
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: APP_ID, cliId: 'grok' },
     } as any);
     const ds = makeDs();
@@ -602,7 +606,7 @@ describe('postTurnStartingCard', () => {
 
     await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_1')).resolves.toBe(true);
 
-    expect(vi.mocked(buildStreamingCard).mock.calls[0]?.[5]).toBe('working');
+    expect(buildStreamingCardMock.mock.calls[0]?.[5]).toBe('working');
     expect(updateMessageMock).not.toHaveBeenCalled();
   });
 
@@ -620,7 +624,7 @@ describe('postTurnStartingCard', () => {
 
     const post = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     expect(sessionReply).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(buildStreamingCard).mock.calls[0]?.[5]).toBe('starting');
+    expect(buildStreamingCardMock.mock.calls[0]?.[5]).toBe('starting');
 
     ds.lastScreenStatus = 'working';
     ds.lastScreenContent = 'Grok is thinking';
@@ -630,9 +634,9 @@ describe('postTurnStartingCard', () => {
     await expect(post).resolves.toBe(true);
     await flush();
 
-    const statuses = vi.mocked(buildStreamingCard).mock.calls.map(call => call[5]);
+    const statuses = buildStreamingCardMock.mock.calls.map(call => call[5]);
     expect(statuses).toContain('working');
-    expect(vi.mocked(buildStreamingCard).mock.calls.at(-1)?.[4]).toBe('Grok is thinking');
+    expect(buildStreamingCardMock.mock.calls.at(-1)?.[4]).toBe('Grok is thinking');
     expect(updateMessageMock).toHaveBeenCalledWith(APP_ID, 'om_turn_card_1', '{}');
   });
 
@@ -983,7 +987,7 @@ describe('postTurnStartingCard', () => {
   it('starts the successor turn before the older turn Pin chain settles', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: APP_ID, cliId: 'claude-code', pinStreamingCard: true },
     } as any);
     const ds = makeDs();
@@ -1341,11 +1345,11 @@ describe('usageRefreshShouldRun (arm/clear predicate)', () => {
 
   it('is false when usageDisplay is not streaming (footer / off)', () => {
     const ds = workingDs();
-    vi.mocked(resolveUsageDisplay).mockReturnValue('footer' as any);
+    resolveUsageDisplayMock.mockReturnValue('footer' as any);
     expect(usageRefreshShouldRun(ds)).toBe(false);
-    vi.mocked(resolveUsageDisplay).mockReturnValue('off' as any);
+    resolveUsageDisplayMock.mockReturnValue('off' as any);
     expect(usageRefreshShouldRun(ds)).toBe(false);
-    vi.mocked(resolveUsageDisplay).mockReturnValue('streaming' as any);
+    resolveUsageDisplayMock.mockReturnValue('streaming' as any);
   });
 });
 
@@ -1372,7 +1376,7 @@ describe('refreshStreamingCardUsage (interval tick)', () => {
     // asked for a fresh read (empty transcript here → concrete empty snapshot).
     const ds = workingDs();
     refreshStreamingCardUsage(ds);
-    const call = vi.mocked(buildStreamingCard).mock.calls[0]!;
+    const call = buildStreamingCardMock.mock.calls[0]!;
     // Snapshot present (17th positional arg) and interval < throttle by design.
     expect(call[16]).toEqual({ context: null, tokens: null, turnTokens: null });
     expect(USAGE_REFRESH_INTERVAL_MS).toBeLessThan(15_000);
@@ -1384,7 +1388,7 @@ describe('refreshStreamingCardUsage (interval tick)', () => {
     const ds = workingDs();
     expect(ds.workerPort ?? null).toBeNull();
     refreshStreamingCardUsage(ds);
-    const call = vi.mocked(buildStreamingCard).mock.calls[0]!;
+    const call = buildStreamingCardMock.mock.calls[0]!;
     expect(call[2]).toBe(''); // 3rd positional arg = read-only terminal URL
   });
 
@@ -1392,7 +1396,7 @@ describe('refreshStreamingCardUsage (interval tick)', () => {
     const ds = workingDs();
     ds.workerPort = 9101; // a real Web Terminal port
     refreshStreamingCardUsage(ds);
-    const call = vi.mocked(buildStreamingCard).mock.calls[0]!;
+    const call = buildStreamingCardMock.mock.calls[0]!;
     expect(typeof call[2]).toBe('string');
     expect(call[2]).not.toBe('');
     expect(call[2]).toContain(`/s/${SESSION_ID}`);
@@ -1481,10 +1485,10 @@ describe('syncUsageRefreshTimer (state-boundary arm/clear)', () => {
   it('does not arm when usageDisplay is off', () => {
     vi.useFakeTimers();
     const ds = workingDs();
-    vi.mocked(resolveUsageDisplay).mockReturnValue('off' as any);
+    resolveUsageDisplayMock.mockReturnValue('off' as any);
     syncUsageRefreshTimer(ds);
     expect(ds.usageRefreshTimer).toBeUndefined();
-    vi.mocked(resolveUsageDisplay).mockReturnValue('streaming' as any);
+    resolveUsageDisplayMock.mockReturnValue('streaming' as any);
   });
 
   it('re-arms after a CLI auto-restart (working card survives, worker re-readies)', () => {
@@ -1509,8 +1513,8 @@ describe('syncUsageRefreshTimer (state-boundary arm/clear)', () => {
     expect(ds.usageRefreshTimer).toBeDefined();
 
     // Now ticks resume even without a status edge (working→working).
-    const before = vi.mocked(buildStreamingCard).mock.calls.length;
+    const before = buildStreamingCardMock.mock.calls.length;
     vi.advanceTimersByTime(USAGE_REFRESH_INTERVAL_MS);
-    expect(vi.mocked(buildStreamingCard).mock.calls.length).toBe(before + 1);
+    expect(buildStreamingCardMock.mock.calls.length).toBe(before + 1);
   });
 });
