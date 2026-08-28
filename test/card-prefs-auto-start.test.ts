@@ -22,10 +22,39 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 
 async function freshModules() {
   vi.resetModules();
+  vi.doUnmock('../src/services/config-store.js');
   const registry = await import('../src/bot-registry.js');
+  const botConfigStore = await import('../src/services/bot-config-store.js');
   const store = await import('../src/services/card-prefs-store.js');
   const pinStreamingCardChange = await import('../src/services/pin-streaming-card-change.js');
-  return { registry, store, pinStreamingCardChange };
+  return { registry, botConfigStore, store, pinStreamingCardChange };
+}
+
+async function freshModulesWithConfigStoreMock(
+  mockFactory: (
+    actual: typeof import('../src/services/config-store.js'),
+  ) => Promise<typeof import('../src/services/config-store.js')> | typeof import('../src/services/config-store.js'),
+) {
+  vi.resetModules();
+  vi.doMock('../src/services/config-store.js', async () => {
+    const actual = await vi.importActual<typeof import('../src/services/config-store.js')>('../src/services/config-store.js');
+    return mockFactory(actual);
+  });
+  const registry = await import('../src/bot-registry.js');
+  const botConfigStore = await import('../src/services/bot-config-store.js');
+  const store = await import('../src/services/card-prefs-store.js');
+  const pinStreamingCardChange = await import('../src/services/pin-streaming-card-change.js');
+  return { registry, botConfigStore, store, pinStreamingCardChange };
+}
+
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
 }
 
 describe('card-prefs store — 主动开工 fields', () => {
@@ -39,6 +68,7 @@ describe('card-prefs store — 主动开工 fields', () => {
 
   afterEach(() => {
     delete process.env.BOTS_CONFIG;
+    vi.doUnmock('../src/services/config-store.js');
   });
 
   function writeConfig(entry: Record<string, unknown> = {}) {
@@ -292,5 +322,58 @@ describe('card-prefs store — 主动开工 fields', () => {
     }
     expect(readConfig().pinStreamingCard).toBe(true);
     expect(registry.getBot('app_default').config.pinStreamingCard).toBe(true);
+  });
+
+  it('serializes pinStreamingCard writes across dashboard and /botconfig by invocation order', async () => {
+    writeConfig();
+    const firstAfterDisk = deferred();
+    const releaseFirst = deferred();
+    let rmwCalls = 0;
+    const { registry, botConfigStore, store, pinStreamingCardChange } = await freshModulesWithConfigStoreMock(async (actual) => ({
+      ...actual,
+      async rmwBotEntry<T>(larkAppId: string, mutate: Parameters<typeof actual.rmwBotEntry<T>>[1]) {
+        rmwCalls++;
+        const result = await actual.rmwBotEntry<T>(larkAppId, mutate);
+        if (rmwCalls === 1) {
+          firstAfterDisk.resolve();
+          await releaseFirst.promise;
+        }
+        return result;
+      },
+    }));
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+    const spec = botConfigStore.findConfigField('PINSTREAMINGCARD')!;
+    const observed: Array<{ enabled: boolean; disk: unknown; memory: unknown }> = [];
+    const dispose = pinStreamingCardChange.registerPinStreamingCardChangeHandler((appId, enabled) => {
+      observed.push({
+        enabled,
+        disk: readConfig().pinStreamingCard,
+        memory: registry.getBot(appId).config.pinStreamingCard,
+      });
+    });
+
+    try {
+      const dashboardWrite = store.updateBotCardPrefs('app_default', { pinStreamingCard: true });
+      await firstAfterDisk.promise;
+      expect(readConfig().pinStreamingCard).toBe(true);
+      expect(registry.getBot('app_default').config.pinStreamingCard).toBeUndefined();
+
+      const commandWrite = botConfigStore.applyConfigField('app_default', spec, false);
+      expect(rmwCalls).toBe(1);
+
+      releaseFirst.resolve();
+      const [firstResult, secondResult] = await Promise.all([dashboardWrite, commandWrite]);
+      expect(firstResult.ok).toBe(true);
+      expect(secondResult.ok).toBe(true);
+    } finally {
+      dispose();
+    }
+
+    expect(readConfig().pinStreamingCard).toBeUndefined();
+    expect(registry.getBot('app_default').config.pinStreamingCard).toBeUndefined();
+    expect(observed).toEqual([
+      { enabled: true, disk: true, memory: true },
+      { enabled: false, disk: undefined, memory: undefined },
+    ]);
   });
 });

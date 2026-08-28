@@ -38,7 +38,10 @@ import {
   type UsageDisplayMode,
 } from '../bot-registry.js';
 import { logger } from '../utils/logger.js';
-import { notifyPinStreamingCardChanged } from './pin-streaming-card-change.js';
+import {
+  notifyPinStreamingCardChanged,
+  serializePinStreamingCardConfigChange,
+} from './pin-streaming-card-change.js';
 
 export interface BotCardPrefs {
   /** Where to show native Context / Token usage:
@@ -147,6 +150,19 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
  * the default). Returns the full resolved prefs after the write.
  */
 export async function updateBotCardPrefs(
+  larkAppId: string,
+  patch: Partial<BotCardPrefs>,
+): Promise<{ ok: true; prefs: BotCardPrefs } | { ok: false; reason: string }> {
+  if (patch.pinStreamingCard !== undefined) {
+    return serializePinStreamingCardConfigChange(
+      larkAppId,
+      () => updateBotCardPrefsInternal(larkAppId, patch),
+    );
+  }
+  return updateBotCardPrefsInternal(larkAppId, patch);
+}
+
+async function updateBotCardPrefsInternal(
   larkAppId: string,
   patch: Partial<BotCardPrefs>,
 ): Promise<{ ok: true; prefs: BotCardPrefs } | { ok: false; reason: string }> {

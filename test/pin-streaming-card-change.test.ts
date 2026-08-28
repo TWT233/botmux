@@ -13,6 +13,7 @@ import { logger } from '../src/utils/logger.js';
 import {
   notifyPinStreamingCardChanged,
   registerPinStreamingCardChangeHandler,
+  serializePinStreamingCardConfigChange,
 } from '../src/services/pin-streaming-card-change.js';
 
 describe('pin-streaming-card change handler seam', () => {
@@ -83,5 +84,24 @@ describe('pin-streaming-card change handler seam', () => {
 
     expect(resolved).toBe(true);
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('async boom'));
+  });
+
+  it('releases the per-bot serializer after a failed operation so later writes still run', async () => {
+    const calls: string[] = [];
+
+    await expect(
+      serializePinStreamingCardConfigChange('app-five', async () => {
+        calls.push('first');
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+
+    await expect(
+      serializePinStreamingCardConfigChange('app-five', async () => {
+        calls.push('second');
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(calls).toEqual(['first', 'second']);
   });
 });

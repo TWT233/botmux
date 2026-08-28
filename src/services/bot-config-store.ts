@@ -28,7 +28,10 @@ import { parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
 import { normalizeFeedbackPolicyLayer, type FeedbackPolicyLayer } from './feedback-policy-resolver.js';
-import { notifyPinStreamingCardChanged } from './pin-streaming-card-change.js';
+import {
+  notifyPinStreamingCardChanged,
+  serializePinStreamingCardConfigChange,
+} from './pin-streaming-card-change.js';
 import {
   cliModelSupportsReasoningEffort,
   isCodexReasoningEffort,
@@ -226,6 +229,20 @@ export function setDisplayNameRefresher(fn: (() => void) | null): void {
  * 不处理 allowedUsers（异步，见 {@link setBotAllowedUsers}）。
  */
 export async function applyConfigField(
+  larkAppId: string,
+  spec: ConfigFieldSpec,
+  value: unknown,
+): Promise<ApplyFieldResult> {
+  if (spec.configKey === 'pinStreamingCard') {
+    return serializePinStreamingCardConfigChange(
+      larkAppId,
+      () => applyConfigFieldInternal(larkAppId, spec, value),
+    );
+  }
+  return applyConfigFieldInternal(larkAppId, spec, value);
+}
+
+async function applyConfigFieldInternal(
   larkAppId: string,
   spec: ConfigFieldSpec,
   value: unknown,

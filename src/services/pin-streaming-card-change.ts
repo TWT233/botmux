@@ -4,6 +4,7 @@ export type PinStreamingCardChangeHandler =
   (larkAppId: string, enabled: boolean) => void | PromiseLike<void>;
 
 let currentHandler: PinStreamingCardChangeHandler | null = null;
+const configChangeQueues = new Map<string, Promise<void>>();
 
 export function registerPinStreamingCardChangeHandler(
   handler: PinStreamingCardChangeHandler,
@@ -12,6 +13,35 @@ export function registerPinStreamingCardChangeHandler(
   return () => {
     if (currentHandler === handler) currentHandler = null;
   };
+}
+
+/**
+ * Serialize pinStreamingCard config mutations per bot across every write entry
+ * point. The queue covers the whole write -> live-sync -> notify scheduling
+ * critical section, but does not wait for the asynchronous reconciliation work
+ * behind the notification handler itself.
+ */
+export async function serializePinStreamingCardConfigChange<T>(
+  larkAppId: string,
+  operation: () => T | PromiseLike<T>,
+): Promise<T> {
+  const previous = configChangeQueues.get(larkAppId) ?? Promise.resolve();
+  const ready = previous.catch(() => undefined);
+  let release!: () => void;
+  const tail = ready.then(() => new Promise<void>((resolve) => {
+    release = resolve;
+  }));
+  configChangeQueues.set(larkAppId, tail);
+  void tail.finally(() => {
+    if (configChangeQueues.get(larkAppId) === tail) configChangeQueues.delete(larkAppId);
+  });
+
+  await ready;
+  try {
+    return await operation();
+  } finally {
+    release();
+  }
 }
 
 export function notifyPinStreamingCardChanged(
