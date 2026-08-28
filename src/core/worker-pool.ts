@@ -2054,11 +2054,16 @@ function snapshotStreamingCardIds(ds: DaemonSession): string[] {
   return [...ids];
 }
 
+function retainsLarkStreamingCardTransport(ds: DaemonSession): boolean {
+  return larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly });
+}
+
 function ownsCurrentStreamingCard(ds: DaemonSession, messageId: string): boolean {
   if (!isRealStreamingCardId(messageId)) return false;
   if (ds.session.status !== 'active' || ds.streamCardId !== messageId || isSessionTransferring(ds)) return false;
+  if (!activeSessionsRegistry) return false;
   const key = sessionKey(sessionAnchorId(ds), ds.larkAppId);
-  return !activeSessionsRegistry || activeSessionsRegistry.get(key) === ds;
+  return activeSessionsRegistry.get(key) === ds;
 }
 
 function pinStreamingCardEnabled(ds: DaemonSession): boolean {
@@ -2414,6 +2419,8 @@ export async function postFreshStreamingCard(
 ): Promise<boolean> {
   if (isDocNativeSession(ds)) return false;
   if (!workerHasInitialized(ds)) return false;
+  if (remoteRetirementAdmissionPhase(ds)) return false;
+  if (!retainsLarkStreamingCardTransport(ds)) return false;
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
   const readUrl = readableTerminalUrlFor(ds);
@@ -2470,12 +2477,26 @@ export async function postFreshStreamingCard(
     && ds.streamCardId === CARD_POSTING_SENTINEL
     && ds.streamCardNonce === postingNonce
     && (!activeSessionsRegistry || activeSessionsRegistry.get(registryKeyAtPost) === ds);
+  const restorePrePostIdentityForRetirement = (): boolean => {
+    if (remoteRetirementAdmissionPhase(ds) === null || !ownsPost()) return false;
+    ds.streamCardId = prevCardId;
+    ds.streamCardNonce = prevNonce;
+    ds.streamCardReplyTargetKey = prevReplyTargetKey;
+    ds.streamCardPending = prevPending;
+    persistStreamCardState(ds);
+    return true;
+  };
+  const stillOwnsPost = (): boolean =>
+    ownsPost()
+    && remoteRetirementAdmissionPhase(ds) === null
+    && retainsLarkStreamingCardTransport(ds);
   try {
     const messageId = await sessionReply(
       anchorAtPost, cardJson, 'interactive', appIdAtPost, cardReplyTarget.turnId,
     );
-    if (!ownsPost()) {
+    if (!stillOwnsPost()) {
       void deleteMessage(appIdAtPost, messageId).catch(() => { /* stale result */ });
+      restorePrePostIdentityForRetirement();
       return false;
     }
     ds.streamCardId = messageId;
@@ -2500,11 +2521,13 @@ export async function postFreshStreamingCard(
     logger.info(`[${tag(ds)}] Posted streaming card via /card`);
     return true;
   } catch (err) {
-    if (ownsPost()) {
+    if (stillOwnsPost()) {
       ds.streamCardId = prevCardId;
       ds.streamCardNonce = prevNonce;
       ds.streamCardReplyTargetKey = prevReplyTargetKey;
       ds.streamCardPending = prevPending;
+    } else {
+      restorePrePostIdentityForRetirement();
     }
     flushPendingLocalCliOpenReadinessPatch(ds);
     flushPendingRiffUrlPatch(ds);
@@ -10852,6 +10875,8 @@ function setupWorkerHandlers(
         const postingRegistryKey = sessionKey(postingAnchor, postingAppId);
         ds.streamCardId = CARD_POSTING_SENTINEL;
         let ownsFreshReadyPost = (): boolean => false;
+        let restoreFreshReadyPrePostIdentityForRetirement = (): boolean => false;
+        let stillOwnsFreshReadyPost = (): boolean => false;
         try {
           ds.streamCardNonce = randomBytes(4).toString('hex');
           const postingNonce = ds.streamCardNonce;
@@ -10864,6 +10889,16 @@ function setupWorkerHandlers(
             && ds.streamCardId === CARD_POSTING_SENTINEL
             && ds.streamCardNonce === postingNonce
             && (!activeSessionsRegistry || activeSessionsRegistry.get(postingRegistryKey) === ds);
+          restoreFreshReadyPrePostIdentityForRetirement = (): boolean => {
+            if (remoteRetirementAdmissionPhase(ds) === null || !ownsFreshReadyPost()) return false;
+            ds.streamCardId = undefined;
+            persistStreamCardState(ds);
+            return true;
+          };
+          stillOwnsFreshReadyPost = (): boolean =>
+            ownsFreshReadyPost()
+            && remoteRetirementAdmissionPhase(ds) === null
+            && retainsLarkStreamingCardTransport(ds);
           const initTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
           // See PATCH-branch comment above re: lastScreenStatus preference.
           // For relay (kill+fork with surviving tmux/CLI), this avoids the
@@ -10900,8 +10935,9 @@ function setupWorkerHandlers(
           const postedCardId = await scopedReply(
             streamCardJson, 'interactive', cardReplyTarget.turnId,
           );
-          if (!ownsLifecycleMutation() || !ownsFreshReadyPost()) {
+          if (!ownsLifecycleMutation() || !stillOwnsFreshReadyPost()) {
             void deleteMessage(postingAppId, postedCardId).catch(() => { /* best-effort stale-card cleanup */ });
+            restoreFreshReadyPrePostIdentityForRetirement();
             break;
           }
           ds.streamCardId = postedCardId;
@@ -10943,7 +10979,10 @@ function setupWorkerHandlers(
             void postTurnStartingCard(ds, cb.sessionReply, ds.streamCardPendingTurnId);
           }
         } catch (err) {
-          if (!ownsLifecycleMutation() || !ownsFreshReadyPost()) break;
+          if (!ownsLifecycleMutation() || !stillOwnsFreshReadyPost()) {
+            restoreFreshReadyPrePostIdentityForRetirement();
+            break;
+          }
           if (err instanceof MessageWithdrawnError) {
             await closeWithdrawnSessionIfLedgerEmpty(ds, 'Root message withdrawn while creating worker-ready card');
             break;
@@ -11393,11 +11432,22 @@ function setupWorkerHandlers(
             && ds.streamCardId === CARD_POSTING_SENTINEL
             && ds.streamCardNonce === postingNonce
             && (!activeSessionsRegistry || activeSessionsRegistry.get(postingRegistryKey) === ds);
+          const restoreFreshScreenPrePostIdentityForRetirement = (): boolean => {
+            if (remoteRetirementAdmissionPhase(ds) === null || !ownsFreshScreenPost()) return false;
+            ds.streamCardId = undefined;
+            persistStreamCardState(ds);
+            return true;
+          };
+          const stillOwnsFreshScreenPost = (): boolean =>
+            ownsFreshScreenPost()
+            && remoteRetirementAdmissionPhase(ds) === null
+            && retainsLarkStreamingCardTransport(ds);
           const cardReplyTarget = captureStreamingCardReplyTarget(ds, msg.turnId);
           scopedReply(cardJson, 'interactive', cardReplyTarget.turnId)
             .then(async msgId => {
-              if (!ownsLifecycleMutation() || !ownsFreshScreenPost()) {
+              if (!ownsLifecycleMutation() || !stillOwnsFreshScreenPost()) {
                 void deleteMessage(postingAppId, msgId).catch(() => { /* best-effort stale-card cleanup */ });
+                restoreFreshScreenPrePostIdentityForRetirement();
                 return;
               }
               ds.streamCardId = msgId;
@@ -11429,7 +11479,10 @@ function setupWorkerHandlers(
               }
             })
             .catch(async err => {
-              if (!ownsLifecycleMutation() || !ownsFreshScreenPost()) return;
+              if (!ownsLifecycleMutation() || !stillOwnsFreshScreenPost()) {
+                restoreFreshScreenPrePostIdentityForRetirement();
+                return;
+              }
               if (err instanceof MessageWithdrawnError) {
                 await closeWithdrawnSessionIfLedgerEmpty(ds, 'Root message withdrawn while creating streaming card');
                 return;

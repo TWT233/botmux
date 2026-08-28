@@ -71,6 +71,16 @@ describe('streaming-card pin policy', () => {
     ds.session.status = 'active'; setActiveSessionsRegistry(new Map()); expect(await pinStreamingCardIfEnabled(ds, 'om_current')).toBe(false);
     expect(pinMessageMock).not.toHaveBeenCalled();
   });
+
+  it('fails closed when the active session registry is unavailable', async () => {
+    const ds = makeDs();
+    setActiveSessionsRegistry(undefined as any);
+
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(false);
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
   it('pins only the active owned current card and compensates a stale success', async () => {
     const ds = makeDs(); activate(ds);
     let resolvePin!: (value: boolean) => void; pinMessageMock.mockImplementation(() => new Promise(resolve => { resolvePin = resolve; }));

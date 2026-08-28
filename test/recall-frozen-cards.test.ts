@@ -9,13 +9,15 @@
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DaemonSession, FrozenCard } from '../src/core/types.js';
-import { sessionKey } from '../src/core/types.js';
+import { activeSessionKey } from '../src/core/types.js';
 import { setTerminalProxyPort } from '../src/core/terminal-url.js';
 
 // ─── Mocks ─────────────────────────────────────────────────────────────────
 
 const deleteMessageMock = vi.fn(async (_appId: string, _messageId: string) => {});
 const updateMessageMock = vi.fn(async (_appId: string, _messageId: string, _json: string) => {});
+const pinMessageMock = vi.fn(async (_appId: string, _messageId: string) => true);
+const unpinMessageMock = vi.fn(async (_appId: string, _messageId: string) => true);
 const saveFrozenCardsMock = vi.fn();
 const loadFrozenCardsMock = vi.fn(() => new Map<string, FrozenCard>());
 const persistStreamCardStateMock = vi.fn();
@@ -27,6 +29,8 @@ vi.mock('../src/im/lark/client.js', () => {
   return {
     updateMessage: (...args: any[]) => updateMessageMock(args[0], args[1], args[2]),
     deleteMessage: (...args: any[]) => deleteMessageMock(args[0], args[1]),
+    pinMessage: (...args: any[]) => pinMessageMock(args[0], args[1]),
+    unpinMessage: (...args: any[]) => unpinMessageMock(args[0], args[1]),
     MessageWithdrawnError,
   };
 });
@@ -169,10 +173,18 @@ function makeDs(frozenCards?: Map<string, FrozenCard>): DaemonSession {
   };
 }
 
+function activate(ds: DaemonSession): void {
+  setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+}
+
 beforeEach(() => {
   deleteMessageMock.mockClear();
   updateMessageMock.mockReset();
   updateMessageMock.mockResolvedValue(undefined);
+  pinMessageMock.mockReset();
+  pinMessageMock.mockResolvedValue(true);
+  unpinMessageMock.mockReset();
+  unpinMessageMock.mockResolvedValue(true);
   saveFrozenCardsMock.mockClear();
   loadFrozenCardsMock.mockReset();
   loadFrozenCardsMock.mockReturnValue(new Map());
@@ -182,6 +194,7 @@ beforeEach(() => {
     config: { larkAppId: APP_ID, cliId: 'claude-code' },
   } as any);
   setTerminalProxyPort(8800);
+  setActiveSessionsRegistry(new Map());
 });
 
 afterEach(() => {
@@ -474,11 +487,51 @@ describe('meeting-agent streaming card (Plan B)', () => {
     };
     ds.workerPort = 4567;
     ds.workerReady = true;
+    activate(ds);
     const sessionReply = vi.fn(async () => 'om_card');
 
     await expect(postFreshStreamingCard(ds, sessionReply)).resolves.toBe(true);
     expect(sessionReply).toHaveBeenCalled();
     expect(buildStreamingCard).toHaveBeenCalled();
+  });
+});
+
+describe('postFreshStreamingCard', () => {
+  it('discards /card POST results once remote retirement starts waiting', async () => {
+    let resolvePost!: (messageId: string) => void;
+    const sessionReply = vi.fn(() => new Promise<string>(resolve => { resolvePost = resolve; }));
+    const ds = makeDs();
+    ds.workerReady = true;
+    ds.streamCardId = 'om_previous';
+    ds.streamCardNonce = 'nonce_previous';
+    activate(ds);
+
+    const pending = postFreshStreamingCard(ds, sessionReply);
+    ds.remoteCloseState = { phase: 'preparing', requestId: 'close-fresh-card' };
+    resolvePost('om_stale_fresh_card');
+
+    await expect(pending).resolves.toBe(false);
+    await flush();
+
+    expect(ds.streamCardId).toBe('om_previous');
+    expect(ds.streamCardNonce).toBe('nonce_previous');
+    expect(deleteMessageMock).toHaveBeenCalledWith(APP_ID, 'om_stale_fresh_card');
+    expect(pinMessageMock).not.toHaveBeenCalledWith(APP_ID, 'om_stale_fresh_card');
+  });
+
+  it('fails closed for apiOnly sessions and never attempts /card Pinning', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: APP_ID, cliId: 'claude-code', apiOnly: true, pinStreamingCard: true },
+    } as any);
+    const ds = makeDs();
+    ds.workerReady = true;
+    const sessionReply = vi.fn(async () => 'om_api_only_card');
+
+    await expect(postFreshStreamingCard(ds, sessionReply)).resolves.toBe(false);
+
+    expect(sessionReply).not.toHaveBeenCalled();
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 });
 
@@ -508,6 +561,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
+    activate(ds);
     const sessionReply = vi.fn(async () => 'om_grok_card');
 
     await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_1')).resolves.toBe(true);
@@ -526,6 +580,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPendingTurnId = 'om_turn_1';
     ds.lastScreenStatus = 'idle';
     ds.lastScreenContent = '';
+    activate(ds);
 
     const post = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     expect(sessionReply).toHaveBeenCalledTimes(1);
@@ -551,6 +606,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
+    activate(ds);
     const sessionReply = vi.fn(async () => 'om_turn_card_stable');
 
     await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_1')).resolves.toBe(true);
@@ -567,6 +623,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
     ds.currentTurnTitle = 'first turn';
+    activate(ds);
     const sessionReply = vi.fn(async () => 'om_turn_card_1');
 
     await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_1')).resolves.toBe(true);
@@ -589,6 +646,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_b1';
     ds.currentTurnTitle = 'topic B';
+    activate(ds);
     ds.session.turnReplyContexts = {
       om_turn_b1: { target: { mode: 'thread', rootMessageId: 'om_topic_b' } },
       om_turn_a2: { target: { mode: 'thread', rootMessageId: 'om_topic_a' } },
@@ -630,6 +688,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
     ds.currentTurnTitle = 'first turn';
+    activate(ds);
 
     const firstPost = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     expect(sessionReply).toHaveBeenCalledTimes(1);
@@ -661,6 +720,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
     ds.currentTurnTitle = 'first turn';
+    activate(ds);
     const sessionReply = vi.fn(async () => { throw new Error('network unavailable'); });
 
     await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_1')).resolves.toBe(false);
@@ -794,6 +854,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
+    activate(ds);
 
     const post = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     ds.remoteCloseState = { phase: 'preparing', requestId: 'close-1' };
@@ -818,6 +879,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
+    activate(ds);
 
     const post = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     ds.remoteShutdownState = { phase: 'preparing', requestId: 'shutdown-1' };
@@ -843,6 +905,7 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
+    activate(ds);
 
     const firstPost = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
     ds.remoteCloseState = { phase: 'preparing', requestId: 'close-abort' };
@@ -866,11 +929,12 @@ describe('postTurnStartingCard', () => {
     ds.streamCardPending = true;
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPendingTurnId = 'om_turn_1';
-    const registry = new Map([[sessionKey('om_root', APP_ID), ds]]);
+    const registryKey = activeSessionKey(ds);
+    const registry = new Map([[registryKey, ds]]);
     setActiveSessionsRegistry(registry);
 
     const post = postTurnStartingCard(ds, sessionReply, 'om_turn_1');
-    registry.set(sessionKey('om_root', APP_ID), makeDs());
+    registry.set(registryKey, makeDs());
     resolvePost('om_displaced_registry_card');
 
     await expect(post).resolves.toBe(false);

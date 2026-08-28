@@ -139,9 +139,9 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 // ─── Imports under test ────────────────────────────────────────────────────
 
-import { CARD_POSTING_SENTINEL, initWorkerPool, postTurnStartingCard, __testOnly_setupWorkerHandlers } from '../src/core/worker-pool.js';
+import { CARD_POSTING_SENTINEL, initWorkerPool, postTurnStartingCard, __testOnly_setupWorkerHandlers, setActiveSessionsRegistry } from '../src/core/worker-pool.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
-import type { DaemonSession } from '../src/core/types.js';
+import { activeSessionKey, type DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
 import * as sessionStore from '../src/services/session-store.js';
 
@@ -194,6 +194,15 @@ function flush(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+function activate(ds: DaemonSession): void {
+  setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+}
+
+function setupActiveWorkerHandlers(ds: DaemonSession, worker: any): void {
+  activate(ds);
+  __testOnly_setupWorkerHandlers(ds, worker);
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 describe('Worker ready: set_display_mode re-sync', () => {
@@ -212,6 +221,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       getActiveCount: () => 1,
       closeSession: closeSessionMock,
     });
+    setActiveSessionsRegistry(new Map());
   });
 
   it('does not let a stale ready Pin continuation recall the successor frozen cards', async () => {
@@ -231,8 +241,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       ]]),
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1' });
     await flush();
     expect(ds.streamCardId).toBe('om_new_card');
@@ -266,8 +277,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
         messageId: 'om_frozen_predecessor', content: '', title: '', displayMode: 'hidden', replyTargetKey: 'thread:om_root',
       }]]),
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
@@ -296,7 +308,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardPending: false,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
@@ -318,6 +330,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
     const ds = makeDs({ worker: makeFakeWorker(), workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
+    activate(ds);
     const oldPost = postTurnStartingCard(ds, sessionReplyMock, 'om_turn_old');
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
@@ -344,7 +357,8 @@ describe('Worker ready: set_display_mode re-sync', () => {
     } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    activate(ds);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
@@ -365,7 +379,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'persistent_backend_target',
       target: {
@@ -393,7 +407,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'codex_service_tier',
       snapshot: {
@@ -428,7 +442,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'claude-code';
 
-    __testOnly_setupWorkerHandlers(ds, staleWorker);
+    setupActiveWorkerHandlers(ds, staleWorker);
     expect(ds.codexServiceTier).toBeUndefined();
     ds.worker = replacement;
     staleWorker.emit('message', {
@@ -454,7 +468,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     updateMessageMock.mockClear();
     fakeWorker.emit('message', { type: 'codex_service_tier', snapshot: null });
     await flush();
@@ -468,7 +482,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const ds = makeDs({ worker: fakeWorker, workerPort: null, streamCardId: undefined });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     ds.pendingCodexTierCardRefresh = true;
     fakeWorker.emit('message', {
       type: 'codex_service_tier',
@@ -486,7 +500,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ streamCardPending: true, streamCardId: undefined, worker: fakeWorker });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready',
       port: 9999,
@@ -527,8 +541,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -564,8 +579,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       workerReady: true,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'screen_update',
       content: 'working in topic A',
@@ -582,6 +598,35 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(ds.streamCardReplyTargetKey).toBe('thread:om_topic_a');
   });
 
+  it('screen_update POST discards stale results once remote retirement starts waiting', async () => {
+    let resolvePost!: (messageId: string) => void;
+    sessionReplyMock.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolvePost = resolve;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardId: undefined,
+      workerReady: true,
+      worker: fakeWorker,
+    });
+    activate(ds);
+
+    setupActiveWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'screen_update', content: 'working', status: 'working' });
+    await flush();
+    expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
+
+    ds.remoteCloseState = { phase: 'preparing', requestId: 'close-screen-update' } as any;
+    resolvePost('om_retired_screen_card');
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBeUndefined();
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_retired_screen_card');
+    expect(pinMessageMock).not.toHaveBeenCalledWith('app_test', 'om_retired_screen_card');
+  });
+
   it('leaves a successor card intact when a stale screen-update POST rejects', async () => {
     let rejectPost!: (error: Error) => void;
     sessionReplyMock.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => {
@@ -595,7 +640,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'screen_update', content: 'first', status: 'working' });
     await flush();
     expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
@@ -617,7 +662,8 @@ describe('Worker ready: set_display_mode re-sync', () => {
     } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    activate(ds);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'screen_update', content: 'old', status: 'working', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
@@ -643,8 +689,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
       displayMode: 'screenshot',
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 0, token: 'unused', viewToken: 'unused-view' });
     await flush();
 
@@ -683,8 +730,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       lastScreenContent: 'current generation',
       lastScreenStatus: 'working',
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, staleWorker);
+    setupActiveWorkerHandlers(ds, staleWorker);
     staleWorker.emit('message', { type: 'ready', port: 9999, token: 'stale-token' });
     staleWorker.emit('message', {
       type: 'screen_update',
@@ -715,8 +763,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_doc' });
     await flush();
 
@@ -736,8 +785,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'tui_prompt',
       description: 'Approve command?',
@@ -760,8 +810,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -773,6 +824,33 @@ describe('Worker ready: set_display_mode re-sync', () => {
     );
   });
 
+  it('ready POST discards stale results once remote retirement starts waiting', async () => {
+    let resolvePost!: (messageId: string) => void;
+    sessionReplyMock.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolvePost = resolve;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardId: undefined,
+      worker: fakeWorker,
+    });
+
+    setupActiveWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_ready' });
+    await flush();
+    expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
+
+    ds.remoteCloseState = { phase: 'preparing', requestId: 'close-ready' } as any;
+    resolvePost('om_retired_ready_card');
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBeUndefined();
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_retired_ready_card');
+    expect(pinMessageMock).not.toHaveBeenCalledWith('app_test', 'om_retired_ready_card');
+  });
+
   it('POST path does NOT send set_display_mode when displayMode is hidden', async () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({
@@ -782,7 +860,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -810,7 +888,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       content: 'pending',
     }];
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'turn-pending',
     });
@@ -833,7 +911,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     updateMessageMock.mockResolvedValueOnce(undefined);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -858,7 +936,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -886,7 +964,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -919,7 +997,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
       await flush();
 
@@ -950,7 +1028,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
       await flush();
 
@@ -983,7 +1061,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', {
         type: 'screenshot_uploaded',
         imageKey: 'img_managed_frame',
@@ -1015,7 +1093,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(updateMessageMock).toHaveBeenCalledTimes(1);
@@ -1047,7 +1125,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1071,7 +1149,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1095,8 +1173,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1',
     });
@@ -1133,8 +1212,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1156,8 +1236,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardPendingTurnId: 'om_turn_1',
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1',
     });
@@ -1203,13 +1284,14 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: 'om_existing_card',
       workingDir: '/tmp',
     });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
     ds.adoptedFrom = { source: 'tmux', tmuxTarget: 'dev:1.2', cliId: 'traex', cwd: '/tmp' };
     ds.session.adoptedFrom = { source: 'tmux', tmuxTarget: 'dev:1.2', cliId: 'traex', cwd: '/tmp' };
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'cli_session_id', cliSessionId: 'trae-native-ready' });
     await flush();
 
@@ -1233,11 +1315,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       workingDir: '/tmp',
     });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
@@ -1268,11 +1351,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
     updateMessageMock.mockRejectedValueOnce(new Error('fallback PATCH failed'));
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, workingDir: '/tmp' });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
@@ -1298,7 +1382,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       pendingRawInput: '/goal ship the onboarding flow',
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1341,7 +1425,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1379,7 +1463,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1416,7 +1500,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1447,7 +1531,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     } as Partial<DaemonSession>);
     ds.session.cliId = 'codex-app' as any;
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1467,7 +1551,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       pendingFollowUpInput: { userPrompt: 'x', cliInput: '<user_message>x</user_message>' },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
     expect(fakeWorker.send).not.toHaveBeenCalled();
