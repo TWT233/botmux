@@ -946,12 +946,12 @@ export async function unpinMessage(larkAppId: string, messageId: string): Promis
   try {
     const res: any = await c.im.v1.pin.delete({ path: { message_id: messageId } });
     if (res?.code !== 0) {
-      logger.warn(`[pin:${larkAppId}] failed message=${messageId} code=${res?.code ?? 'missing'}`);
+      logger.warn(`[unpin:${larkAppId}] failed message=${messageId} code=${res?.code ?? 'missing'}`);
       return false;
     }
     return true;
   } catch (err) {
-    logger.warn(`[pin:${larkAppId}] failed message=${messageId}: ${formatLarkError(err) ?? (err instanceof Error ? err.message : 'unknown error')}`);
+    logger.warn(`[unpin:${larkAppId}] failed message=${messageId}: ${formatLarkError(err) ?? (err instanceof Error ? err.message : 'unknown error')}`);
     return false;
   }
 }

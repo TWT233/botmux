@@ -71,8 +71,9 @@ describe('pinMessage/unpinMessage boolean contract', () => {
     await expect(pinMessage('p_throw', 'om_pin')).resolves.toBe(false);
     expect(warn).toHaveBeenCalled();
     const joined = warn.mock.calls.map((c) => c.join(' ')).join(' ');
-    expect(joined).not.toContain('fake_authorization_token');
-    expect(joined).not.toContain('Authorization');
+    const lowered = joined.toLowerCase();
+    expect(lowered).not.toContain('fake_authorization_token');
+    expect(lowered).not.toContain('authorization');
   });
 
   it('two successful unpin calls both return true (wrapper is stateless)', async () => {
