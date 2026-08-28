@@ -139,11 +139,20 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 // ─── Imports under test ────────────────────────────────────────────────────
 
-import { CARD_POSTING_SENTINEL, initWorkerPool, postTurnStartingCard, __testOnly_setupWorkerHandlers } from '../src/core/worker-pool.js';
+import {
+  CARD_POSTING_SENTINEL,
+  initWorkerPool,
+  postTurnStartingCard,
+  __testOnly_setupWorkerHandlers,
+  __testOnly_waitForPinStreamingCardIdle,
+  setActiveSessionsRegistry,
+} from '../src/core/worker-pool.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
-import type { DaemonSession } from '../src/core/types.js';
+import { activeSessionKey, type DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
 import * as sessionStore from '../src/services/session-store.js';
+
+const getBotMock = getBot as ReturnType<typeof vi.fn>;
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
@@ -194,6 +203,24 @@ function flush(): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, 0));
 }
 
+async function primaryEffectsBarrier(): Promise<void> {
+  await flush();
+}
+
+async function deferredAndIdleBarrier(): Promise<void> {
+  await __testOnly_waitForPinStreamingCardIdle();
+  await flush();
+}
+
+function activate(ds: DaemonSession): void {
+  setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+}
+
+function setupActiveWorkerHandlers(ds: DaemonSession, worker: any): void {
+  activate(ds);
+  __testOnly_setupWorkerHandlers(ds, worker);
+}
+
 // ─── Tests ─────────────────────────────────────────────────────────────────
 
 describe('Worker ready: set_display_mode re-sync', () => {
@@ -204,6 +231,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
     vi.clearAllMocks();
     pinMessageMock.mockResolvedValue(true);
     unpinMessageMock.mockResolvedValue(true);
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code' },
+      resolvedAllowedUsers: [],
+      botOpenId: 'ou_bot',
+      botName: 'TestBot',
+    } as any);
     sessionReplyMock = vi.fn(async () => 'om_new_card');
     closeSessionMock = vi.fn();
     initWorkerPool({
@@ -212,12 +245,13 @@ describe('Worker ready: set_display_mode re-sync', () => {
       getActiveCount: () => 1,
       closeSession: closeSessionMock,
     });
+    setActiveSessionsRegistry(new Map());
   });
 
   it('does not let a stale ready Pin continuation recall the successor frozen cards', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -231,29 +265,30 @@ describe('Worker ready: set_display_mode re-sync', () => {
       ]]),
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1' });
-    await flush();
+    await primaryEffectsBarrier();
     expect(ds.streamCardId).toBe('om_new_card');
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
 
-    // A successor wins while the older Pin is still in flight. Its frozen-card
-    // state is authoritative; the old continuation may only compensate itself.
+    // A successor wins while the older Pin is still in flight. Primary recall
+    // already happened; the old continuation may only compensate its own Pin.
     ds.streamCardId = 'om_successor';
     resolvePin(true);
-    await flush();
-    await flush();
+    await deferredAndIdleBarrier();
 
-    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
-    expect(ds.frozenCards?.has('old')).toBe(true);
+    expect(deleteMessageMock).toHaveBeenCalledTimes(1);
+    expect(ds.frozenCards?.has('old')).toBe(false);
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
   });
 
   it('does not let a stale persisted-card reuse recall or overwrite the successor', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
@@ -266,21 +301,21 @@ describe('Worker ready: set_display_mode re-sync', () => {
         messageId: 'om_frozen_predecessor', content: '', title: '', displayMode: 'hidden', replyTargetKey: 'thread:om_root',
       }]]),
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
-    await flush();
+    await primaryEffectsBarrier();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
 
     ds.streamCardId = 'om_successor';
     resolvePin(true);
-    await flush();
-    await flush();
+    await deferredAndIdleBarrier();
 
     expect(ds.streamCardId).toBe('om_successor');
-    expect(ds.frozenCards?.has('old')).toBe(true);
-    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
+    expect(ds.frozenCards?.has('old')).toBe(false);
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
   });
 
@@ -296,7 +331,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardPending: false,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
@@ -313,59 +348,62 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('schedules the successor after a turn-start Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
     const ds = makeDs({ worker: makeFakeWorker(), workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
+    activate(ds);
     const oldPost = postTurnStartingCard(ds, sessionReplyMock, 'om_turn_old');
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    await expect(oldPost).resolves.toBe(true);
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await oldPost;
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('schedules the successor after a worker-ready Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    activate(ds);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    expect(ds.streamCardId).toBe('om_new_card');
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('persists the exact shared Herdr target reported by the worker', () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'persistent_backend_target',
       target: {
@@ -393,7 +431,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'codex_service_tier',
       snapshot: {
@@ -428,7 +466,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'claude-code';
 
-    __testOnly_setupWorkerHandlers(ds, staleWorker);
+    setupActiveWorkerHandlers(ds, staleWorker);
     expect(ds.codexServiceTier).toBeUndefined();
     ds.worker = replacement;
     staleWorker.emit('message', {
@@ -454,7 +492,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     updateMessageMock.mockClear();
     fakeWorker.emit('message', { type: 'codex_service_tier', snapshot: null });
     await flush();
@@ -468,7 +506,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const ds = makeDs({ worker: fakeWorker, workerPort: null, streamCardId: undefined });
     ds.session.cliId = 'codex';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     ds.pendingCodexTierCardRefresh = true;
     fakeWorker.emit('message', {
       type: 'codex_service_tier',
@@ -486,7 +524,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ streamCardPending: true, streamCardId: undefined, worker: fakeWorker });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready',
       port: 9999,
@@ -527,8 +565,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -564,8 +603,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       workerReady: true,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'screen_update',
       content: 'working in topic A',
@@ -582,6 +622,35 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(ds.streamCardReplyTargetKey).toBe('thread:om_topic_a');
   });
 
+  it('screen_update POST discards stale results once remote retirement starts waiting', async () => {
+    let resolvePost!: (messageId: string) => void;
+    sessionReplyMock.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolvePost = resolve;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardId: undefined,
+      workerReady: true,
+      worker: fakeWorker,
+    });
+    activate(ds);
+
+    setupActiveWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'screen_update', content: 'working', status: 'working' });
+    await flush();
+    expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
+
+    ds.remoteCloseState = { phase: 'preparing', requestId: 'close-screen-update' } as any;
+    resolvePost('om_retired_screen_card');
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBeUndefined();
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_retired_screen_card');
+    expect(pinMessageMock).not.toHaveBeenCalledWith('app_test', 'om_retired_screen_card');
+  });
+
   it('leaves a successor card intact when a stale screen-update POST rejects', async () => {
     let rejectPost!: (error: Error) => void;
     sessionReplyMock.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => {
@@ -595,7 +664,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'screen_update', content: 'first', status: 'working' });
     await flush();
     expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
@@ -611,27 +680,29 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('schedules the successor after a screen-update Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
       resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
     } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    activate(ds);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'screen_update', content: 'old', status: 'working', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    expect(ds.streamCardId).toBe('om_new_card');
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('treats port=0 as ready without Web Terminal and keeps screen/screenshot state flowing', async () => {
@@ -643,8 +714,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
       displayMode: 'screenshot',
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 0, token: 'unused', viewToken: 'unused-view' });
     await flush();
 
@@ -683,8 +755,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       lastScreenContent: 'current generation',
       lastScreenStatus: 'working',
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, staleWorker);
+    setupActiveWorkerHandlers(ds, staleWorker);
     staleWorker.emit('message', { type: 'ready', port: 9999, token: 'stale-token' });
     staleWorker.emit('message', {
       type: 'screen_update',
@@ -715,8 +788,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_doc' });
     await flush();
 
@@ -736,8 +810,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'tui_prompt',
       description: 'Approve command?',
@@ -760,8 +835,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -773,6 +849,33 @@ describe('Worker ready: set_display_mode re-sync', () => {
     );
   });
 
+  it('ready POST discards stale results once remote retirement starts waiting', async () => {
+    let resolvePost!: (messageId: string) => void;
+    sessionReplyMock.mockImplementationOnce(() => new Promise<string>((resolve) => {
+      resolvePost = resolve;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardId: undefined,
+      worker: fakeWorker,
+    });
+
+    setupActiveWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_ready' });
+    await flush();
+    expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
+
+    ds.remoteCloseState = { phase: 'preparing', requestId: 'close-ready' } as any;
+    resolvePost('om_retired_ready_card');
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBeUndefined();
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_retired_ready_card');
+    expect(pinMessageMock).not.toHaveBeenCalledWith('app_test', 'om_retired_ready_card');
+  });
+
   it('POST path does NOT send set_display_mode when displayMode is hidden', async () => {
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({
@@ -782,7 +885,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -810,7 +913,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       content: 'pending',
     }];
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'turn-pending',
     });
@@ -833,7 +936,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     updateMessageMock.mockResolvedValueOnce(undefined);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -849,6 +952,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('silent recovery restores screenshot mode without touching the streaming card', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({
       displayMode: 'screenshot',
@@ -858,16 +967,20 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
-    await flush();
+    await primaryEffectsBarrier();
 
     expect(updateMessageMock).not.toHaveBeenCalled();
     expect(sessionReplyMock).not.toHaveBeenCalled();
+    expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_existing_card');
     expect(fakeWorker.send).toHaveBeenCalledWith({
       type: 'set_display_mode',
       mode: 'screenshot',
     });
+
+    resolvePin(true);
+    await deferredAndIdleBarrier();
   });
 
   it('sentinel early-break (in-flight card POST) still sends set_display_mode', async () => {
@@ -886,7 +999,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -902,7 +1015,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
     // card will ever be posted" shape. The mode re-sync must not be tied to
     // card delivery. Implementation is restored in finally: clearAllMocks()
     // does not undo a leaked mockImplementation for later tests.
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', apiOnly: true },
@@ -919,7 +1031,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
       await flush();
 
@@ -933,7 +1045,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('streamingCardDisabled ready still sends set_display_mode', async () => {
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', disableStreamingCard: true },
@@ -950,7 +1061,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
       await flush();
 
@@ -966,7 +1077,6 @@ describe('Worker ready: set_display_mode re-sync', () => {
   it('suppressed managed turn screenshot never lands in currentImageKey', async () => {
     // With the early re-sync, a worker can be uploading during a managed/silent
     // turn — that frame must not become the next visible card's image.
-    const getBotMock = vi.mocked(getBot);
     const originalGetBot = getBotMock.getMockImplementation();
     getBotMock.mockImplementation((() => ({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', apiOnly: true },
@@ -983,7 +1093,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
         worker: fakeWorker,
       });
 
-      __testOnly_setupWorkerHandlers(ds, fakeWorker);
+      setupActiveWorkerHandlers(ds, fakeWorker);
       fakeWorker.emit('message', {
         type: 'screenshot_uploaded',
         imageKey: 'img_managed_frame',
@@ -1015,7 +1125,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(updateMessageMock).toHaveBeenCalledTimes(1);
@@ -1047,7 +1157,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1071,7 +1181,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1095,8 +1205,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1',
     });
@@ -1133,8 +1244,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
 
@@ -1156,8 +1268,9 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardPendingTurnId: 'om_turn_1',
       worker: fakeWorker,
     });
+    activate(ds);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', {
       type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1',
     });
@@ -1203,13 +1316,14 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: 'om_existing_card',
       workingDir: '/tmp',
     });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
     ds.adoptedFrom = { source: 'tmux', tmuxTarget: 'dev:1.2', cliId: 'traex', cwd: '/tmp' };
     ds.session.adoptedFrom = { source: 'tmux', tmuxTarget: 'dev:1.2', cliId: 'traex', cwd: '/tmp' };
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'cli_session_id', cliSessionId: 'trae-native-ready' });
     await flush();
 
@@ -1233,11 +1347,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
       streamCardId: undefined,
       workingDir: '/tmp',
     });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
@@ -1268,11 +1383,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
     updateMessageMock.mockRejectedValueOnce(new Error('fallback PATCH failed'));
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({ worker: fakeWorker, workingDir: '/tmp' });
+    activate(ds);
     ds.session.cliId = 'traex';
     ds.session.cliSessionId = undefined;
     ds.session.workingDir = '/tmp';
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
@@ -1298,7 +1414,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       pendingRawInput: '/goal ship the onboarding flow',
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1341,7 +1457,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     });
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1379,7 +1495,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1416,7 +1532,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1429,7 +1545,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('prompt_ready keeps a staged-off follow-up legacy even if config is now on', async () => {
-    vi.mocked(getBot).mockReturnValue({
+    getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'codex-app', codexAppCleanInput: true },
       resolvedAllowedUsers: [],
       botOpenId: 'ou_bot',
@@ -1447,7 +1563,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     } as Partial<DaemonSession>);
     ds.session.cliId = 'codex-app' as any;
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
 
@@ -1467,7 +1583,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       pendingFollowUpInput: { userPrompt: 'x', cliInput: '<user_message>x</user_message>' },
     } as Partial<DaemonSession>);
 
-    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'prompt_ready' });
     await flush();
     expect(fakeWorker.send).not.toHaveBeenCalled();

@@ -2054,15 +2054,164 @@ function snapshotStreamingCardIds(ds: DaemonSession): string[] {
   return [...ids];
 }
 
+function snapshotStreamingCardPredecessorIds(
+  ds: DaemonSession,
+  currentMessageId: string,
+): string[] {
+  return snapshotStreamingCardIds(ds).filter(id => id !== currentMessageId);
+}
+
+const ownedStreamingCardRegistry = new Map<string, Set<string>>();
+const streamingCardMutationQueues = new Map<string, Promise<unknown>>();
+const pendingPinStreamingCardTasks = new Set<Promise<void>>();
+// Test resets deliberately drop process-local provenance while old network work
+// may still settle.  The epoch prevents that retired work from forgetting an
+// identically-named card recorded by the replacement test/session state.
+let ownedStreamingCardRegistryEpoch = 0;
+
+function trackPinStreamingCardTask(task: Promise<void>): void {
+  const tracked = task.finally(() => {
+    pendingPinStreamingCardTasks.delete(tracked);
+  });
+  pendingPinStreamingCardTasks.add(tracked);
+}
+
+type StreamingCardOwner = Pick<DaemonSession, 'larkAppId'> & {
+  session?: Pick<Session, 'sessionId'>;
+  sessionId?: string;
+};
+
+function ownedStreamingCardRegistryKey(ds: StreamingCardOwner): string {
+  return `${ds.session?.sessionId ?? ds.sessionId ?? ''}:${ds.larkAppId}`;
+}
+
+function messageMutationQueueKey(larkAppId: string, messageId: string): string {
+  return `${larkAppId}:${messageId}`;
+}
+
+function rememberOwnedStreamingCard(ds: StreamingCardOwner, messageId: string): void {
+  if (!isRealStreamingCardId(messageId)) return;
+  const key = ownedStreamingCardRegistryKey(ds);
+  let ids = ownedStreamingCardRegistry.get(key);
+  if (!ids) {
+    ids = new Set();
+    ownedStreamingCardRegistry.set(key, ids);
+  }
+  ids.add(messageId);
+}
+
+function forgetOwnedStreamingCard(ds: StreamingCardOwner, messageId: string): void {
+  if (!isRealStreamingCardId(messageId)) return;
+  const key = ownedStreamingCardRegistryKey(ds);
+  const ids = ownedStreamingCardRegistry.get(key);
+  ids?.delete(messageId);
+  if (ids?.size === 0) ownedStreamingCardRegistry.delete(key);
+}
+
+function ownedStreamingCardIds(ds: StreamingCardOwner): string[] {
+  const ids = ownedStreamingCardRegistry.get(ownedStreamingCardRegistryKey(ds));
+  if (!ids || ids.size === 0) return [];
+  return [...ids].filter(isRealStreamingCardId);
+}
+
+function queueStreamingCardMessageMutation<T>(
+  larkAppId: string,
+  messageId: string,
+  task: () => Promise<T>,
+): Promise<T> {
+  const key = messageMutationQueueKey(larkAppId, messageId);
+  const previous = streamingCardMutationQueues.get(key) ?? Promise.resolve();
+  const operation = previous.catch(() => undefined).then(task);
+  const tail = operation.catch(() => undefined);
+  streamingCardMutationQueues.set(key, tail);
+  void tail.finally(() => {
+    if (streamingCardMutationQueues.get(key) === tail) {
+      streamingCardMutationQueues.delete(key);
+    }
+  });
+  return operation;
+}
+
+function retainsLarkStreamingCardTransport(ds: DaemonSession): boolean {
+  return retainsLarkStreamingCardTransportFor(ds.larkAppId, ds.chatId);
+}
+
+function retainsLarkStreamingCardTransportFor(larkAppId: string, chatId: string): boolean {
+  try {
+    return larkTransportEnabled({ chatId, apiOnly: getBot(larkAppId).config.apiOnly });
+  } catch {
+    return false;
+  }
+}
+
+function ownsActiveStreamingCardRegistrySlot(ds: DaemonSession): boolean {
+  if (!activeSessionsRegistry) return false;
+  const key = sessionKey(sessionAnchorId(ds), ds.larkAppId);
+  return activeSessionsRegistry.get(key) === ds;
+}
+
+/** Identity captured before posting a streaming card. A successful HTTP POST is
+ * not a lifecycle commit: the route can be replaced while it is in flight. */
+export type StreamingCardPublicationFence = {
+  session: DaemonSession['session'];
+  larkAppId: string;
+  anchorId: string;
+  /** The live id expected while this POST is in flight. For resume reposts this
+   * is the prior card id: it must remain current until the fresh card commits. */
+  expectedPriorCardId: string | undefined;
+};
+
+/** Positive commit fence for a card whose POST has returned. This deliberately
+ * fails closed when the active registry is absent or empty: only the exact
+ * captured route may publish a card, delete its predecessor, or emit a
+ * receipt. */
+export function canCommitStreamingCardPublication(
+  ds: DaemonSession,
+  fence: StreamingCardPublicationFence,
+): boolean {
+  if (ds.session !== fence.session || ds.session.status !== 'active') return false;
+  if (ds.larkAppId !== fence.larkAppId || sessionAnchorId(ds) !== fence.anchorId) return false;
+  if (ds.streamCardId !== fence.expectedPriorCardId || isSessionTransferring(ds)) return false;
+  if (remoteRetirementAdmissionPhase(ds) !== null || !retainsLarkStreamingCardTransport(ds)) return false;
+  return activeSessionsRegistry?.get(sessionKey(fence.anchorId, fence.larkAppId)) === ds;
+}
+
 function ownsCurrentStreamingCard(ds: DaemonSession, messageId: string): boolean {
   if (!isRealStreamingCardId(messageId)) return false;
   if (ds.session.status !== 'active' || ds.streamCardId !== messageId || isSessionTransferring(ds)) return false;
-  const key = sessionKey(sessionAnchorId(ds), ds.larkAppId);
-  return !activeSessionsRegistry || activeSessionsRegistry.get(key) === ds;
+  if (remoteRetirementAdmissionPhase(ds) !== null || !retainsLarkStreamingCardTransport(ds)) return false;
+  return ownsActiveStreamingCardRegistrySlot(ds);
 }
 
 function pinStreamingCardEnabled(ds: DaemonSession): boolean {
-  try { return getBot(ds.larkAppId).config.pinStreamingCard === true; } catch { return false; }
+  return pinStreamingCardEnabledFor(ds.larkAppId);
+}
+
+function pinStreamingCardEnabledFor(larkAppId: string): boolean {
+  try { return getBot(larkAppId).config.pinStreamingCard === true; } catch { return false; }
+}
+
+/**
+ * Pin provenance is intentionally process-local.  A bot that never opted in
+ * must not alter an operator's manual Pin merely because a message happens to
+ * be a current/frozen streaming card.  Once opted in, cards visible in the
+ * current lifecycle snapshot are safe to retire even if a prior process did
+ * not retain the in-memory provenance.
+ */
+function captureLifecycleStreamingCardCleanupIds(
+  larkAppId: string,
+  chatId: string,
+  owner: StreamingCardOwner,
+  knownIds: readonly string[],
+): string[] {
+  if (!retainsLarkStreamingCardTransportFor(larkAppId, chatId)) return [];
+  const ids = new Set(ownedStreamingCardIds(owner));
+  if (pinStreamingCardEnabledFor(larkAppId)) {
+    for (const id of knownIds) {
+      if (isRealStreamingCardId(id)) ids.add(id);
+    }
+  }
+  return [...ids];
 }
 
 /** Pin exactly the current public streaming card.  Pin is deliberately outside
@@ -2074,55 +2223,101 @@ export async function pinStreamingCardIfEnabled(
 ): Promise<boolean> {
   if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return false;
   const appId = ds.larkAppId;
-  try {
-    const pinned = await pinMessage(appId, messageId);
-    if (!pinned) return false;
-    if (pinStreamingCardEnabled(ds) && ownsCurrentStreamingCard(ds, messageId)) return true;
-    try { await unpinMessage(appId, messageId); } catch { /* stale Pin compensation is best-effort */ }
-  } catch (err) {
-    logger.debug(`[${tag(ds)}] streaming-card Pin failed: ${err instanceof Error ? err.message : String(err)}`);
-  }
-  return false;
-}
-
-async function unpinStreamingCardIds(larkAppId: string, ids: readonly string[]): Promise<void> {
-  for (const messageId of ids) {
-    try { await unpinMessage(larkAppId, messageId); } catch (err) {
-      logger.debug(`[${larkAppId}] streaming-card Unpin failed: ${err instanceof Error ? err.message : String(err)}`);
+  const operation = queueStreamingCardMessageMutation(appId, messageId, async () => {
+    if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return false;
+    try {
+      const pinned = await pinMessage(appId, messageId);
+      if (!pinned) return false;
+      if (pinStreamingCardEnabled(ds) && ownsCurrentStreamingCard(ds, messageId)) {
+        rememberOwnedStreamingCard(ds, messageId);
+        return true;
+      }
+      try {
+        const unpinned = await unpinMessage(appId, messageId);
+        if (unpinned) forgetOwnedStreamingCard(ds, messageId);
+      } catch {
+        /* stale Pin compensation is best-effort */
+      }
+    } catch (err) {
+      logger.debug(`[${tag(ds)}] streaming-card Pin failed: ${err instanceof Error ? err.message : String(err)}`);
     }
-  }
+    return false;
+  });
+  trackPinStreamingCardTask(operation.then(() => undefined));
+  return operation;
 }
 
-/** A successor only clears predecessor Pins after it is durably current and
- * its Pin completed.  IDs are captured before awaits so an older completion
- * cannot touch a newer card. */
-async function reconcilePublishedStreamingCard(ds: DaemonSession, messageId: string): Promise<boolean> {
-  // Capture predecessors before awaiting Pin: a later successor may replace
-  // the frozen map while this publication is in flight.
-  const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== messageId);
-  if (await pinStreamingCardIfEnabled(ds, messageId) && ownsCurrentStreamingCard(ds, messageId)) {
-    await unpinStreamingCardIds(ds.larkAppId, frozenIds);
+async function unpinStreamingCardIds(
+  larkAppId: string,
+  ids: readonly string[],
+  owner?: StreamingCardOwner,
+): Promise<string[]> {
+  const succeeded: string[] = [];
+  for (const messageId of ids) {
+    const ownershipEpoch = ownedStreamingCardRegistryEpoch;
+    const operation = queueStreamingCardMessageMutation(larkAppId, messageId, async () => {
+      try {
+        const unpinned = await unpinMessage(larkAppId, messageId);
+        if (unpinned) {
+          if (owner && ownershipEpoch === ownedStreamingCardRegistryEpoch) {
+            forgetOwnedStreamingCard(owner, messageId);
+          }
+          return messageId;
+        }
+      } catch (err) {
+        logger.debug(`[${larkAppId}] streaming-card Unpin failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+      return undefined;
+    });
+    trackPinStreamingCardTask(operation.then(() => undefined));
+    const unpinnedId = await operation;
+    if (unpinnedId) succeeded.push(unpinnedId);
   }
-  // Callers must fence all post-Pin publication effects (especially recall)
-  // with the captured card identity, so an older continuation cannot mutate a
-  // successor's frozen-card state.
-  return ownsCurrentStreamingCard(ds, messageId);
+  return succeeded;
+}
+
+/** Fire-and-forget Pin QoL chain. Primary publication effects (recall,
+ * readiness flushes, timers, successor scheduling) must NOT be delayed by
+ * this best-effort API work. */
+/**
+ * Continue the best-effort Pin work for an already committed streaming-card
+ * publication.  Callers must not await this: publication-side effects such as
+ * predecessor recall and user receipts are deliberately independent from the
+ * Lark Pin API.
+ */
+export function continuePublishedStreamingCardPinChain(
+  ds: DaemonSession,
+  messageId: string,
+  predecessorIds: readonly string[] = snapshotStreamingCardPredecessorIds(ds, messageId),
+): void {
+  if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return;
+  trackPinStreamingCardTask((async () => {
+    if (await pinStreamingCardIfEnabled(ds, messageId) && ownsCurrentStreamingCard(ds, messageId)) {
+      await unpinStreamingCardIds(ds.larkAppId, predecessorIds, ds);
+    }
+  })().catch((err) => {
+    logger.debug(`[${tag(ds)}] streaming-card Pin chain failed: ${err instanceof Error ? err.message : String(err)}`);
+  }));
 }
 
 /** Reconcile one session after an opt-in setting transition.  Frozen cards are
  * session-wide here (Pins are chat-wide); recallFrozenCards remains topic-aware. */
 export async function reconcileStreamingCardPins(ds: DaemonSession, enabled: boolean): Promise<void> {
-  const ids = snapshotStreamingCardIds(ds);
+  if (!retainsLarkStreamingCardTransport(ds)) return;
+  const ids = ownedStreamingCardIds(ds);
   const currentId = isRealStreamingCardId(ds.streamCardId) ? ds.streamCardId : undefined;
-  const frozenIds = ids.filter(id => id !== currentId);
+  const frozenIds = enabled
+    ? snapshotStreamingCardIds(ds).filter(id => id !== currentId)
+    : ids.filter(id => id !== currentId);
   try {
     if (enabled) {
       if (currentId && await pinStreamingCardIfEnabled(ds, currentId)) {
-        await unpinStreamingCardIds(ds.larkAppId, frozenIds);
+        await unpinStreamingCardIds(ds.larkAppId, frozenIds, ds);
       }
       return;
     }
-    await unpinStreamingCardIds(ds.larkAppId, ids);
+    if (ids.length === 0) return;
+    await unpinStreamingCardIds(ds.larkAppId, ids, ds);
   } catch (err) {
     logger.debug(`[${tag(ds)}] streaming-card Pin reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -2194,15 +2389,25 @@ export function reconcileBotStreamingCardPins(larkAppId: string, enabled: boolea
   if (state) {
     state.desiredEnabled = enabled;
     state.desiredVersion += 1;
-    if (!state.running) void drainBotStreamingCardReconcileQueue(larkAppId);
+    if (!state.running) trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
     return;
   }
   pendingBotStreamingCardReconciles.set(larkAppId, { desiredEnabled: enabled, desiredVersion: 1, running: false });
-  void drainBotStreamingCardReconcileQueue(larkAppId);
+  trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
 }
 
 export function __testOnly_resetPinStreamingCardReconcileQueue(): void {
   pendingBotStreamingCardReconciles.clear();
+  ownedStreamingCardRegistryEpoch += 1;
+  ownedStreamingCardRegistry.clear();
+  streamingCardMutationQueues.clear();
+  pendingPinStreamingCardTasks.clear();
+}
+
+export async function __testOnly_waitForPinStreamingCardIdle(): Promise<void> {
+  while (pendingPinStreamingCardTasks.size > 0) {
+    await Promise.allSettled([...pendingPinStreamingCardTasks]);
+  }
 }
 
 /** The first visible state for a newly accepted turn.
@@ -2333,7 +2538,7 @@ export async function postTurnStartingCard(
     && !isSessionTransferring(ds)
     && ds.streamCardId === CARD_POSTING_SENTINEL
     && ds.streamCardNonce === nonce
-    && (!activeSessionsRegistry || activeSessionsRegistry.get(registryKeyAtPost) === ds);
+    && activeSessionsRegistry?.get(registryKeyAtPost) === ds;
   const stillOwnsPost = (): boolean =>
     ownsPostIdentity() && remoteRetirementAdmissionPhase(ds) === null;
   const restorePrePostIdentityForRetirement = (): boolean => {
@@ -2362,22 +2567,21 @@ export async function postTurnStartingCard(
       ds.streamCardPending = false;
       ds.streamCardPendingTurnId = undefined;
     }
+    const predecessorIds = snapshotStreamingCardPredecessorIds(ds, messageId);
     persistStreamCardState(ds);
-    const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, messageId);
-    if (publicationStillCurrent) {
-      recallFrozenCards(ds);
-      flushPendingLocalCliOpenReadinessPatch(ds);
-      flushPendingRiffUrlPatch(ds);
-      flushPendingActiveRuntimePatch(ds);
-      flushPendingCodexServiceTierPatch(ds);
-      syncUsageRefreshTimer(ds);
-      reconcilePostedStartingCard(ds, turnId, statusRevisionAtPost);
-      logger.info(`[${tag(ds)}] Posted starting card for turn ${turnId.substring(0, 12)}`);
-    }
+    recallFrozenCards(ds);
+    flushPendingLocalCliOpenReadinessPatch(ds);
+    flushPendingRiffUrlPatch(ds);
+    flushPendingActiveRuntimePatch(ds);
+    flushPendingCodexServiceTierPatch(ds);
+    syncUsageRefreshTimer(ds);
+    reconcilePostedStartingCard(ds, turnId, statusRevisionAtPost);
+    logger.info(`[${tag(ds)}] Posted starting card for turn ${turnId.substring(0, 12)}`);
+    continuePublishedStreamingCardPinChain(ds, messageId, predecessorIds);
     if ((ds.streamCardTurnGeneration ?? 0) !== generation && ds.streamCardPendingTurnId) {
       void postTurnStartingCard(ds, sessionReply, ds.streamCardPendingTurnId);
     }
-    return publicationStillCurrent;
+    return true;
   } catch (err) {
     if (!stillOwnsPost()) {
       restorePrePostIdentityForRetirement();
@@ -2414,6 +2618,8 @@ export async function postFreshStreamingCard(
 ): Promise<boolean> {
   if (isDocNativeSession(ds)) return false;
   if (!workerHasInitialized(ds)) return false;
+  if (remoteRetirementAdmissionPhase(ds)) return false;
+  if (!retainsLarkStreamingCardTransport(ds)) return false;
   const botCfg = getBot(ds.larkAppId).config;
   const effectiveCliId = sessionCliId(ds, botCfg);
   const readUrl = readableTerminalUrlFor(ds);
@@ -2469,13 +2675,27 @@ export async function postFreshStreamingCard(
     && !isSessionTransferring(ds)
     && ds.streamCardId === CARD_POSTING_SENTINEL
     && ds.streamCardNonce === postingNonce
-    && (!activeSessionsRegistry || activeSessionsRegistry.get(registryKeyAtPost) === ds);
+    && activeSessionsRegistry?.get(registryKeyAtPost) === ds;
+  const restorePrePostIdentityForRetirement = (): boolean => {
+    if (remoteRetirementAdmissionPhase(ds) === null || !ownsPost()) return false;
+    ds.streamCardId = prevCardId;
+    ds.streamCardNonce = prevNonce;
+    ds.streamCardReplyTargetKey = prevReplyTargetKey;
+    ds.streamCardPending = prevPending;
+    persistStreamCardState(ds);
+    return true;
+  };
+  const stillOwnsPost = (): boolean =>
+    ownsPost()
+    && remoteRetirementAdmissionPhase(ds) === null
+    && retainsLarkStreamingCardTransport(ds);
   try {
     const messageId = await sessionReply(
       anchorAtPost, cardJson, 'interactive', appIdAtPost, cardReplyTarget.turnId,
     );
-    if (!ownsPost()) {
+    if (!stillOwnsPost()) {
       void deleteMessage(appIdAtPost, messageId).catch(() => { /* stale result */ });
+      restorePrePostIdentityForRetirement();
       return false;
     }
     ds.streamCardId = messageId;
@@ -2486,8 +2706,8 @@ export async function postFreshStreamingCard(
     // /card forces them on, so a stale pending flag would otherwise re-POST).
     ds.streamCardPending = false;
     ds.parkedStreamCardNonce = undefined;
+    const predecessorIds = snapshotStreamingCardPredecessorIds(ds, messageId);
     persistStreamCardState(ds);
-    if (!await reconcilePublishedStreamingCard(ds, messageId)) return false;
     recallFrozenCards(ds);
     flushPendingLocalCliOpenReadinessPatch(ds);
     flushPendingRiffUrlPatch(ds);
@@ -2498,13 +2718,16 @@ export async function postFreshStreamingCard(
     // usage refresh here, now that the real id is committed and pending cleared.
     syncUsageRefreshTimer(ds);
     logger.info(`[${tag(ds)}] Posted streaming card via /card`);
+    continuePublishedStreamingCardPinChain(ds, messageId, predecessorIds);
     return true;
   } catch (err) {
-    if (ownsPost()) {
+    if (stillOwnsPost()) {
       ds.streamCardId = prevCardId;
       ds.streamCardNonce = prevNonce;
       ds.streamCardReplyTargetKey = prevReplyTargetKey;
       ds.streamCardPending = prevPending;
+    } else {
+      restorePrePostIdentityForRetirement();
     }
     flushPendingLocalCliOpenReadinessPatch(ds);
     flushPendingRiffUrlPatch(ds);
@@ -5753,7 +5976,12 @@ export async function closeSession(
   let closePinnedStreamingIds: string[] = [];
   if (closeAppId) {
     if (ds) {
-      closePinnedStreamingIds = snapshotStreamingCardIds(ds);
+      closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+        closeAppId,
+        ds.chatId,
+        ds,
+        snapshotStreamingCardIds(ds),
+      );
     } else if (stored) {
       const ids = new Set<string>();
       if (isRealStreamingCardId(stored.streamCardId)) ids.add(stored.streamCardId);
@@ -5764,7 +5992,12 @@ export async function closeSession(
       } catch (err) {
         logger.debug(`[${sessionId.slice(0, 8)}] could not load frozen cards for close Pin cleanup: ${err instanceof Error ? err.message : String(err)}`);
       }
-      closePinnedStreamingIds = [...ids];
+      closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+        closeAppId,
+        stored.chatId,
+        stored,
+        [...ids],
+      );
     }
   }
   // P1-13：关闭必须显式广播 `preview: null`。sessionStore.closeSession 会把字段从磁盘
@@ -5893,7 +6126,7 @@ export async function closeSession(
     }
     if (hadPreviewTarget) publishSessionPreviewCleared(sessionId);
     if (closeAppId && closePinnedStreamingIds.length > 0) {
-      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds);
+      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, ds ?? stored);
     }
   }
 
@@ -7274,7 +7507,12 @@ export async function transferSession(
   const oldAnchor = sessionAnchorId(ds);
   const oldChatId = ds.chatId;
   const oldStreamCardId = ds.streamCardId;
-  const sourcePinnedStreamingIds = snapshotStreamingCardIds(ds);
+  const sourcePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+    ds.larkAppId,
+    ds.chatId,
+    ds,
+    snapshotStreamingCardIds(ds),
+  );
   const oldCurrentImageKey = ds.currentImageKey;
 
   // Scratch/store cleanup above awaited. A fresh source turn may have been
@@ -7381,7 +7619,7 @@ export async function transferSession(
   // Unpin exactly the pre-commit capture: a target publication racing after
   // this point must never be selected by source cleanup.
   if (sourcePinnedStreamingIds.length > 0) {
-    void unpinStreamingCardIds(ds.larkAppId, sourcePinnedStreamingIds);
+    void unpinStreamingCardIds(ds.larkAppId, sourcePinnedStreamingIds, ds);
   }
 
   dashboardEventBus.publish({
@@ -10739,6 +10977,10 @@ function setupWorkerHandlers(
         // (if any) is left untouched. The next real user turn clears this flag
         // (rememberLastCliInput) and the normal card flow resumes.
         if (ds.suppressRecoveryCard) {
+          const currentStreamCardId = ds.streamCardId;
+          if (currentStreamCardId && ownsCurrentStreamingCard(ds, currentStreamCardId)) {
+            continuePublishedStreamingCardPinChain(ds, currentStreamCardId);
+          }
           logger.info(`[${t}] Restored session — suppressing recovery streaming card (silent restart)`);
           break;
         }
@@ -10763,7 +11005,7 @@ function setupWorkerHandlers(
             && sessionAnchorId(ds) === restoredAnchor
             && !isSessionTransferring(ds)
             && ds.streamCardId === restoredCardId
-            && (!activeSessionsRegistry || activeSessionsRegistry.get(restoredRegistryKey) === ds);
+            && activeSessionsRegistry?.get(restoredRegistryKey) === ds;
           try {
             const initTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
             // Reuse persisted nonce so existing card buttons (toggle/etc) keep working.
@@ -10811,12 +11053,8 @@ function setupWorkerHandlers(
             if (ds.codexServiceTier !== codexTierAtBuild) {
               scheduleCodexServiceTierPatch(ds);
             }
+            const predecessorIds = snapshotStreamingCardPredecessorIds(ds, restoredCardId);
             persistStreamCardState(ds);
-            await reconcileStreamingCardPins(ds, true);
-            if (!ownsRestoredCard()) break;
-            // The restored card is now the active one — withdraw any cards
-            // frozen before the daemon went down so they don't pile up in the
-            // thread on each restart.
             recallFrozenCards(ds);
             logger.info(`[${t}] Reused existing streaming card ${restoredCardId.substring(0, 12)} after worker (re)start`);
             // Auto-restart recovery: if the reused card is a still-`working`
@@ -10824,6 +11062,8 @@ function setupWorkerHandlers(
             // post-restart screen_update is typically working→working
             // (statusChanged=false) and would break before the arm choke point.
             syncUsageRefreshTimer(ds);
+            continuePublishedStreamingCardPinChain(ds, restoredCardId, predecessorIds);
+            if (!ownsRestoredCard()) break;
             break;
           } catch (err) {
             if (!ownsLifecycleMutation() || !ownsRestoredCard()) break;
@@ -10852,6 +11092,8 @@ function setupWorkerHandlers(
         const postingRegistryKey = sessionKey(postingAnchor, postingAppId);
         ds.streamCardId = CARD_POSTING_SENTINEL;
         let ownsFreshReadyPost = (): boolean => false;
+        let restoreFreshReadyPrePostIdentityForRetirement = (): boolean => false;
+        let stillOwnsFreshReadyPost = (): boolean => false;
         try {
           ds.streamCardNonce = randomBytes(4).toString('hex');
           const postingNonce = ds.streamCardNonce;
@@ -10863,7 +11105,17 @@ function setupWorkerHandlers(
             && !isSessionTransferring(ds)
             && ds.streamCardId === CARD_POSTING_SENTINEL
             && ds.streamCardNonce === postingNonce
-            && (!activeSessionsRegistry || activeSessionsRegistry.get(postingRegistryKey) === ds);
+            && activeSessionsRegistry?.get(postingRegistryKey) === ds;
+          restoreFreshReadyPrePostIdentityForRetirement = (): boolean => {
+            if (remoteRetirementAdmissionPhase(ds) === null || !ownsFreshReadyPost()) return false;
+            ds.streamCardId = undefined;
+            persistStreamCardState(ds);
+            return true;
+          };
+          stillOwnsFreshReadyPost = (): boolean =>
+            ownsFreshReadyPost()
+            && remoteRetirementAdmissionPhase(ds) === null
+            && retainsLarkStreamingCardTransport(ds);
           const initTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
           // See PATCH-branch comment above re: lastScreenStatus preference.
           // For relay (kill+fork with surviving tmux/CLI), this avoids the
@@ -10900,8 +11152,9 @@ function setupWorkerHandlers(
           const postedCardId = await scopedReply(
             streamCardJson, 'interactive', cardReplyTarget.turnId,
           );
-          if (!ownsLifecycleMutation() || !ownsFreshReadyPost()) {
+          if (!ownsLifecycleMutation() || !stillOwnsFreshReadyPost()) {
             void deleteMessage(postingAppId, postedCardId).catch(() => { /* best-effort stale-card cleanup */ });
+            restoreFreshReadyPrePostIdentityForRetirement();
             break;
           }
           ds.streamCardId = postedCardId;
@@ -10920,30 +11173,32 @@ function setupWorkerHandlers(
             ds.streamCardPendingTurnId = undefined;
           }
           ds.parkedStreamCardNonce = undefined;
+          const predecessorIds = snapshotStreamingCardPredecessorIds(ds, postedCardId);
           persistStreamCardState(ds);
-          const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, postedCardId);
-          if (publicationStillCurrent) {
-            // New card is live — recall any cards frozen by previous turns.
-            // Done after `streamCardId` is committed so we never delete the old
-            // card without a successor visible to the user.
-            recallFrozenCards(ds);
-            flushPendingLocalCliOpenReadinessPatch(ds);
-            flushPendingRiffUrlPatch(ds);
-            flushPendingActiveRuntimePatch(ds);
-            flushPendingCodexServiceTierPatch(ds);
-            // Fresh ready POST: if this turn is already `working` (e.g. relay
-            // resume where the CLI kept running), arm here — same authorized arm
-            // point as the reuse branch, now that streamCardId is the real id.
-            syncUsageRefreshTimer(ds);
-            if (!superseded) {
-              reconcilePostedStartingCard(ds, cardReplyTarget.turnId, statusRevisionAtPost);
-            }
+          // New card is live — recall any cards frozen by previous turns.
+          // Done after `streamCardId` is committed so we never delete the old
+          // card without a successor visible to the user.
+          recallFrozenCards(ds);
+          flushPendingLocalCliOpenReadinessPatch(ds);
+          flushPendingRiffUrlPatch(ds);
+          flushPendingActiveRuntimePatch(ds);
+          flushPendingCodexServiceTierPatch(ds);
+          // Fresh ready POST: if this turn is already `working` (e.g. relay
+          // resume where the CLI kept running), arm here — same authorized arm
+          // point as the reuse branch, now that streamCardId is the real id.
+          syncUsageRefreshTimer(ds);
+          if (!superseded) {
+            reconcilePostedStartingCard(ds, cardReplyTarget.turnId, statusRevisionAtPost);
           }
+          continuePublishedStreamingCardPinChain(ds, postedCardId, predecessorIds);
           if ((ds.streamCardTurnGeneration ?? 0) !== postingGeneration && ds.streamCardPendingTurnId) {
             void postTurnStartingCard(ds, cb.sessionReply, ds.streamCardPendingTurnId);
           }
         } catch (err) {
-          if (!ownsLifecycleMutation() || !ownsFreshReadyPost()) break;
+          if (!ownsLifecycleMutation() || !stillOwnsFreshReadyPost()) {
+            restoreFreshReadyPrePostIdentityForRetirement();
+            break;
+          }
           if (err instanceof MessageWithdrawnError) {
             await closeWithdrawnSessionIfLedgerEmpty(ds, 'Root message withdrawn while creating worker-ready card');
             break;
@@ -11392,12 +11647,23 @@ function setupWorkerHandlers(
             && !isSessionTransferring(ds)
             && ds.streamCardId === CARD_POSTING_SENTINEL
             && ds.streamCardNonce === postingNonce
-            && (!activeSessionsRegistry || activeSessionsRegistry.get(postingRegistryKey) === ds);
+            && activeSessionsRegistry?.get(postingRegistryKey) === ds;
+          const restoreFreshScreenPrePostIdentityForRetirement = (): boolean => {
+            if (remoteRetirementAdmissionPhase(ds) === null || !ownsFreshScreenPost()) return false;
+            ds.streamCardId = undefined;
+            persistStreamCardState(ds);
+            return true;
+          };
+          const stillOwnsFreshScreenPost = (): boolean =>
+            ownsFreshScreenPost()
+            && remoteRetirementAdmissionPhase(ds) === null
+            && retainsLarkStreamingCardTransport(ds);
           const cardReplyTarget = captureStreamingCardReplyTarget(ds, msg.turnId);
           scopedReply(cardJson, 'interactive', cardReplyTarget.turnId)
             .then(async msgId => {
-              if (!ownsLifecycleMutation() || !ownsFreshScreenPost()) {
+              if (!ownsLifecycleMutation() || !stillOwnsFreshScreenPost()) {
                 void deleteMessage(postingAppId, msgId).catch(() => { /* best-effort stale-card cleanup */ });
+                restoreFreshScreenPrePostIdentityForRetirement();
                 return;
               }
               ds.streamCardId = msgId;
@@ -11405,31 +11671,33 @@ function setupWorkerHandlers(
               const superseded = (ds.streamCardTurnGeneration ?? 0) !== postingGeneration;
               if (!superseded) ds.streamCardPendingTurnId = undefined;
               ds.parkedStreamCardNonce = undefined;
+              const predecessorIds = snapshotStreamingCardPredecessorIds(ds, msgId);
               persistStreamCardState(ds);
-              const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, msgId);
-              if (publicationStillCurrent) {
-                // New card live — recall any cards parked by previous turns
-                // (user message, bot @mention, adopt-bridge new turn, etc.).
-                // This is the main turn-to-turn POST path; without recall here,
-                // every long session would leak old streaming cards into the
-                // thread.
-                recallFrozenCards(ds);
-                flushPendingLocalCliOpenReadinessPatch(ds);
-                flushPendingRiffUrlPatch(ds);
-                flushPendingActiveRuntimePatch(ds);
-                flushPendingCodexServiceTierPatch(ds);
-                // New-turn POST is the FIRST working screen_update of the turn —
-                // the else (same-turn PATCH) branch never runs for it, so arm the
-                // periodic usage refresh here (once the real card id exists, not
-                // the POSTING sentinel). syncUsageRefreshTimer re-checks state.
-                syncUsageRefreshTimer(ds);
-              }
+              // New card live — recall any cards parked by previous turns
+              // (user message, bot @mention, adopt-bridge new turn, etc.).
+              // This is the main turn-to-turn POST path; without recall here,
+              // every long session would leak old streaming cards into the
+              // thread.
+              recallFrozenCards(ds);
+              flushPendingLocalCliOpenReadinessPatch(ds);
+              flushPendingRiffUrlPatch(ds);
+              flushPendingActiveRuntimePatch(ds);
+              flushPendingCodexServiceTierPatch(ds);
+              // New-turn POST is the FIRST working screen_update of the turn —
+              // the else (same-turn PATCH) branch never runs for it, so arm the
+              // periodic usage refresh here (once the real card id exists, not
+              // the POSTING sentinel). syncUsageRefreshTimer re-checks state.
+              syncUsageRefreshTimer(ds);
+              continuePublishedStreamingCardPinChain(ds, msgId, predecessorIds);
               if ((ds.streamCardTurnGeneration ?? 0) !== postingGeneration && ds.streamCardPendingTurnId) {
                 void postTurnStartingCard(ds, cb.sessionReply, ds.streamCardPendingTurnId);
               }
             })
             .catch(async err => {
-              if (!ownsLifecycleMutation() || !ownsFreshScreenPost()) return;
+              if (!ownsLifecycleMutation() || !stillOwnsFreshScreenPost()) {
+                restoreFreshScreenPrePostIdentityForRetirement();
+                return;
+              }
               if (err instanceof MessageWithdrawnError) {
                 await closeWithdrawnSessionIfLedgerEmpty(ds, 'Root message withdrawn while creating streaming card');
                 return;
