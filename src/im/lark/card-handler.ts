@@ -90,7 +90,7 @@ import { logger } from '../../utils/logger.js';
 import * as sessionStore from '../../services/session-store.js';
 import { loadFrozenCards, saveFrozenCards } from '../../services/frozen-card-store.js';
 import { resumeStartsFresh } from '../../services/resume-fresh-policy.js';
-import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, buildStreamingCardJson, silentIdleCardFlag, type WorkerSessionReplyOptions } from '../../core/worker-pool.js';
+import { forkWorker, sendWorkerInput, sendWorkerSessionInput, killWorker, closeSession as closeWorkerPoolSession, teardownAuthoritativePersistentBackingBeforeClose, scheduleCardPatch, parkStreamCard, clearUsageLimitState, cardUsageLimit, writableTerminalLinkFor, workerHasInitialized, sessionSupportsWebTerminal, readableTerminalUrlFor, resolvePrivateCardAudience, deliverWriteLinkCard, deliverEphemeralOrReply, CARD_POSTING_SENTINEL, requestSessionRestart, isSessionTransferring, getDaemonStreamingCardUsageSnapshot, withActiveSessionKeyLock, buildStreamingCardJson, pinStreamingCardIfEnabled, silentIdleCardFlag, type WorkerSessionReplyOptions } from '../../core/worker-pool.js';
 import { getSessionWorkingDir, buildNewTopicCliInput, getAvailableBots, persistStreamCardState, resumeSession, rememberLastCliInput, ensureSessionWhiteboard } from '../../core/session-manager.js';
 import { markInitialUserTurnPending } from '../../core/initial-user-turn.js';
 import { publishAttentionPatch, publishClosedSessionPatch, announcePendingRepoSession } from '../../core/session-activity.js';
@@ -2690,11 +2690,26 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
           if (cardMessageId && value?.visibility !== 'private' && !botCfgResume.privateCard) {
             const staleCardId = cardMessageId;
             const resumedDs = result.ds;
+            const resumedSession = resumedDs.session;
+            const resumedAppId = resumedDs.larkAppId;
+            const priorCardId = resumedDs.streamCardId;
             void (async () => {
               try {
                 const freshCardId = await sessionReply(rootId, buildStreamingCardJson(resumedDs), 'interactive');
+                if (
+                  resumedDs.session !== resumedSession
+                  || resumedDs.session.status !== 'active'
+                  || resumedDs.larkAppId !== resumedAppId
+                  || (activeSessions.size > 0 && activeSessions.get(activeSessionKey(resumedDs)) !== resumedDs)
+                  || isSessionTransferring(resumedDs)
+                  || resumedDs.streamCardId !== priorCardId
+                ) {
+                  void deleteMessage(resumedAppId, freshCardId).catch(() => { /* stale repost */ });
+                  return;
+                }
                 resumedDs.streamCardId = freshCardId;
                 persistStreamCardState(resumedDs);
+                await pinStreamingCardIfEnabled(resumedDs, freshCardId);
                 await deleteMessage(resumedDs.larkAppId, staleCardId).catch(() => { /* already withdrawn/expired */ });
                 // Also send the "✅ 会话已恢复…" text follow-up (the original resume
                 // behavior). Both are wanted: the live streaming card AND the text
