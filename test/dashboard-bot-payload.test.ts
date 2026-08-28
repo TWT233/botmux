@@ -20,7 +20,7 @@ describe('dashboard bot payload helpers', () => {
       'customPassthroughCommands', 'defaultOncall', 'defaultWorkingDir',
       'defaultWorkingDirAutoWorktree', 'disableStreamingCard', 'docSubscribeDefaultMode',
       'envelopeInjection', 'env', 'grantDefaultDurationMs', 'launchShell', 'maxLiveWorkers', 'messageQuotaDefaultLimit', 'model',
-      'feedback',
+      'feedback', 'pinStreamingCard',
       'overloadAlert', 'p2pMode', 'p2pOpen', 'privateCard', 'regularGroupMentionMode',
       'regularGroupReplyMode', 'restrictGrantCommands', 'riff', 'sandbox', 'sandboxPaths',
       'silentTurnReactions', 'skillInjection', 'startupCommands', 'substituteMode',
@@ -179,6 +179,21 @@ describe('dashboard bot payload helpers', () => {
     expect(botDefaultsPayload(daemon, {})).toMatchObject({ codexAppCleanInput: false });
     expect(botDefaultsPayload(daemon, { codexAppCleanInput: true }))
       .toMatchObject({ codexAppCleanInput: true });
+  });
+
+  it('projects pinStreamingCard as an explicit default-off boolean', () => {
+    const daemon = { larkAppId: 'app_pin', botName: 'Pin', cliId: 'codex' };
+    expect(botDefaultsPayload(daemon, {})).toMatchObject({ pinStreamingCard: false });
+    expect(botDefaultsPayload(daemon, { pinStreamingCard: true }))
+      .toMatchObject({ pinStreamingCard: true });
+    expect(botDefaultsPayload(daemon, { pinStreamingCard: false }))
+      .toMatchObject({ pinStreamingCard: false });
+    expect(botDefaultsPayload(daemon, { pinStreamingCard: 'true' }))
+      .toMatchObject({ pinStreamingCard: false });
+    expect(botDefaultsPayload(daemon, { pinStreamingCard: 1 }))
+      .toMatchObject({ pinStreamingCard: false });
+    expect(botDefaultsPayload(daemon, { pinStreamingCard: null }))
+      .toMatchObject({ pinStreamingCard: false });
   });
 
   it('projects hook envelope injection so the dashboard preserves it after refresh', () => {

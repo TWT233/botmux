@@ -1757,6 +1757,10 @@ export interface BotConfig {
    */
   disableStreamingCard?: boolean;
   /**
+   * Pin the current public streaming card. Default false; best-effort only.
+   */
+  pinStreamingCard?: boolean;
+  /**
    * Stream the model's thinking process (CoT) into a native Feishu CoT
    * message per turn: a fixed-height scrolling bubble showing thinking
    * paragraphs and tool calls as nodes, auto-collapsing when the turn settles.
@@ -3207,6 +3211,7 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         ? undefined
         : normalizeUsageDisplay(entry),
       disableStreamingCard: entry.disableStreamingCard === true || undefined,
+      pinStreamingCard: entry.pinStreamingCard === true || undefined,
       // Default ON: only an explicit false is meaningful/persisted (undefined = on).
       thinkingCard: entry.thinkingCard === false ? false : undefined,
       // Default ON, same convention as thinkingCard: an absent key means the

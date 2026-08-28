@@ -90,6 +90,19 @@ describe('bot-registry grant additions', () => {
     expect((cfgs[5] as any).showUsageInCardFooter).toBeUndefined();
   });
 
+  it('parses pinStreamingCard only as strict boolean true', () => {
+    expect(parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'pin1', larkAppSecret: 's', pinStreamingCard: true },
+    ]))[0].pinStreamingCard).toBe(true);
+
+    for (const bad of [undefined, false, 'true', 1, null]) {
+      const [cfg] = parseBotConfigsFromText(JSON.stringify([
+        { larkAppId: 'pin2', larkAppSecret: 's', pinStreamingCard: bad },
+      ]));
+      expect(cfg.pinStreamingCard).toBeUndefined();
+    }
+  });
+
   it('getOwnerOpenId returns first ou_ in resolvedAllowedUsers', () => {
     registerBot({ larkAppId: 'a2', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['x@y.com', 'ou_owner', 'ou_2'] });
     expect(getOwnerOpenId('a2')).toBe('ou_owner');

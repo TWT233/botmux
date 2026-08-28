@@ -493,6 +493,7 @@ export const messages: Record<string, string> = {
   'card.config.p2p.chat': '💬 chat (continuous session, default)',
   'card.config.p2p.group': '👥 group (a dedicated session group per DM)',
   'config.label.disableStreamingCard': 'Disable live card',
+  'config.label.pinStreamingCard': 'Pin live card',
   'config.label.usageDisplay': 'Usage display',
   'config.label.silentTurnReactions': 'Disable status reactions',
   'config.label.writableTerminalLinkInCard': 'Writable terminal in card',

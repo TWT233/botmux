@@ -840,6 +840,78 @@ describe('PUT /api/bot-card-prefs — Codex App clean history', () => {
   });
 });
 
+describe('PUT /api/bot-card-prefs — pin streaming card', () => {
+  it('is default-off, preserves unrelated partial patches, and rejects non-boolean writes', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-pin-streaming-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-pin-streaming-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'codex',
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const base = `http://127.0.0.1:${handle.port}`;
+
+      const initial = await (await fetch(`${base}/api/bot-default-oncall`)).json();
+      expect(initial.pinStreamingCard).toBe(false);
+
+      const on = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pinStreamingCard: true }),
+      });
+      expect(on.status).toBe(200);
+      expect(await on.json()).toMatchObject({ ok: true, pinStreamingCard: true });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].pinStreamingCard).toBe(true);
+      expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).pinStreamingCard).toBe(true);
+
+      const unrelated = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ silentTurnReactions: true }),
+      });
+      expect(unrelated.status).toBe(200);
+      expect(await unrelated.json()).toMatchObject({
+        ok: true,
+        silentTurnReactions: true,
+        pinStreamingCard: true,
+      });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].pinStreamingCard).toBe(true);
+      expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).pinStreamingCard).toBe(true);
+
+      const off = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pinStreamingCard: false }),
+      });
+      expect(off.status).toBe(200);
+      expect(await off.json()).toMatchObject({ ok: true, pinStreamingCard: false });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].pinStreamingCard).toBeUndefined();
+      expect((await (await fetch(`${base}/api/bot-default-oncall`)).json()).pinStreamingCard).toBe(false);
+
+      const bogus = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pinStreamingCard: 'true' }),
+      });
+      expect(bogus.status).toBe(400);
+      expect(await bogus.json()).toMatchObject({ ok: false, error: 'no_valid_fields' });
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('PUT /api/bot-card-prefs — summary memory', () => {
   it('surfaces the persisted memory toggle and path in the Bot Defaults refresh payload', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-summary-memory-'));

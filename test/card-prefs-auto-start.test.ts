@@ -59,6 +59,7 @@ describe('card-prefs store — 主动开工 fields', () => {
     registry.loadBotConfigs().forEach(c => registry.registerBot(c));
 
     const prefs = store.getBotCardPrefs('app_default');
+    expect(prefs.pinStreamingCard).toBe(false);
     expect(prefs.autoStartOnGroupJoin).toBe(false);
     expect(prefs.autoStartOnNewTopic).toBe(false);
     expect(prefs.codexAppCleanInput).toBe(false);
@@ -144,6 +145,24 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(registry.getBot('app_default').config.codexAppCleanInput).toBeUndefined();
   });
 
+  it('pinStreamingCard is default-off and round-trips without a restart', async () => {
+    writeConfig();
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    expect(store.getBotCardPrefs('app_default').pinStreamingCard).toBe(false);
+
+    const on = await store.updateBotCardPrefs('app_default', { pinStreamingCard: true });
+    expect(on.ok && on.prefs.pinStreamingCard).toBe(true);
+    expect(readConfig().pinStreamingCard).toBe(true);
+    expect(registry.getBot('app_default').config.pinStreamingCard).toBe(true);
+
+    const off = await store.updateBotCardPrefs('app_default', { pinStreamingCard: false });
+    expect(off.ok && off.prefs.pinStreamingCard).toBe(false);
+    expect(readConfig().pinStreamingCard).toBeUndefined();
+    expect(registry.getBot('app_default').config.pinStreamingCard).toBeUndefined();
+  });
+
   it('botToBotSameDir is default-TRUE: persists only explicit false, clears on true', async () => {
     writeConfig();
     const { registry, store } = await freshModules();
@@ -208,5 +227,21 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(disk.autoStartOnGroupJoin).toBe(true);
     expect(disk.autoStartOnNewTopic).toBe(true);
     expect(disk.regularGroupReplyMode).toBe('new-topic');
+  });
+
+  it('partial patch preserves existing pinStreamingCard on disk, in memory, and in returned prefs', async () => {
+    writeConfig({ pinStreamingCard: true, autoStartOnNewTopic: true });
+    const { registry, store } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+
+    const result = await store.updateBotCardPrefs('app_default', { autoStartOnGroupJoin: true });
+
+    expect(result.ok).toBe(true);
+    if (result.ok) {
+      expect(result.prefs.pinStreamingCard).toBe(true);
+      expect(result.prefs.autoStartOnGroupJoin).toBe(true);
+    }
+    expect(readConfig().pinStreamingCard).toBe(true);
+    expect(registry.getBot('app_default').config.pinStreamingCard).toBe(true);
   });
 });

@@ -693,6 +693,7 @@ function patchCardPrefsFromBody(bot: BotDefaultsRow, body: any): BotDefaultsRow 
     ...bot,
     usageDisplay: body.usageDisplay,
     disableStreamingCard: body.disableStreamingCard,
+    pinStreamingCard: body.pinStreamingCard,
     silentTurnReactions: body.silentTurnReactions,
     codexAppCleanInput: body.codexAppCleanInput,
     writableTerminalLinkInCard: body.writableTerminalLinkInCard,
@@ -3524,6 +3525,7 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   const { bot, putCardPref } = props;
   const [usageDisplay, setUsageDisplay] = useState<'streaming' | 'footer' | 'off'>(bot.usageDisplay ?? 'streaming');
   const [disableStreaming, setDisableStreaming] = useState(bot.disableStreamingCard === true);
+  const [pinStreamingCard, setPinStreamingCard] = useState(bot.pinStreamingCard === true);
   const [silentReactions, setSilentReactions] = useState(bot.silentTurnReactions === true);
   const [writableLink, setWritableLink] = useState(bot.writableTerminalLinkInCard === true);
   const [privateCard, setPrivateCard] = useState(bot.privateCard === true);
@@ -3534,11 +3536,12 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
   useEffect(() => {
     setUsageDisplay(bot.usageDisplay ?? 'streaming');
     setDisableStreaming(bot.disableStreamingCard === true);
+    setPinStreamingCard(bot.pinStreamingCard === true);
     setSilentReactions(bot.silentTurnReactions === true);
     setWritableLink(bot.writableTerminalLinkInCard === true);
     setPrivateCard(bot.privateCard === true);
     setThinkingCard(bot.thinkingCard !== false);
-  }, [bot.disableStreamingCard, bot.privateCard, bot.thinkingCard, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
+  }, [bot.disableStreamingCard, bot.pinStreamingCard, bot.privateCard, bot.thinkingCard, bot.usageDisplay, bot.silentTurnReactions, bot.writableTerminalLinkInCard]);
 
   async function savePatch(patch: CardPrefPatch, key: string, rollback?: () => void): Promise<void> {
     setBusy(key);
@@ -3643,6 +3646,23 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
             </div>
           )}
           <div className="bd-card-control-list">
+            <ToggleRow
+              checked={pinStreamingCard}
+              disabled={busy !== null}
+              dataAction="toggle-pin-streaming-card"
+              title={tr('botDefaults.pinStreamingCard')}
+              description={tr('botDefaults.pinStreamingCardDescription')}
+              help={tr('botDefaults.pinStreamingCardHelp')}
+              onChange={checked => {
+                const previous = pinStreamingCard;
+                setPinStreamingCard(checked);
+                void savePatch(
+                  { pinStreamingCard: checked },
+                  'pin-streaming',
+                  () => setPinStreamingCard(previous),
+                );
+              }}
+            />
             <ToggleRow
               checked={writableLink}
               disabled={busy !== null}
