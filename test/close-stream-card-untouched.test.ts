@@ -5,10 +5,13 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the Lark client so we can observe deleteMessage without real API calls.
-const { deleteMessage } = vi.hoisted(() => ({ deleteMessage: vi.fn(async () => undefined) }));
+const { deleteMessage, unpinMessage } = vi.hoisted(() => ({
+  deleteMessage: vi.fn(async () => undefined),
+  unpinMessage: vi.fn(async () => true),
+}));
 vi.mock('../src/im/lark/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
-  return { ...actual, deleteMessage };
+  return { ...actual, deleteMessage, unpinMessage };
 });
 
 import { config } from '../src/config.js';
@@ -44,6 +47,7 @@ function makeDs(sessionId: string, appId: string, streamCardId: string) {
 describe('closeSession leaves the streaming card alone', () => {
   beforeEach(() => {
     deleteMessage.mockClear();
+    unpinMessage.mockClear();
   });
   afterEach(() => {
     workerPool.setActiveSessionsRegistry(new Map());
@@ -70,6 +74,7 @@ describe('closeSession leaves the streaming card alone', () => {
       await workerPool.closeSession(s.sessionId, { awaitWorkerExit: false });
 
       expect(deleteMessage).not.toHaveBeenCalledWith('app-close-card', 'om_stream_card');
+      expect(unpinMessage).toHaveBeenCalledWith('app-close-card', 'om_stream_card');
       expect(sessionStore.getSession(s.sessionId)?.status).toBe('closed');
     } finally {
       config.session.dataDir = prev;

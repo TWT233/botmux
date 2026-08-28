@@ -2096,15 +2096,17 @@ async function unpinStreamingCardIds(larkAppId: string, ids: readonly string[]):
 /** A successor only clears predecessor Pins after it is durably current and
  * its Pin completed.  IDs are captured before awaits so an older completion
  * cannot touch a newer card. */
-async function unpinFrozenStreamingCardsAfterSuccessorPin(ds: DaemonSession, currentId: string): Promise<void> {
-  const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== currentId);
-  await unpinStreamingCardIds(ds.larkAppId, frozenIds);
-}
-
-async function reconcilePublishedStreamingCard(ds: DaemonSession, messageId: string): Promise<void> {
-  if (await pinStreamingCardIfEnabled(ds, messageId)) {
-    await unpinFrozenStreamingCardsAfterSuccessorPin(ds, messageId);
+async function reconcilePublishedStreamingCard(ds: DaemonSession, messageId: string): Promise<boolean> {
+  // Capture predecessors before awaiting Pin: a later successor may replace
+  // the frozen map while this publication is in flight.
+  const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== messageId);
+  if (await pinStreamingCardIfEnabled(ds, messageId) && ownsCurrentStreamingCard(ds, messageId)) {
+    await unpinStreamingCardIds(ds.larkAppId, frozenIds);
   }
+  // Callers must fence all post-Pin publication effects (especially recall)
+  // with the captured card identity, so an older continuation cannot mutate a
+  // successor's frozen-card state.
+  return ownsCurrentStreamingCard(ds, messageId);
 }
 
 /** Reconcile one session after an opt-in setting transition.  Frozen cards are
@@ -2295,7 +2297,7 @@ export async function postTurnStartingCard(
       ds.streamCardPendingTurnId = undefined;
     }
     persistStreamCardState(ds);
-    await reconcilePublishedStreamingCard(ds, messageId);
+    if (!await reconcilePublishedStreamingCard(ds, messageId)) return false;
     recallFrozenCards(ds);
     flushPendingLocalCliOpenReadinessPatch(ds);
     flushPendingRiffUrlPatch(ds);
@@ -2417,7 +2419,7 @@ export async function postFreshStreamingCard(
     ds.streamCardPending = false;
     ds.parkedStreamCardNonce = undefined;
     persistStreamCardState(ds);
-    await reconcilePublishedStreamingCard(ds, messageId);
+    if (!await reconcilePublishedStreamingCard(ds, messageId)) return false;
     recallFrozenCards(ds);
     flushPendingLocalCliOpenReadinessPatch(ds);
     flushPendingRiffUrlPatch(ds);
@@ -10838,7 +10840,7 @@ function setupWorkerHandlers(
           }
           ds.parkedStreamCardNonce = undefined;
           persistStreamCardState(ds);
-          await reconcilePublishedStreamingCard(ds, postedCardId);
+          if (!await reconcilePublishedStreamingCard(ds, postedCardId)) break;
           // New card is live — recall any cards frozen by previous turns.
           // Done after `streamCardId` is committed so we never delete the old
           // card without a successor visible to the user.
@@ -11321,7 +11323,7 @@ function setupWorkerHandlers(
               if (!superseded) ds.streamCardPendingTurnId = undefined;
               ds.parkedStreamCardNonce = undefined;
               persistStreamCardState(ds);
-              await reconcilePublishedStreamingCard(ds, msgId);
+              if (!await reconcilePublishedStreamingCard(ds, msgId)) return;
               // New card live — recall any cards parked by previous turns
               // (user message, bot @mention, adopt-bridge new turn, etc.).
               // This is the main turn-to-turn POST path; without recall here,
@@ -11342,7 +11344,7 @@ function setupWorkerHandlers(
               }
             })
             .catch(async err => {
-              if (!ownsLifecycleMutation()) return;
+              if (!ownsLifecycleMutation() || !ownsFreshScreenPost()) return;
               if (err instanceof MessageWithdrawnError) {
                 await closeWithdrawnSessionIfLedgerEmpty(ds, 'Root message withdrawn while creating streaming card');
                 return;

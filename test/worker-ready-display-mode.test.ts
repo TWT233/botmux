@@ -19,6 +19,9 @@ import { EventEmitter } from 'node:events';
 // ─── Mocks ─────────────────────────────────────────────────────────────────
 
 const updateMessageMock = vi.fn(async () => {});
+const deleteMessageMock = vi.fn(async () => {});
+const pinMessageMock = vi.fn(async () => true);
+const unpinMessageMock = vi.fn(async () => true);
 const { loggerInfoMock } = vi.hoisted(() => ({ loggerInfoMock: vi.fn() }));
 
 vi.mock('../src/im/lark/client.js', () => {
@@ -27,7 +30,9 @@ vi.mock('../src/im/lark/client.js', () => {
   }
   return {
     updateMessage: (...args: any[]) => updateMessageMock(...args),
-    deleteMessage: vi.fn(async () => {}),
+    deleteMessage: (...args: any[]) => deleteMessageMock(...args),
+    pinMessage: (...args: any[]) => pinMessageMock(...args),
+    unpinMessage: (...args: any[]) => unpinMessageMock(...args),
     MessageWithdrawnError,
   };
 });
@@ -197,6 +202,8 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
   beforeEach(() => {
     vi.clearAllMocks();
+    pinMessageMock.mockResolvedValue(true);
+    unpinMessageMock.mockResolvedValue(true);
     sessionReplyMock = vi.fn(async () => 'om_new_card');
     closeSessionMock = vi.fn();
     initWorkerPool({
@@ -205,6 +212,42 @@ describe('Worker ready: set_display_mode re-sync', () => {
       getActiveCount: () => 1,
       closeSession: closeSessionMock,
     });
+  });
+
+  it('does not let a stale ready Pin continuation recall the successor frozen cards', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardPendingTurnId: 'om_turn_1',
+      streamCardId: undefined,
+      frozenCards: new Map([[
+        'old', { messageId: 'om_frozen_predecessor', content: '', title: '', displayMode: 'hidden', replyTargetKey: 'thread:om_root' },
+      ]]),
+      worker: fakeWorker,
+    });
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1' });
+    await flush();
+    expect(ds.streamCardId).toBe('om_new_card');
+    expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
+
+    // A successor wins while the older Pin is still in flight. Its frozen-card
+    // state is authoritative; the old continuation may only compensate itself.
+    ds.streamCardId = 'om_successor';
+    resolvePin(true);
+    await flush();
+    await flush();
+
+    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
+    expect(ds.frozenCards?.has('old')).toBe(true);
+    expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
   });
 
   it('persists the exact shared Herdr target reported by the worker', () => {
@@ -426,6 +469,32 @@ describe('Worker ready: set_display_mode re-sync', () => {
     await flush();
 
     expect(ds.streamCardReplyTargetKey).toBe('thread:om_topic_a');
+  });
+
+  it('leaves a successor card intact when a stale screen-update POST rejects', async () => {
+    let rejectPost!: (error: Error) => void;
+    sessionReplyMock.mockImplementationOnce(() => new Promise<string>((_resolve, reject) => {
+      rejectPost = reject;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      streamCardPending: true,
+      streamCardId: undefined,
+      workerReady: true,
+      worker: fakeWorker,
+    });
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'screen_update', content: 'first', status: 'working' });
+    await flush();
+    expect(ds.streamCardId).toBe(CARD_POSTING_SENTINEL);
+
+    ds.streamCardId = 'om_successor';
+    rejectPost(new Error('stale post rejected'));
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBe('om_successor');
   });
 
   it('treats port=0 as ready without Web Terminal and keeps screen/screenshot state flowing', async () => {

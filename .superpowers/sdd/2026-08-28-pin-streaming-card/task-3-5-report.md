@@ -45,3 +45,25 @@ Implemented as one lifecycle unit. The focused lifecycle matrix and build pass.
 - Pin/Unpin failures are fail-open and do not change publication, resume, transfer, or close results.
 - No repo picker, private card, final card, CoT, or closed-card path calls the policy; calls are restricted to `streamCardId` lifecycle points.
 - The intentional scope has no durable Pin-operation journal or chat-wide Pin scan. A crash between remote mutation and later lifecycle reconciliation can leave a stale Pin until a later known lifecycle boundary; this matches the approved QoL/fail-open design.
+
+## Fix round 1/5
+
+### Findings resolved
+
+- Publication continuations now capture/deduplicate frozen predecessor IDs before awaiting the successor Pin. `reconcilePublishedStreamingCard` returns whether the captured real card is still the authoritative current identity after Pin; turn-start, `/card`, worker-ready fresh POST, and screen-update POST use that result to skip `recallFrozenCards` and all later post-publication mutation if a successor won the race.
+- Screen-update POST rejection now requires both the broad lifecycle fence and its captured POST nonce/sentinel fence before rollback, clear, or persistence. A rejected stale request therefore cannot erase a successor `streamCardId`.
+- Resume repost rechecks its captured session/app/registry/current-card identity after its awaited Pin before deleting the stale predecessor or sending a receipt.
+- Removed the obsolete post-Pin frozen-ID snapshot helper: predecessor IDs are now always captured before the await.
+- Added actual-path coverage for deferred ready Pin ownership loss, deferred screen-update POST rejection, transfer source cleanup after routing commit, and close’s non-deleting asynchronous Unpin. Existing focused harnesses continue to cover turn-start, `/card`, worker-ready reuse/fresh, screen-update, resume, transfer, and close.
+
+### TDD evidence
+
+- RED: the deferred worker-ready Pin test failed because the older continuation called `recallFrozenCards`, deleting `om_frozen_predecessor` after a successor became current.
+- GREEN: after fencing post-Pin continuation effects, that test passes and confirms the stale card gets only a compensating Unpin.
+- Screen-update deferred rejection test confirms a stale POST error leaves `om_successor` unchanged.
+
+### Verification
+
+- `mise exec bun@1.4.0 -- bun run test -- test/streaming-card-pinning.test.ts test/recall-frozen-cards.test.ts test/worker-ready-display-mode.test.ts test/card-integration.test.ts test/card-handler-resume-receipt.test.ts test/transfer-session.test.ts test/session-delete-close-barrier.test.ts test/mojo-explicit-close.test.ts test/close-stream-card-untouched.test.ts` — 9 files passed, 282 tests passed.
+- `mise exec bun@1.4.0 -- bun run build` — passed.
+- `git diff --check` — passed (no output).

@@ -2710,6 +2710,17 @@ export async function handleCardAction(data: CardActionData, deps: CardHandlerDe
                 resumedDs.streamCardId = freshCardId;
                 persistStreamCardState(resumedDs);
                 await pinStreamingCardIfEnabled(resumedDs, freshCardId);
+                // Pin is async: a successor may have taken ownership while it
+                // was in flight. Only the still-current repost may delete the
+                // predecessor or send its receipt.
+                if (
+                  resumedDs.session !== resumedSession
+                  || resumedDs.session.status !== 'active'
+                  || resumedDs.larkAppId !== resumedAppId
+                  || (activeSessions.size > 0 && activeSessions.get(activeSessionKey(resumedDs)) !== resumedDs)
+                  || isSessionTransferring(resumedDs)
+                  || resumedDs.streamCardId !== freshCardId
+                ) return;
                 await deleteMessage(resumedDs.larkAppId, staleCardId).catch(() => { /* already withdrawn/expired */ });
                 // Also send the "✅ 会话已恢复…" text follow-up (the original resume
                 // behavior). Both are wanted: the live streaming card AND the text

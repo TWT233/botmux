@@ -44,8 +44,10 @@ vi.mock('../src/core/dashboard-events.js', () => ({
 // (replace the live streaming card with an inert "已搬迁" snapshot before
 // clearing streamCardId). Mock it so tests don't try real Lark API calls.
 const updateMessageMock = vi.fn(async () => undefined);
+const unpinMessageMock = vi.fn(async () => true);
 vi.mock('../src/im/lark/client.js', () => ({
   updateMessage: (...a: any[]) => updateMessageMock(...a),
+  unpinMessage: (...a: any[]) => unpinMessageMock(...a),
   deleteMessage: vi.fn(),
   MessageWithdrawnError: class extends Error {},
 }));
@@ -1501,6 +1503,20 @@ describe('transferSession', () => {
     // embed an img element referencing it (preferred over the text fallback).
     expect(body).toMatch(/"tag":\s*"img"/);
     expect(body).toMatch(/"img_key":\s*"old_image_key"/);
+  });
+
+  it('starts source Pin cleanup only after transfer routing commits', async () => {
+    const ds = makeDs({ frozenCards: new Map([
+      ['prior', { messageId: 'om_frozen_card', content: '', title: '', displayMode: 'hidden' }],
+    ]) });
+    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+
+    const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
+    expect(r.ok).toBe(true);
+    expect(registry.get(sessionKey('oc_target', 'cli_app_test'))).toBe(ds);
+    expect(unpinMessageMock.mock.calls.map(call => call[1])).toEqual(expect.arrayContaining([
+      'om_old_card', 'om_frozen_card',
+    ]));
   });
 
   it('reattaches at the routing commit before awaiting the source-card patch', async () => {
