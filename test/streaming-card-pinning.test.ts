@@ -33,7 +33,13 @@ vi.mock('../src/adapters/backend/tmux-backend.js', () => ({ TmuxBackend: class {
 vi.mock('../src/im/lark/card-builder.js', () => ({ buildStreamingCard: vi.fn(() => '{}'), buildSessionCard: vi.fn(() => '{}'), buildTuiPromptCard: vi.fn(() => '{}'), buildTuiPromptResolvedCard: vi.fn(() => '{}'), getCliDisplayName: vi.fn(() => 'Claude') }));
 
 import {
-  __testOnly_resetPinStreamingCardReconcileQueue, CARD_POSTING_SENTINEL, pinStreamingCardIfEnabled, reconcileBotStreamingCardPins, reconcileStreamingCardPins, setActiveSessionsRegistry,
+  __testOnly_resetPinStreamingCardReconcileQueue,
+  __testOnly_waitForPinStreamingCardIdle,
+  CARD_POSTING_SENTINEL,
+  pinStreamingCardIfEnabled,
+  reconcileBotStreamingCardPins,
+  reconcileStreamingCardPins,
+  setActiveSessionsRegistry,
 } from '../src/core/worker-pool.js';
 import { getBot } from '../src/bot-registry.js';
 
@@ -46,11 +52,6 @@ function makeDs(
   return { session: { sessionId, rootMessageId, chatId: 'oc_chat', title: 'pin', status: 'active', createdAt: Date.now(), updatedAt: Date.now(), pid: null, chatType: 'group' }, worker: null, workerPort: null, workerToken: null, larkAppId: 'app-pin', chatId: 'oc_chat', chatType: 'group', spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(), hasHistory: true, scope: 'thread', streamCardId: card, frozenCards } as any;
 }
 function activate(ds: DaemonSession) { setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]])); }
-async function flushAsyncWork(): Promise<void> {
-  for (let i = 0; i < 12; i += 1) await Promise.resolve();
-  await new Promise(resolve => setTimeout(resolve, 0));
-  for (let i = 0; i < 12; i += 1) await Promise.resolve();
-}
 
 describe('streaming-card pin policy', () => {
   beforeEach(() => {
@@ -99,7 +100,20 @@ describe('streaming-card pin policy', () => {
     pinMessageMock.mockClear(); unpinMessageMock.mockClear();
     await reconcileStreamingCardPins(ds, false);
     expect(pinMessageMock).not.toHaveBeenCalled();
-    expect(new Set(unpinMessageMock.mock.calls.map(c => c[1]))).toEqual(new Set(['om_current', 'om_same_topic', 'om_other_topic']));
+    expect(new Set(unpinMessageMock.mock.calls.map(c => c[1]))).toEqual(new Set(['om_current']));
+  });
+
+  it('default-off with no feature-owned ids is zero-call and leaves manual pins untouched', async () => {
+    const ds = makeDs(
+      'om_current',
+      new Map<string, FrozenCard>([['frozen', { messageId: 'om_frozen', content: '', title: '', displayMode: 'hidden' }]]),
+    );
+    activate(ds);
+
+    await reconcileStreamingCardPins(ds, false);
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 
   it('reconciles all active sessions for the matching bot, ignores other bots, and isolates one session failure', async () => {
@@ -145,6 +159,10 @@ describe('streaming-card pin policy', () => {
       'om_root_1',
     );
     const second = makeDs('om_second', undefined, 'pin-session-2', 'om_root_2');
+    activate(first);
+    await reconcileStreamingCardPins(first, true);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
     let resolveCurrentUnpin!: (value: boolean) => void;
     unpinMessageMock.mockImplementation((appId: string, messageId: string) => {
       if (appId === 'app-pin' && messageId === 'om_current') {
@@ -155,7 +173,7 @@ describe('streaming-card pin policy', () => {
 
     setActiveSessionsRegistry(new Map([[activeSessionKey(first), first]]));
     reconcileBotStreamingCardPins('app-pin', false);
-    await flushAsyncWork();
+    await vi.waitFor(() => expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current'));
 
     expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
     expect(pinMessageMock).not.toHaveBeenCalled();
@@ -165,12 +183,12 @@ describe('streaming-card pin policy', () => {
       [activeSessionKey(second), second],
     ]));
     reconcileBotStreamingCardPins('app-pin', true);
-    await flushAsyncWork();
+    await Promise.resolve();
 
     expect(pinMessageMock).not.toHaveBeenCalled();
 
     resolveCurrentUnpin(true);
-    await flushAsyncWork();
+    await __testOnly_waitForPinStreamingCardIdle();
 
     expect(pinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
       ['app-pin', 'om_current'],
@@ -194,25 +212,23 @@ describe('streaming-card pin policy', () => {
 
     vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
     reconcileBotStreamingCardPins('app-pin', true);
-    await flushAsyncWork();
+    await vi.waitFor(() => expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current'));
 
     expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
     expect(unpinMessageMock).not.toHaveBeenCalled();
 
     vi.mocked(getBot).mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: false } } as any);
     reconcileBotStreamingCardPins('app-pin', false);
-    await flushAsyncWork();
+    await Promise.resolve();
 
     expect(unpinMessageMock).not.toHaveBeenCalled();
 
     resolvePin(true);
-    await flushAsyncWork();
+    await __testOnly_waitForPinStreamingCardIdle();
 
     expect(pinMessageMock).toHaveBeenCalledTimes(1);
     expect(unpinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
       ['app-pin', 'om_current'],
-      ['app-pin', 'om_current'],
-      ['app-pin', 'om_frozen'],
     ]);
   });
 });

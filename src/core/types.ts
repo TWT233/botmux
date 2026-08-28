@@ -302,6 +302,11 @@ export interface DaemonSession {
   streamCardTurnGeneration?: number;
   /** Exact newest turn awaiting its own streaming card. In-memory only. */
   streamCardPendingTurnId?: string;
+  /** Feature-owned public streaming-card ids. Only these ids may be cleaned up
+   * by detached Pin QoL continuations; manual/user-created Pins stay untouched.
+   * In-memory only, so restart self-heal must re-derive ownership conservatively
+   * from the current live card instead of replaying history. */
+  featureOwnedStreamingCardIds?: Set<string>;
   pendingLocalCliButtonRefresh?: boolean; // true when cli_session_id arrived while the streaming card POST was in flight
   pendingRiffUrlCardRefresh?: boolean; // true when riff_access_url arrived while the streaming card POST was in flight
   /** Set on sessions restored after a daemon restart: suppresses the automatic

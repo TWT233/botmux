@@ -139,7 +139,14 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 // ─── Imports under test ────────────────────────────────────────────────────
 
-import { CARD_POSTING_SENTINEL, initWorkerPool, postTurnStartingCard, __testOnly_setupWorkerHandlers, setActiveSessionsRegistry } from '../src/core/worker-pool.js';
+import {
+  CARD_POSTING_SENTINEL,
+  initWorkerPool,
+  postTurnStartingCard,
+  __testOnly_setupWorkerHandlers,
+  __testOnly_waitForPinStreamingCardIdle,
+  setActiveSessionsRegistry,
+} from '../src/core/worker-pool.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
 import { activeSessionKey, type DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
@@ -248,16 +255,16 @@ describe('Worker ready: set_display_mode re-sync', () => {
     await flush();
     expect(ds.streamCardId).toBe('om_new_card');
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
 
-    // A successor wins while the older Pin is still in flight. Its frozen-card
-    // state is authoritative; the old continuation may only compensate itself.
+    // A successor wins while the older Pin is still in flight. Primary recall
+    // already happened; the old continuation may only compensate its own Pin.
     ds.streamCardId = 'om_successor';
     resolvePin(true);
-    await flush();
-    await flush();
+    await __testOnly_waitForPinStreamingCardIdle();
 
-    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
-    expect(ds.frozenCards?.has('old')).toBe(true);
+    expect(deleteMessageMock).toHaveBeenCalledTimes(1);
+    expect(ds.frozenCards?.has('old')).toBe(false);
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
   });
 
@@ -284,6 +291,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     await flush();
     expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
     expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
+    expect(deleteMessageMock).toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
 
     ds.streamCardId = 'om_successor';
     resolvePin(true);
@@ -291,8 +299,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
     await flush();
 
     expect(ds.streamCardId).toBe('om_successor');
-    expect(ds.frozenCards?.has('old')).toBe(true);
-    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
+    expect(ds.frozenCards?.has('old')).toBe(false);
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
   });
 
@@ -334,18 +341,18 @@ describe('Worker ready: set_display_mode re-sync', () => {
     const oldPost = postTurnStartingCard(ds, sessionReplyMock, 'om_turn_old');
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    await expect(oldPost).resolves.toBe(true);
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await oldPost;
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('schedules the successor after a worker-ready Pin loses ownership', async () => {
@@ -362,17 +369,18 @@ describe('Worker ready: set_display_mode re-sync', () => {
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    expect(ds.streamCardId).toBe('om_new_card');
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('persists the exact shared Herdr target reported by the worker', () => {
@@ -667,17 +675,18 @@ describe('Worker ready: set_display_mode re-sync', () => {
     fakeWorker.emit('message', { type: 'screen_update', content: 'old', status: 'working', turnId: 'om_turn_old' });
     await flush();
     expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+    expect(ds.streamCardId).toBe('om_new_card');
 
     ds.streamCardTurnGeneration = 1;
     ds.streamCardPending = true;
     ds.streamCardPendingTurnId = 'om_turn_successor';
     ds.streamCardId = undefined;
-    resolvePin(true);
-    await flush();
-    await flush();
+    await expect(postTurnStartingCard(ds, sessionReplyMock, 'om_turn_successor')).resolves.toBe(true);
 
     expect(sessionReplyMock).toHaveBeenCalledTimes(2);
     expect(ds.streamCardPendingTurnId).toBeUndefined();
+    resolvePin(true);
+    await __testOnly_waitForPinStreamingCardIdle();
   });
 
   it('treats port=0 as ready without Web Terminal and keeps screen/screenshot state flowing', async () => {
@@ -927,6 +936,12 @@ describe('Worker ready: set_display_mode re-sync', () => {
   });
 
   it('silent recovery restores screenshot mode without touching the streaming card', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
     const fakeWorker = makeFakeWorker();
     const ds = makeDs({
       displayMode: 'screenshot',
@@ -942,10 +957,15 @@ describe('Worker ready: set_display_mode re-sync', () => {
 
     expect(updateMessageMock).not.toHaveBeenCalled();
     expect(sessionReplyMock).not.toHaveBeenCalled();
+    expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_existing_card');
     expect(fakeWorker.send).toHaveBeenCalledWith({
       type: 'set_display_mode',
       mode: 'screenshot',
     });
+
+    resolvePin(true);
+    await flush();
+    await flush();
   });
 
   it('sentinel early-break (in-flight card POST) still sends set_display_mode', async () => {

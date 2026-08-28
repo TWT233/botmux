@@ -497,6 +497,42 @@ describe('meeting-agent streaming card (Plan B)', () => {
 });
 
 describe('postFreshStreamingCard', () => {
+  it('completes /card publication before its deferred Pin chain settles', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => {
+      resolvePin = resolve;
+    }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: APP_ID, cliId: 'claude-code', pinStreamingCard: true },
+    } as any);
+    const ds = makeDs(new Map());
+    ds.workerReady = true;
+    ds.streamCardId = 'om_previous';
+    ds.streamCardNonce = 'nonce_previous';
+    ds.streamCardReplyTargetKey = 'thread:om_root';
+    activate(ds);
+    const sessionReply = vi.fn(async () => 'om_fresh_card');
+    let settled = false;
+    let result: boolean | undefined;
+    const pending = postFreshStreamingCard(ds, sessionReply).then(value => {
+      settled = true;
+      result = value;
+      return value;
+    });
+
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(typeof resolvePin).toBe('function');
+    expect(settled).toBe(true);
+    expect(result).toBe(true);
+    expect(ds.streamCardId).toBe('om_fresh_card');
+    expect(deleteMessageMock).toHaveBeenCalledWith(APP_ID, 'om_previous');
+
+    resolvePin(true);
+    await expect(pending).resolves.toBe(true);
+  });
+
   it('discards /card POST results once remote retirement starts waiting', async () => {
     let resolvePost!: (messageId: string) => void;
     const sessionReply = vi.fn(() => new Promise<string>(resolve => { resolvePost = resolve; }));
@@ -942,6 +978,39 @@ describe('postTurnStartingCard', () => {
 
     expect(ds.streamCardId).not.toBe('om_displaced_registry_card');
     expect(deleteMessageMock).toHaveBeenCalledWith(APP_ID, 'om_displaced_registry_card');
+  });
+
+  it('starts the successor turn before the older turn Pin chain settles', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: APP_ID, cliId: 'claude-code', pinStreamingCard: true },
+    } as any);
+    const ds = makeDs();
+    ds.workerReady = true;
+    ds.streamCardPending = true;
+    ds.streamCardTurnGeneration = 1;
+    ds.streamCardPendingTurnId = 'om_turn_old';
+    activate(ds);
+    const sessionReply = vi.fn()
+      .mockResolvedValueOnce('om_turn_card_old')
+      .mockResolvedValueOnce('om_turn_card_successor');
+
+    await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_old')).resolves.toBe(true);
+    expect(sessionReply).toHaveBeenCalledTimes(1);
+
+    ds.streamCardTurnGeneration = 2;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'om_turn_successor';
+    ds.streamCardId = undefined;
+    await expect(postTurnStartingCard(ds, sessionReply, 'om_turn_successor')).resolves.toBe(true);
+
+    expect(sessionReply).toHaveBeenCalledTimes(2);
+    expect(ds.streamCardId).toBe('om_turn_card_successor');
+
+    resolvePin(true);
+    await flush();
+    await flush();
   });
 });
 
