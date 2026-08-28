@@ -284,6 +284,32 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
   });
 
+  it('leaves a successor intact when a stale persisted-card restore PATCH rejects', async () => {
+    let rejectRestore!: (error: Error) => void;
+    updateMessageMock.mockImplementationOnce(() => new Promise<void>((_resolve, reject) => {
+      rejectRestore = reject;
+    }));
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      streamCardId: 'om_restored_card',
+      streamCardPending: false,
+    });
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
+    await flush();
+    expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
+
+    ds.streamCardId = 'om_successor';
+    rejectRestore(new Error('restored card rejected'));
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBe('om_successor');
+    expect(sessionReplyMock).not.toHaveBeenCalled();
+  });
+
   it('schedules the successor after a turn-start Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));

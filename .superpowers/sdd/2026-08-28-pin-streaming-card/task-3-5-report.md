@@ -68,6 +68,24 @@ Implemented as one lifecycle unit. The focused lifecycle matrix and build pass.
 - `mise exec bun@1.4.0 -- bun run build` — passed.
 - `git diff --check` — passed (no output).
 
+## Persisted worker-ready reuse PATCH rejection fence
+
+### Finding resolved
+
+- The persisted reuse restore-PATCH rejection path now uses the same captured restored-card ownership fence as its success path. If a successor wins while `updateMessage` is in flight, the old catch exits without clearing `streamCardId` or falling through to a fresh-card POST.
+- If the restored card still owns the authoritative identity, the previous PATCH-failure fallback remains unchanged: clear the failed restored ID and continue to the normal fresh POST path.
+
+### TDD evidence
+
+- RED: deferred `updateMessage` rejection after successor takeover changed `om_successor` into fallback `om_new_card`.
+- GREEN: the successor remains current and no fallback POST is sent after the stale rejection.
+
+### Verification
+
+- `mise exec bun@1.4.0 -- bun run test -- test/streaming-card-pinning.test.ts test/recall-frozen-cards.test.ts test/worker-ready-display-mode.test.ts test/card-integration.test.ts test/card-handler-resume-receipt.test.ts test/transfer-session.test.ts test/session-delete-close-barrier.test.ts test/mojo-explicit-close.test.ts test/close-stream-card-untouched.test.ts` — 9 files passed, 288 tests passed.
+- `mise exec bun@1.4.0 -- bun run build` — passed.
+- `git diff --check` — passed (no output).
+
 ## Persisted worker-ready reuse race fix
 
 ### Finding resolved

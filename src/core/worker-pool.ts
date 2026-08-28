@@ -10686,19 +10686,19 @@ function setupWorkerHandlers(
             ? ds.streamCardId
             : undefined;
         if (restoredCardId) {
+          const restoredSession = ds.session;
+          const restoredAppId = ds.larkAppId;
+          const restoredAnchor = sessionAnchorId(ds);
+          const restoredRegistryKey = sessionKey(restoredAnchor, restoredAppId);
+          const ownsRestoredCard = (): boolean =>
+            ds.session === restoredSession
+            && ds.session.status === 'active'
+            && ds.larkAppId === restoredAppId
+            && sessionAnchorId(ds) === restoredAnchor
+            && !isSessionTransferring(ds)
+            && ds.streamCardId === restoredCardId
+            && (!activeSessionsRegistry || activeSessionsRegistry.get(restoredRegistryKey) === ds);
           try {
-            const restoredSession = ds.session;
-            const restoredAppId = ds.larkAppId;
-            const restoredAnchor = sessionAnchorId(ds);
-            const restoredRegistryKey = sessionKey(restoredAnchor, restoredAppId);
-            const ownsRestoredCard = (): boolean =>
-              ds.session === restoredSession
-              && ds.session.status === 'active'
-              && ds.larkAppId === restoredAppId
-              && sessionAnchorId(ds) === restoredAnchor
-              && !isSessionTransferring(ds)
-              && ds.streamCardId === restoredCardId
-              && (!activeSessionsRegistry || activeSessionsRegistry.get(restoredRegistryKey) === ds);
             const initTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
             // Reuse persisted nonce so existing card buttons (toggle/etc) keep working.
             if (!ds.streamCardNonce) ds.streamCardNonce = randomBytes(4).toString('hex');
@@ -10760,7 +10760,7 @@ function setupWorkerHandlers(
             syncUsageRefreshTimer(ds);
             break;
           } catch (err) {
-            if (!ownsLifecycleMutation()) break;
+            if (!ownsLifecycleMutation() || !ownsRestoredCard()) break;
             // PATCH failed (withdrawn, expired, etc.) — fall through to POST a fresh card.
             logger.info(`[${t}] Failed to reuse existing streaming card (${err instanceof Error ? err.message : err}), posting new one`);
             ds.streamCardId = undefined;
