@@ -82,4 +82,3 @@ describe('pinMessage/unpinMessage boolean contract', () => {
     await expect(unpinMessage('u_idem', 'om_pin')).resolves.toBe(true);
   });
 });
-
