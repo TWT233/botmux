@@ -250,6 +250,40 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
   });
 
+  it('does not let a stale persisted-card reuse recall or overwrite the successor', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({
+      worker: fakeWorker,
+      streamCardId: 'om_restored_card',
+      streamCardPending: false,
+      frozenCards: new Map([['old', {
+        messageId: 'om_frozen_predecessor', content: '', title: '', displayMode: 'hidden', replyTargetKey: 'thread:om_root',
+      }]]),
+    });
+
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
+    await flush();
+    expect(updateMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card', expect.any(String));
+    expect(pinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
+
+    ds.streamCardId = 'om_successor';
+    resolvePin(true);
+    await flush();
+    await flush();
+
+    expect(ds.streamCardId).toBe('om_successor');
+    expect(ds.frozenCards?.has('old')).toBe(true);
+    expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
+    expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_restored_card');
+  });
+
   it('schedules the successor after a turn-start Pin loses ownership', async () => {
     let resolvePin!: (value: boolean) => void;
     pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));

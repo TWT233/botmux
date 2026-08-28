@@ -10687,6 +10687,18 @@ function setupWorkerHandlers(
             : undefined;
         if (restoredCardId) {
           try {
+            const restoredSession = ds.session;
+            const restoredAppId = ds.larkAppId;
+            const restoredAnchor = sessionAnchorId(ds);
+            const restoredRegistryKey = sessionKey(restoredAnchor, restoredAppId);
+            const ownsRestoredCard = (): boolean =>
+              ds.session === restoredSession
+              && ds.session.status === 'active'
+              && ds.larkAppId === restoredAppId
+              && sessionAnchorId(ds) === restoredAnchor
+              && !isSessionTransferring(ds)
+              && ds.streamCardId === restoredCardId
+              && (!activeSessionsRegistry || activeSessionsRegistry.get(restoredRegistryKey) === ds);
             const initTitle = ds.currentTurnTitle || ds.session.title || sessionCliDisplayName(ds, botCfg);
             // Reuse persisted nonce so existing card buttons (toggle/etc) keep working.
             if (!ds.streamCardNonce) ds.streamCardNonce = randomBytes(4).toString('hex');
@@ -10735,6 +10747,7 @@ function setupWorkerHandlers(
             }
             persistStreamCardState(ds);
             await reconcileStreamingCardPins(ds, true);
+            if (!ownsRestoredCard()) break;
             // The restored card is now the active one — withdraw any cards
             // frozen before the daemon went down so they don't pile up in the
             // thread on each restart.

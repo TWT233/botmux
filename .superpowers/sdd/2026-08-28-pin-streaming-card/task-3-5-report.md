@@ -68,6 +68,24 @@ Implemented as one lifecycle unit. The focused lifecycle matrix and build pass.
 - `mise exec bun@1.4.0 -- bun run build` — passed.
 - `git diff --check` — passed (no output).
 
+## Persisted worker-ready reuse race fix
+
+### Finding resolved
+
+- The persisted worker-ready reuse branch now captures session, app, anchor, registry key, and `restoredCardId` before its restore PATCH/Pin reconciliation. After the awaited reconciliation it rechecks that the captured card is still the authoritative current identity before recalling frozen cards, publishing reuse completion, or arming the usage refresh.
+- A lost-ownership old restore stays fail-open: Pin policy compensates the old Pin with Unpin, while the reuse continuation leaves successor-owned card and frozen state untouched.
+
+### TDD evidence
+
+- RED: a deferred Pin during the real persisted worker-ready reuse path removed `om_frozen_predecessor` after `streamCardId` changed to `om_successor`.
+- GREEN: the same test preserves `om_successor` and its frozen entry, emits no predecessor deletion, and verifies compensating Unpin of `om_restored_card`.
+
+### Verification
+
+- `mise exec bun@1.4.0 -- bun run test -- test/streaming-card-pinning.test.ts test/recall-frozen-cards.test.ts test/worker-ready-display-mode.test.ts test/card-integration.test.ts test/card-handler-resume-receipt.test.ts test/transfer-session.test.ts test/session-delete-close-barrier.test.ts test/mojo-explicit-close.test.ts test/close-stream-card-untouched.test.ts` — 9 files passed, 287 tests passed.
+- `mise exec bun@1.4.0 -- bun run build` — passed.
+- `git diff --check` — passed (no output).
+
 ## Fix round 2/5
 
 ### Finding resolved
