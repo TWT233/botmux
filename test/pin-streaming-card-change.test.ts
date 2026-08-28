@@ -63,4 +63,25 @@ describe('pin-streaming-card change handler seam', () => {
     expect(() => notifyPinStreamingCardChanged('app-three', true)).not.toThrow();
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('pinStreamingCard change handler failed'));
   });
+
+  it('does not block on async rejection and consumes the rejection with a warning', async () => {
+    let resolved = false;
+    const handler = vi.fn(async () => {
+      await Promise.resolve();
+      throw new Error('async boom');
+    });
+
+    registerPinStreamingCardChangeHandler(handler);
+
+    expect(() => notifyPinStreamingCardChanged('app-four', false)).not.toThrow();
+    expect(handler).toHaveBeenCalledWith('app-four', false);
+    expect(logger.warn).not.toHaveBeenCalled();
+
+    await Promise.resolve();
+    await Promise.resolve();
+    resolved = true;
+
+    expect(resolved).toBe(true);
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('async boom'));
+  });
 });

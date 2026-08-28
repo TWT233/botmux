@@ -54,3 +54,9 @@ Implemented as one hot-reconciliation and documentation unit. The focused Task 6
 - Notification is intentionally fail-open. Reconciliation handler failures are swallowed and logged so config writes and API responses are never blocked by Feishu Pin/Unpin work.
 - The callback seam is process-local and has no durable backlog. This matches the approved scope and means an exceptional crash between remote state mutation and the next lifecycle boundary can leave a stale Pin until a later reconciliation opportunity.
 - The implementation preserves the narrow contract: only `streamCardId` participates, `pinStreamingCard` stays default-off, and no broader card classes were added to the policy.
+
+## Follow-up fix: async handler rejection remains fail-open
+
+- Review found that TypeScript still allows an `async` `PinStreamingCardChangeHandler` even when the type was declared as `void`, so the original `notifyPinStreamingCardChanged()` only caught synchronous throws and could leak an unhandled Promise rejection.
+- The seam contract now explicitly accepts `void | PromiseLike<void>`. `notifyPinStreamingCardChanged()` remains non-blocking, wraps the return value with `Promise.resolve(...)`, and logs any asynchronous rejection via `.catch(...)` while still catching synchronous throws in the outer `try/catch`.
+- Added a regression test proving `notifyPinStreamingCardChanged()` does not throw or block when the handler rejects asynchronously, and that the rejection is consumed and logged.
