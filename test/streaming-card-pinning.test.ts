@@ -51,6 +51,13 @@ async function drainMicrotasks(times = 2): Promise<void> {
   }
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 function makeDs(
   card = 'om_current',
   frozenCards?: Map<string, FrozenCard>,
@@ -123,6 +130,71 @@ describe('streaming-card pin policy', () => {
 
     expect(pinMessageMock).not.toHaveBeenCalled();
     expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('forgets ownership only after a successful Unpin so a failed cleanup can retry', async () => {
+    const ds = makeDs();
+    activate(ds);
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(true);
+    unpinMessageMock.mockResolvedValueOnce(false);
+
+    await reconcileStreamingCardPins(ds, false);
+    await reconcileStreamingCardPins(ds, false);
+
+    expect(unpinMessageMock.mock.calls.map(call => call[1])).toEqual(['om_current', 'om_current']);
+  });
+
+  it('serializes a close cleanup Unpin before a same-card resume Pin', async () => {
+    const ds = makeDs();
+    activate(ds);
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(true);
+    const releaseUnpin = deferred<boolean>();
+    const unpinStarted = deferred<void>();
+    const calls: string[] = [];
+    unpinMessageMock.mockImplementationOnce(() => {
+      calls.push('unpin');
+      unpinStarted.resolve();
+      return releaseUnpin.promise;
+    });
+    pinMessageMock.mockImplementation(() => { calls.push('pin'); return Promise.resolve(true); });
+
+    const closing = reconcileStreamingCardPins(ds, false);
+    // This explicit test barrier proves the queued Unpin has been issued
+    // before resuming; no timing-sensitive microtask or timer flushing.
+    await unpinStarted.promise;
+    expect(calls).toEqual(['unpin']);
+    const resuming = pinStreamingCardIfEnabled(ds, 'om_current');
+    expect(calls).toEqual(['unpin']);
+
+    releaseUnpin.resolve(true);
+    await closing;
+    await expect(resuming).resolves.toBe(true);
+    expect(calls).toEqual(['unpin', 'pin']);
+  });
+
+  it('does not let a pre-reset deferred Unpin forget replacement provenance', async () => {
+    const original = makeDs();
+    activate(original);
+    await expect(pinStreamingCardIfEnabled(original, 'om_current')).resolves.toBe(true);
+    const unpinStarted = deferred<void>();
+    const releaseUnpin = deferred<boolean>();
+    unpinMessageMock.mockImplementationOnce(() => {
+      unpinStarted.resolve();
+      return releaseUnpin.promise;
+    });
+    const retiring = reconcileStreamingCardPins(original, false);
+    await unpinStarted.promise;
+
+    __testOnly_resetPinStreamingCardReconcileQueue();
+    const replacement = makeDs();
+    activate(replacement);
+    await expect(pinStreamingCardIfEnabled(replacement, 'om_current')).resolves.toBe(true);
+    releaseUnpin.resolve(true);
+    await retiring;
+
+    unpinMessageMock.mockClear();
+    await reconcileStreamingCardPins(replacement, false);
+    expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
   });
 
   it('reconciles all active sessions for the matching bot, ignores other bots, and isolates one session failure', async () => {

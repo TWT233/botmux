@@ -9,9 +9,14 @@ const { deleteMessage, unpinMessage } = vi.hoisted(() => ({
   deleteMessage: vi.fn(async () => undefined),
   unpinMessage: vi.fn(async () => true),
 }));
+const getBotMock = vi.hoisted(() => vi.fn());
 vi.mock('../src/im/lark/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
   return { ...actual, deleteMessage, unpinMessage };
+});
+vi.mock('../src/bot-registry.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/bot-registry.js')>();
+  return { ...actual, getBot: (...args: any[]) => getBotMock(...args) };
 });
 
 import { config } from '../src/config.js';
@@ -44,10 +49,18 @@ function makeDs(sessionId: string, appId: string, streamCardId: string) {
   } as any;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
 describe('closeSession leaves the streaming card alone', () => {
   beforeEach(() => {
     deleteMessage.mockClear();
     unpinMessage.mockClear();
+    getBotMock.mockReturnValue({ config: { pinStreamingCard: false } });
   });
   afterEach(() => {
     workerPool.setActiveSessionsRegistry(new Map());
@@ -55,10 +68,10 @@ describe('closeSession leaves the streaming card alone', () => {
     for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
   });
 
-  // Close is not a card-cleanup step: the streaming card (and its buttons) is a
-  // resume-time concern. The Lark card close button patches the clicked card in
-  // place into the "会话已关闭" card; closeSession itself must never delete it.
-  it('does NOT delete the streaming card on close', async () => {
+  // Close is not a card-cleanup step for an opt-out bot: the streaming card
+  // (and any manual Pin on it) remains a resume-time concern. The Lark card
+  // close button patches the clicked card in place into the "会话已关闭" card.
+  it('does NOT delete or unpin the streaming card when Pin was never enabled', async () => {
     const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-'));
     tempDirs.push(dataDir);
     const prev = config.session.dataDir;
@@ -74,8 +87,42 @@ describe('closeSession leaves the streaming card alone', () => {
       await workerPool.closeSession(s.sessionId, { awaitWorkerExit: false });
 
       expect(deleteMessage).not.toHaveBeenCalledWith('app-close-card', 'om_stream_card');
+      expect(unpinMessage).not.toHaveBeenCalled();
+      expect(sessionStore.getSession(s.sessionId)?.status).toBe('closed');
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('returns close success before a slow enabled-card Unpin settles', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-enabled-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      sessionStore.updateSession(s);
+      const ds = makeDs(s.sessionId, 'app-close-card', 'om_stream_card');
+      workerPool.setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
+      const unpinStarted = deferred<void>();
+      const releaseUnpin = deferred<boolean>();
+      unpinMessage.mockImplementationOnce(() => {
+        unpinStarted.resolve();
+        return releaseUnpin.promise;
+      });
+
+      await expect(workerPool.closeSession(s.sessionId, { awaitWorkerExit: false })).resolves.toEqual({
+        ok: true, outcome: 'closed', alreadyClosed: false, known: true,
+      });
+      await unpinStarted.promise;
       expect(unpinMessage).toHaveBeenCalledWith('app-close-card', 'om_stream_card');
       expect(sessionStore.getSession(s.sessionId)?.status).toBe('closed');
+
+      releaseUnpin.resolve(false);
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
     } finally {
       config.session.dataDir = prev;
     }

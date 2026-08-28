@@ -2064,6 +2064,10 @@ function snapshotStreamingCardPredecessorIds(
 const ownedStreamingCardRegistry = new Map<string, Set<string>>();
 const streamingCardMutationQueues = new Map<string, Promise<unknown>>();
 const pendingPinStreamingCardTasks = new Set<Promise<void>>();
+// Test resets deliberately drop process-local provenance while old network work
+// may still settle.  The epoch prevents that retired work from forgetting an
+// identically-named card recorded by the replacement test/session state.
+let ownedStreamingCardRegistryEpoch = 0;
 
 function trackPinStreamingCardTask(task: Promise<void>): void {
   const tracked = task.finally(() => {
@@ -2072,17 +2076,20 @@ function trackPinStreamingCardTask(task: Promise<void>): void {
   pendingPinStreamingCardTasks.add(tracked);
 }
 
-function ownedStreamingCardRegistryKey(
-  ds: Pick<DaemonSession, 'session' | 'larkAppId'>,
-): string {
-  return `${ds.session.sessionId}:${ds.larkAppId}`;
+type StreamingCardOwner = Pick<DaemonSession, 'larkAppId'> & {
+  session?: Pick<Session, 'sessionId'>;
+  sessionId?: string;
+};
+
+function ownedStreamingCardRegistryKey(ds: StreamingCardOwner): string {
+  return `${ds.session?.sessionId ?? ds.sessionId ?? ''}:${ds.larkAppId}`;
 }
 
 function messageMutationQueueKey(larkAppId: string, messageId: string): string {
   return `${larkAppId}:${messageId}`;
 }
 
-function rememberOwnedStreamingCard(ds: Pick<DaemonSession, 'session' | 'larkAppId'>, messageId: string): void {
+function rememberOwnedStreamingCard(ds: StreamingCardOwner, messageId: string): void {
   if (!isRealStreamingCardId(messageId)) return;
   const key = ownedStreamingCardRegistryKey(ds);
   let ids = ownedStreamingCardRegistry.get(key);
@@ -2093,7 +2100,7 @@ function rememberOwnedStreamingCard(ds: Pick<DaemonSession, 'session' | 'larkApp
   ids.add(messageId);
 }
 
-function forgetOwnedStreamingCard(ds: Pick<DaemonSession, 'session' | 'larkAppId'>, messageId: string): void {
+function forgetOwnedStreamingCard(ds: StreamingCardOwner, messageId: string): void {
   if (!isRealStreamingCardId(messageId)) return;
   const key = ownedStreamingCardRegistryKey(ds);
   const ids = ownedStreamingCardRegistry.get(key);
@@ -2101,7 +2108,7 @@ function forgetOwnedStreamingCard(ds: Pick<DaemonSession, 'session' | 'larkAppId
   if (ids?.size === 0) ownedStreamingCardRegistry.delete(key);
 }
 
-function ownedStreamingCardIds(ds: Pick<DaemonSession, 'session' | 'larkAppId'>): string[] {
+function ownedStreamingCardIds(ds: StreamingCardOwner): string[] {
   const ids = ownedStreamingCardRegistry.get(ownedStreamingCardRegistryKey(ds));
   if (!ids || ids.size === 0) return [];
   return [...ids].filter(isRealStreamingCardId);
@@ -2126,7 +2133,15 @@ function queueStreamingCardMessageMutation<T>(
 }
 
 function retainsLarkStreamingCardTransport(ds: DaemonSession): boolean {
-  return larkTransportEnabled({ chatId: ds.chatId, apiOnly: getBot(ds.larkAppId).config.apiOnly });
+  return retainsLarkStreamingCardTransportFor(ds.larkAppId, ds.chatId);
+}
+
+function retainsLarkStreamingCardTransportFor(larkAppId: string, chatId: string): boolean {
+  try {
+    return larkTransportEnabled({ chatId, apiOnly: getBot(larkAppId).config.apiOnly });
+  } catch {
+    return false;
+  }
 }
 
 function ownsActiveStreamingCardRegistrySlot(ds: DaemonSession): boolean {
@@ -2143,7 +2158,34 @@ function ownsCurrentStreamingCard(ds: DaemonSession, messageId: string): boolean
 }
 
 function pinStreamingCardEnabled(ds: DaemonSession): boolean {
-  try { return getBot(ds.larkAppId).config.pinStreamingCard === true; } catch { return false; }
+  return pinStreamingCardEnabledFor(ds.larkAppId);
+}
+
+function pinStreamingCardEnabledFor(larkAppId: string): boolean {
+  try { return getBot(larkAppId).config.pinStreamingCard === true; } catch { return false; }
+}
+
+/**
+ * Pin provenance is intentionally process-local.  A bot that never opted in
+ * must not alter an operator's manual Pin merely because a message happens to
+ * be a current/frozen streaming card.  Once opted in, cards visible in the
+ * current lifecycle snapshot are safe to retire even if a prior process did
+ * not retain the in-memory provenance.
+ */
+function captureLifecycleStreamingCardCleanupIds(
+  larkAppId: string,
+  chatId: string,
+  owner: StreamingCardOwner,
+  knownIds: readonly string[],
+): string[] {
+  if (!retainsLarkStreamingCardTransportFor(larkAppId, chatId)) return [];
+  const ids = new Set(ownedStreamingCardIds(owner));
+  if (pinStreamingCardEnabledFor(larkAppId)) {
+    for (const id of knownIds) {
+      if (isRealStreamingCardId(id)) ids.add(id);
+    }
+  }
+  return [...ids];
 }
 
 /** Pin exactly the current public streaming card.  Pin is deliberately outside
@@ -2182,15 +2224,18 @@ export async function pinStreamingCardIfEnabled(
 async function unpinStreamingCardIds(
   larkAppId: string,
   ids: readonly string[],
-  owner?: Pick<DaemonSession, 'session' | 'larkAppId'>,
+  owner?: StreamingCardOwner,
 ): Promise<string[]> {
   const succeeded: string[] = [];
   for (const messageId of ids) {
+    const ownershipEpoch = ownedStreamingCardRegistryEpoch;
     const operation = queueStreamingCardMessageMutation(larkAppId, messageId, async () => {
       try {
         const unpinned = await unpinMessage(larkAppId, messageId);
         if (unpinned) {
-          if (owner) forgetOwnedStreamingCard(owner, messageId);
+          if (owner && ownershipEpoch === ownedStreamingCardRegistryEpoch) {
+            forgetOwnedStreamingCard(owner, messageId);
+          }
           return messageId;
         }
       } catch (err) {
@@ -2327,6 +2372,7 @@ export function reconcileBotStreamingCardPins(larkAppId: string, enabled: boolea
 
 export function __testOnly_resetPinStreamingCardReconcileQueue(): void {
   pendingBotStreamingCardReconciles.clear();
+  ownedStreamingCardRegistryEpoch += 1;
   ownedStreamingCardRegistry.clear();
   streamingCardMutationQueues.clear();
   pendingPinStreamingCardTasks.clear();
@@ -5904,7 +5950,12 @@ export async function closeSession(
   let closePinnedStreamingIds: string[] = [];
   if (closeAppId) {
     if (ds) {
-      closePinnedStreamingIds = snapshotStreamingCardIds(ds);
+      closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+        closeAppId,
+        ds.chatId,
+        ds,
+        snapshotStreamingCardIds(ds),
+      );
     } else if (stored) {
       const ids = new Set<string>();
       if (isRealStreamingCardId(stored.streamCardId)) ids.add(stored.streamCardId);
@@ -5915,7 +5966,12 @@ export async function closeSession(
       } catch (err) {
         logger.debug(`[${sessionId.slice(0, 8)}] could not load frozen cards for close Pin cleanup: ${err instanceof Error ? err.message : String(err)}`);
       }
-      closePinnedStreamingIds = [...ids];
+      closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+        closeAppId,
+        stored.chatId,
+        stored,
+        [...ids],
+      );
     }
   }
   // P1-13：关闭必须显式广播 `preview: null`。sessionStore.closeSession 会把字段从磁盘
@@ -6044,7 +6100,7 @@ export async function closeSession(
     }
     if (hadPreviewTarget) publishSessionPreviewCleared(sessionId);
     if (closeAppId && closePinnedStreamingIds.length > 0) {
-      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds);
+      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, ds ?? stored);
     }
   }
 
@@ -7425,7 +7481,12 @@ export async function transferSession(
   const oldAnchor = sessionAnchorId(ds);
   const oldChatId = ds.chatId;
   const oldStreamCardId = ds.streamCardId;
-  const sourcePinnedStreamingIds = snapshotStreamingCardIds(ds);
+  const sourcePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
+    ds.larkAppId,
+    ds.chatId,
+    ds,
+    snapshotStreamingCardIds(ds),
+  );
   const oldCurrentImageKey = ds.currentImageKey;
 
   // Scratch/store cleanup above awaited. A fresh source turn may have been
@@ -7532,7 +7593,7 @@ export async function transferSession(
   // Unpin exactly the pre-commit capture: a target publication racing after
   // this point must never be selected by source cleanup.
   if (sourcePinnedStreamingIds.length > 0) {
-    void unpinStreamingCardIds(ds.larkAppId, sourcePinnedStreamingIds);
+    void unpinStreamingCardIds(ds.larkAppId, sourcePinnedStreamingIds, ds);
   }
 
   dashboardEventBus.publish({
