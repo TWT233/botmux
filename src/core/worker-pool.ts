@@ -2300,15 +2300,31 @@ export function continuePublishedStreamingCardPinChain(
   }));
 }
 
+type ReconcileStreamingCardPinMode =
+  | { enabled: true }
+  | { enabled: false; cleanupKnownIds?: boolean };
+
 /** Reconcile one session after an opt-in setting transition.  Frozen cards are
  * session-wide here (Pins are chat-wide); recallFrozenCards remains topic-aware. */
-export async function reconcileStreamingCardPins(ds: DaemonSession, enabled: boolean): Promise<void> {
+export async function reconcileStreamingCardPins(
+  ds: DaemonSession,
+  enabledOrMode: boolean | ReconcileStreamingCardPinMode,
+): Promise<void> {
   if (!retainsLarkStreamingCardTransport(ds)) return;
+  const mode: ReconcileStreamingCardPinMode = typeof enabledOrMode === 'boolean'
+    ? { enabled: enabledOrMode }
+    : enabledOrMode;
+  const { enabled } = mode;
   const ids = ownedStreamingCardIds(ds);
+  const cleanupIds = mode.enabled
+    ? ids
+    : mode.cleanupKnownIds === true
+      ? [...new Set([...ids, ...snapshotStreamingCardIds(ds)])]
+      : ids;
   const currentId = isRealStreamingCardId(ds.streamCardId) ? ds.streamCardId : undefined;
   const frozenIds = enabled
     ? snapshotStreamingCardIds(ds).filter(id => id !== currentId)
-    : ids.filter(id => id !== currentId);
+    : cleanupIds.filter(id => id !== currentId);
   try {
     if (enabled) {
       if (currentId && await pinStreamingCardIfEnabled(ds, currentId)) {
@@ -2316,8 +2332,8 @@ export async function reconcileStreamingCardPins(ds: DaemonSession, enabled: boo
       }
       return;
     }
-    if (ids.length === 0) return;
-    await unpinStreamingCardIds(ds.larkAppId, ids, ds);
+    if (cleanupIds.length === 0) return;
+    await unpinStreamingCardIds(ds.larkAppId, cleanupIds, ds);
   } catch (err) {
     logger.debug(`[${tag(ds)}] streaming-card Pin reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -2359,7 +2375,7 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
       await Promise.allSettled(
         sessions.map(async (ds) => {
           try {
-            await reconcileStreamingCardPins(ds, enabled);
+            await reconcileStreamingCardPins(ds, enabled ? { enabled: true } : { enabled: false, cleanupKnownIds: true });
           } catch {
             /* per-session reconciliation remains fail-open */
           }
@@ -5973,6 +5989,7 @@ export async function closeSession(
   // public streaming-card ids before that transaction, never await their
   // cleanup on the close path.
   const closeAppId = ds?.larkAppId ?? stored?.larkAppId;
+  let closeStoredOwner: StreamingCardOwner | undefined;
   let closePinnedStreamingIds: string[] = [];
   if (closeAppId) {
     if (ds) {
@@ -5992,10 +6009,11 @@ export async function closeSession(
       } catch (err) {
         logger.debug(`[${sessionId.slice(0, 8)}] could not load frozen cards for close Pin cleanup: ${err instanceof Error ? err.message : String(err)}`);
       }
+      closeStoredOwner = { sessionId: stored.sessionId, larkAppId: closeAppId };
       closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
         closeAppId,
         stored.chatId,
-        stored,
+        closeStoredOwner,
         [...ids],
       );
     }
@@ -6125,8 +6143,9 @@ export async function closeSession(
       }
     }
     if (hadPreviewTarget) publishSessionPreviewCleared(sessionId);
-    if (closeAppId && closePinnedStreamingIds.length > 0) {
-      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, ds ?? stored);
+    const closeStreamingOwner = ds ?? closeStoredOwner;
+    if (closeAppId && closeStreamingOwner && closePinnedStreamingIds.length > 0) {
+      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, closeStreamingOwner);
     }
   }
 

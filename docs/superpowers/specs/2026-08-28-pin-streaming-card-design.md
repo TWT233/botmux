@@ -59,12 +59,17 @@ The setting is exposed through both existing operator surfaces:
 2. Chat command: `/botconfig set pinStreamingCard on|off`, with `effect: immediate`.
 
 Both mutation paths trigger the same best-effort reconciliation after the
-configuration write succeeds:
+configuration write succeeds, but only when the effective `pinStreamingCard`
+boolean actually changes:
 
 - Off → on: pin each existing real `streamCardId` owned by that bot, then unpin
   its known frozen streaming cards only if pinning the current card succeeds.
-- On → off: unpin each existing real `streamCardId` and all known frozen
-  streaming cards owned by that bot.
+- On → off: treat that explicit transition as authority to unpin each known
+  current and frozen streaming-card ID captured from the live session snapshot,
+  even if a daemon restart or test reset already discarded process-local Pin
+  provenance.
+- False → false and true → true writes are no-op updates for this feature: they
+  persist/synchronize normally but do not trigger reconciliation.
 
 The configuration write succeeds even if any reconciliation request fails.
 
@@ -129,24 +134,33 @@ throws.
 
 `reconcileStreamingCardPins` operates only on a captured real current ID and the
 message IDs already present in `frozenCards`. When enabling, it pins the current
-ID first and unpins frozen IDs only after that pin succeeds. When disabling, it
-unpins both current and frozen IDs without first pinning anything. Frozen-card
+ID first and unpins frozen IDs only after that pin succeeds. Ordinary
+per-session disable reconciliation remains ownership-based: without an explicit
+bot-wide off transition it only unpins IDs recorded in process-local provenance,
+so a default-off bot that never enabled stays zero-call and cannot disturb
+manual Pins. The explicit bot-wide on → off transition passes a narrower
+cleanup-known-ids mode into per-session reconciliation; that mode may unpin the
+captured current and frozen IDs without first pinning anything. Frozen-card
 unpin selection is session-wide, not filtered by `replyTargetKey`, because Pins
 are chat-wide and the invariant is per session. Existing frozen-card recall
 remains destination-sensitive and otherwise unchanged.
-Close and transfer cleanup also Unpin captured IDs regardless of the current
-preference value. This lets a later lifecycle boundary clean up a Pin left behind
-by a failed or racing off-toggle.
+Close and transfer cleanup continue to use only recorded ownership once the
+setting is already off. They may therefore miss a stale pre-restart Pin under
+this design's approved no-journal/no-audit caveat; only the explicit on → off
+toggle is authoritative for cleaning known current/frozen IDs after provenance
+loss.
 
 `reconcileBotStreamingCardPins` snapshots active sessions for the target bot and
 launches reconciliation with per-session error isolation. It is deliberately
 fire-and-forget from configuration handlers so Feishu latency cannot delay a
 Dashboard or `/botconfig` response.
 
-The config stores notify a small registered callback after the local disk and
-in-memory update succeeds. Registering the callback from daemon startup avoids a
+The config stores notify a small registered callback only after the local disk
+and in-memory update succeeds and only when the effective boolean actually
+changes. Registering the callback from daemon startup avoids a
 services-to-worker-pool import cycle and makes both Dashboard card-preference
-writes and generic `/botconfig` writes share the same hot-toggle behavior.
+writes and generic `/botconfig` writes share the same hot-toggle behavior
+without granting cleanup authority to redundant false writes.
 
 ## Lifecycle and ordering
 
@@ -236,9 +250,12 @@ relies on the normal worker-ready reuse or publication path.
 
 Transfer snapshots the source `streamCardId`, commits the new route using the
 existing fencing, clears source-bound card identity as it does today, and then
-best-effort Unpins the captured source and known frozen streaming cards. A fresh
-target `streamCardId` is pinned through the normal publication path. Pin failure
-does not change transfer success.
+best-effort Unpins recorded owned IDs for the source route. A fresh target
+`streamCardId` is pinned through the normal publication path. Pin failure does
+not change transfer success. If the daemon already lost provenance and the
+setting was already off before transfer began, this path may miss a stale old
+Pin; the design intentionally accepts that gap instead of adding a durable
+journal or chat-wide audit.
 
 ## Failure and race semantics
 
@@ -260,8 +277,12 @@ The minimum-change design intentionally does not add a durable Pin-operation
 journal or scan the chat's full Pin list. Consequently, a process crash between
 a successful Feishu mutation and its next local lifecycle step, or a combined
 Unpin-and-recall failure after the only local predecessor record is removed, can
-leave a stale Pin that this version cannot discover. This is acceptable for the
-approved QoL/fail-open scope and must be called out in the merge request.
+leave a stale Pin that this version cannot discover. An explicit on → off toggle
+can still clean known current/frozen IDs from the live session snapshot after
+process-local provenance loss, but if the setting is already off and ownership
+has already been forgotten, later close/transfer cleanup may still miss that
+stale Pin. This is acceptable for the approved QoL/fail-open scope and must be
+called out in the merge request.
 
 ## Development units
 

@@ -250,6 +250,9 @@ async function applyConfigFieldInternal(
   if (spec.kind === 'allowedUsers') return { ok: false, reason: 'use_setBotAllowedUsers' };
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const previousPinStreamingCard = spec.configKey === 'pinStreamingCard'
+    ? bot.config.pinStreamingCard === true
+    : undefined;
   const oldText = formatFieldValue(spec, (bot.config as any)[spec.configKey]);
 
   // 空数组（stringList 全被过滤）等价清除，bots.json 保持干净。
@@ -343,8 +346,11 @@ async function applyConfigFieldInternal(
   if (spec.configKey === 'displayName') {
     try { displayNameRefresher?.(); } catch { /* best effort */ }
   }
-  if (spec.configKey === 'pinStreamingCard') {
-    notifyPinStreamingCardChanged(larkAppId, effective === true);
+  if (spec.configKey === 'pinStreamingCard' && previousPinStreamingCard !== undefined) {
+    const nextPinStreamingCard = bot.config.pinStreamingCard === true;
+    if (previousPinStreamingCard !== nextPinStreamingCard) {
+      notifyPinStreamingCardChanged(larkAppId, nextPinStreamingCard);
+    }
   }
   logger.info(`[config:${larkAppId}] set ${spec.key}: ${oldText} -> ${newText}`);
   return { ok: true, oldText, newText, effect: spec.effect };

@@ -226,6 +226,44 @@ describe('card-prefs store — 主动开工 fields', () => {
     ]);
   });
 
+  it('does not notify pinStreamingCard no-op writes when the effective boolean is unchanged', async () => {
+    writeConfig();
+    const { registry, store, pinStreamingCardChange } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+    const observed: Array<{ enabled: boolean; disk: unknown; memory: unknown }> = [];
+    const dispose = pinStreamingCardChange.registerPinStreamingCardChangeHandler((appId, enabled) => {
+      observed.push({
+        enabled,
+        disk: readConfig().pinStreamingCard,
+        memory: registry.getBot(appId).config.pinStreamingCard,
+      });
+    });
+
+    try {
+      const offNoop = await store.updateBotCardPrefs('app_default', { pinStreamingCard: false });
+      expect(offNoop.ok).toBe(true);
+
+      const on = await store.updateBotCardPrefs('app_default', { pinStreamingCard: true });
+      expect(on.ok).toBe(true);
+
+      const onNoop = await store.updateBotCardPrefs('app_default', { pinStreamingCard: true });
+      expect(onNoop.ok).toBe(true);
+
+      const off = await store.updateBotCardPrefs('app_default', { pinStreamingCard: false });
+      expect(off.ok).toBe(true);
+
+      const offNoopAgain = await store.updateBotCardPrefs('app_default', { pinStreamingCard: false });
+      expect(offNoopAgain.ok).toBe(true);
+    } finally {
+      dispose();
+    }
+
+    expect(observed).toEqual([
+      { enabled: true, disk: true, memory: true },
+      { enabled: false, disk: undefined, memory: undefined },
+    ]);
+  });
+
   it('does not notify pinStreamingCard changes when the write fails', async () => {
     writeConfig();
     const { store, pinStreamingCardChange } = await freshModules();

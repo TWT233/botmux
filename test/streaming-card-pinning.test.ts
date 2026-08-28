@@ -132,6 +132,35 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 
+  it('explicit on-to-off toggle cleans known current and frozen ids after provenance reset', async () => {
+    const ds = makeDs(
+      'om_current',
+      new Map<string, FrozenCard>([['frozen', { messageId: 'om_frozen', content: '', title: '', displayMode: 'hidden' }]]),
+    );
+    activate(ds);
+    let pinStreamingCard = true;
+    getBotMock.mockImplementation(() => ({
+      config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard },
+    } as any));
+
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(true);
+
+    __testOnly_resetPinStreamingCardReconcileQueue();
+    activate(ds);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
+
+    pinStreamingCard = false;
+    reconcileBotStreamingCardPins('app-pin', false);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(new Set(unpinMessageMock.mock.calls.map(call => call[1]))).toEqual(new Set([
+      'om_current',
+      'om_frozen',
+    ]));
+  });
+
   it('reconcile is a zero-call no-op for apiOnly and HTTP virtual transports', async () => {
     const ds = makeDs();
     activate(ds);
@@ -344,6 +373,8 @@ describe('streaming-card pin policy', () => {
     expect(pinMessageMock).toHaveBeenCalledTimes(1);
     expect(unpinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
       ['app-pin', 'om_current'],
+      ['app-pin', 'om_current'],
+      ['app-pin', 'om_frozen'],
     ]);
   });
 });
