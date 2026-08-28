@@ -2208,7 +2208,13 @@ async function unpinStreamingCardIds(
 /** Fire-and-forget Pin QoL chain. Primary publication effects (recall,
  * readiness flushes, timers, successor scheduling) must NOT be delayed by
  * this best-effort API work. */
-function continuePublishedStreamingCardPinChain(
+/**
+ * Continue the best-effort Pin work for an already committed streaming-card
+ * publication.  Callers must not await this: publication-side effects such as
+ * predecessor recall and user receipts are deliberately independent from the
+ * Lark Pin API.
+ */
+export function continuePublishedStreamingCardPinChain(
   ds: DaemonSession,
   messageId: string,
   predecessorIds: readonly string[] = snapshotStreamingCardPredecessorIds(ds, messageId),

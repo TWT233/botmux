@@ -15,6 +15,11 @@ import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { DaemonSession } from '../src/core/types.js';
 
+const { continuePublishedStreamingCardPinChainMock, deleteMessageMock } = vi.hoisted(() => ({
+  continuePublishedStreamingCardPinChainMock: vi.fn(),
+  deleteMessageMock: vi.fn(async () => {}),
+}));
+
 vi.mock('@larksuiteoapi/node-sdk', () => {
   class FakeClient { constructor(public opts: Record<string, unknown>) {} }
   return { Client: FakeClient };
@@ -28,6 +33,19 @@ vi.mock('../src/core/session-manager.js', async (importOriginal) => {
     ...actual,
     resumeSession: vi.fn(),
   };
+});
+
+vi.mock('../src/core/worker-pool.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/core/worker-pool.js')>();
+  return {
+    ...actual,
+    continuePublishedStreamingCardPinChain: continuePublishedStreamingCardPinChainMock,
+  };
+});
+
+vi.mock('../src/im/lark/client.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
+  return { ...actual, deleteMessage: deleteMessageMock };
 });
 
 import { handleCardAction } from '../src/im/lark/card-handler.js';
@@ -100,16 +118,24 @@ beforeEach(() => {
 afterEach(() => {
   delete process.env.BOTS_CONFIG;
   vi.restoreAllMocks();
+  continuePublishedStreamingCardPinChainMock.mockReset();
+  deleteMessageMock.mockClear();
 });
 
 describe('card-handler resume receipt', () => {
   // The resume flow reposts the live streaming card FIRST (sessionReply with an
   // interactive card body) and then sends the "会话已恢复 / 新起干净会话" text
-  // receipt from a background task. So the receipt is no longer sessionReply
-  // call[0] — it is the TEXT call among the sessionReply calls. Extract it by
-  // content-type/shape rather than position, after letting the background task
-  // (a fire-and-forget async IIFE) flush.
-  const flushBackground = () => new Promise(resolve => setTimeout(resolve, 50));
+  // receipt from a background task. The tests use an exact receipt barrier,
+  // rather than sleeping for a fire-and-forget task.
+  function replyWithReceiptBarrier() {
+    let receiptArrived!: () => void;
+    const receipt = new Promise<void>(resolve => { receiptArrived = resolve; });
+    const sessionReply = vi.fn(async (_rootId: string, content: string) => {
+      if (!content.trimStart().startsWith('{')) receiptArrived();
+      return 'om_reply';
+    });
+    return { sessionReply, receipt };
+  }
   const textReceipt = (sessionReply: ReturnType<typeof vi.fn>): string => {
     const textCalls = sessionReply.mock.calls
       .map(c => String(c[1] ?? ''))
@@ -122,49 +148,84 @@ describe('card-handler resume receipt', () => {
   it('copilot session without a cliSessionId: receipt says the next message starts a fresh session', async () => {
     const { handler, resumeSession: mockedResume } = await fresh();
     mockedResume.mockResolvedValue({ ok: true, ds: makeDs('copilot') });
-    const sessionReply = vi.fn(async () => 'om_reply');
+    const { sessionReply, receipt: receiptDone } = replyWithReceiptBarrier();
     const deps = { activeSessions: new Map(), sessionReply, lastRepoScan: new Map() } as any;
 
     await handler.handleCardAction(resumeAction(), deps, APP_ID);
-    await flushBackground();
+    await receiptDone;
 
     expect(mockedResume).toHaveBeenCalledWith('sess-resume-1', deps.activeSessions);
     // The live streaming card is reposted before the text receipt.
     expect(repostedCardCount(sessionReply)).toBe(1);
-    const receipt = textReceipt(sessionReply);
-    expect(receipt).toContain('话题路由已重新激活');
-    expect(receipt).toContain('新起干净会话');
+    const receiptText = textReceipt(sessionReply);
+    expect(receiptText).toContain('话题路由已重新激活');
+    expect(receiptText).toContain('新起干净会话');
     // Must NOT claim the history session is back.
-    expect(receipt).not.toContain('会话已恢复');
+    expect(receiptText).not.toContain('会话已恢复');
   });
 
   it('copilot session WITH a cliSessionId: normal "session resumed" receipt', async () => {
     const { handler, resumeSession: mockedResume } = await fresh();
     mockedResume.mockResolvedValue({ ok: true, ds: makeDs('copilot', 'cli-sess-9') });
-    const sessionReply = vi.fn(async () => 'om_reply');
+    const { sessionReply, receipt: receiptDone } = replyWithReceiptBarrier();
     const deps = { activeSessions: new Map(), sessionReply, lastRepoScan: new Map() } as any;
 
     await handler.handleCardAction(resumeAction(), deps, APP_ID);
-    await flushBackground();
+    await receiptDone;
 
     expect(repostedCardCount(sessionReply)).toBe(1);
-    const receipt = textReceipt(sessionReply);
-    expect(receipt).toContain('会话已恢复');
-    expect(receipt).not.toContain('新起干净会话');
+    const receiptText = textReceipt(sessionReply);
+    expect(receiptText).toContain('会话已恢复');
+    expect(receiptText).not.toContain('新起干净会话');
   });
 
   it('claude-code session (always resumable via botmux sessionId): normal receipt', async () => {
     const { handler, resumeSession: mockedResume } = await fresh();
     mockedResume.mockResolvedValue({ ok: true, ds: makeDs('claude-code') });
-    const sessionReply = vi.fn(async () => 'om_reply');
+    const { sessionReply, receipt: receiptDone } = replyWithReceiptBarrier();
     const deps = { activeSessions: new Map(), sessionReply, lastRepoScan: new Map() } as any;
 
     await handler.handleCardAction(resumeAction(), deps, APP_ID);
-    await flushBackground();
+    await receiptDone;
 
     expect(repostedCardCount(sessionReply)).toBe(1);
-    const receipt = textReceipt(sessionReply);
-    expect(receipt).toContain('会话已恢复');
-    expect(receipt).not.toContain('新起干净会话');
+    const receiptText = textReceipt(sessionReply);
+    expect(receiptText).toContain('会话已恢复');
+    expect(receiptText).not.toContain('新起干净会话');
+  });
+
+  it('commits, withdraws predecessor, and sends receipt without waiting for the detached Pin chain', async () => {
+    const { handler, resumeSession: mockedResume } = await fresh();
+    const ds = makeDs('claude-code');
+    ds.streamCardId = 'om_prior_stream';
+    mockedResume.mockResolvedValue({ ok: true, ds });
+    // A hung Pin API must not hold the resume publication boundary. The real
+    // helper owns rejection handling and stale-Pin compensation; this seam
+    // verifies card-handler never awaits that detached chain.
+    continuePublishedStreamingCardPinChainMock.mockImplementation(() => new Promise<void>(() => {}));
+    let releasePost!: (messageId: string) => void;
+    let markReceipt!: () => void;
+    let markPostStarted!: () => void;
+    const postStarted = new Promise<void>(resolve => { markPostStarted = resolve; });
+    const receiptDelivered = new Promise<void>(resolve => { markReceipt = resolve; });
+    const sessionReply = vi.fn((_rootId: string, content: string) => {
+      if (content.trimStart().startsWith('{')) {
+        markPostStarted();
+        return new Promise<string>(postResolve => { releasePost = postResolve; });
+      }
+      markReceipt();
+      return Promise.resolve('om_receipt');
+    });
+    const deps = { activeSessions: new Map(), sessionReply, lastRepoScan: new Map() } as any;
+
+    const action = handler.handleCardAction(resumeAction(), deps, APP_ID);
+    await postStarted;
+    releasePost('om_fresh_stream');
+    await action;
+    await receiptDelivered;
+
+    expect(continuePublishedStreamingCardPinChainMock).toHaveBeenCalledWith(ds, 'om_fresh_stream', ['om_prior_stream']);
+    expect(deleteMessageMock).toHaveBeenCalledWith(APP_ID, 'om_card');
+    expect(textReceipt(sessionReply)).toContain('会话已恢复');
   });
 });
