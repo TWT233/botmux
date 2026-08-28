@@ -2150,6 +2150,32 @@ function ownsActiveStreamingCardRegistrySlot(ds: DaemonSession): boolean {
   return activeSessionsRegistry.get(key) === ds;
 }
 
+/** Identity captured before posting a streaming card. A successful HTTP POST is
+ * not a lifecycle commit: the route can be replaced while it is in flight. */
+export type StreamingCardPublicationFence = {
+  session: DaemonSession['session'];
+  larkAppId: string;
+  anchorId: string;
+  /** The live id expected while this POST is in flight. For resume reposts this
+   * is the prior card id: it must remain current until the fresh card commits. */
+  expectedPriorCardId: string | undefined;
+};
+
+/** Positive commit fence for a card whose POST has returned. This deliberately
+ * fails closed when the active registry is absent or empty: only the exact
+ * captured route may publish a card, delete its predecessor, or emit a
+ * receipt. */
+export function canCommitStreamingCardPublication(
+  ds: DaemonSession,
+  fence: StreamingCardPublicationFence,
+): boolean {
+  if (ds.session !== fence.session || ds.session.status !== 'active') return false;
+  if (ds.larkAppId !== fence.larkAppId || sessionAnchorId(ds) !== fence.anchorId) return false;
+  if (ds.streamCardId !== fence.expectedPriorCardId || isSessionTransferring(ds)) return false;
+  if (remoteRetirementAdmissionPhase(ds) !== null || !retainsLarkStreamingCardTransport(ds)) return false;
+  return activeSessionsRegistry?.get(sessionKey(fence.anchorId, fence.larkAppId)) === ds;
+}
+
 function ownsCurrentStreamingCard(ds: DaemonSession, messageId: string): boolean {
   if (!isRealStreamingCardId(messageId)) return false;
   if (ds.session.status !== 'active' || ds.streamCardId !== messageId || isSessionTransferring(ds)) return false;

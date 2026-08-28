@@ -132,6 +132,28 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 
+  it('reconcile is a zero-call no-op for apiOnly and HTTP virtual transports', async () => {
+    const ds = makeDs();
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true, apiOnly: true },
+    } as any);
+
+    await reconcileStreamingCardPins(ds, true);
+    await reconcileStreamingCardPins(ds, false);
+
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true },
+    } as any);
+    ds.chatId = 'http_async_pin_reconcile';
+    activate(ds);
+    await reconcileStreamingCardPins(ds, true);
+    await reconcileStreamingCardPins(ds, false);
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
   it('forgets ownership only after a successful Unpin so a failed cleanup can retry', async () => {
     const ds = makeDs();
     activate(ds);

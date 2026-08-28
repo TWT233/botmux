@@ -22,7 +22,7 @@ const updateMessageMock = vi.fn(async () => {});
 const deleteMessageMock = vi.fn(async () => {});
 const pinMessageMock = vi.fn(async () => true);
 const unpinMessageMock = vi.fn(async () => true);
-const loggerInfoMock = vi.fn();
+const { loggerInfoMock } = vi.hoisted(() => ({ loggerInfoMock: vi.fn() }));
 
 vi.mock('../src/im/lark/client.js', () => {
   class MessageWithdrawnError extends Error {
