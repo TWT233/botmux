@@ -14,20 +14,29 @@ describe('dashboard bot payload helpers', () => {
       {},
     );
     const editableFields = [
-      'agentSelectionKey', 'autoGrantRequestCards', 'autoStartOnGroupJoin',
-      'autoStartOnGroupJoinPrompt', 'autoStartOnNewTopic', 'backendType',
-      'botToBotSameDir', 'brandLabel', 'canTalkDaemonCommands', 'cliRuntime', 'codexAppCleanInput', 'codexAuthSync',
-      'customPassthroughCommands', 'defaultOncall', 'defaultWorkingDir',
-      'defaultWorkingDirAutoWorktree', 'disableStreamingCard', 'docSubscribeDefaultMode',
-      'envelopeInjection', 'env', 'grantDefaultDurationMs', 'launchShell', 'maxLiveWorkers', 'messageQuotaDefaultLimit', 'model',
-      'feedback', 'pinStreamingCard',
-      'overloadAlert', 'p2pMode', 'p2pOpen', 'privateCard', 'regularGroupMentionMode',
-      'regularGroupReplyMode', 'restrictGrantCommands', 'riff', 'sandbox', 'sandboxPaths',
-      'silentTurnReactions', 'skillInjection', 'startupCommands', 'substituteMode',
-      'summaryMemory', 'summaryMemoryPath', 'summaryRange', 'senderTag', 'writableTerminalLinkInCard',
+      'larkAppId', 'botName', 'cliId', 'cliRuntime', 'model', 'agentSelectionKey', 'online',
+      'displayName', 'larkBotName',
+      'defaultOncall', 'defaultWorkingDir', 'defaultWorkingDirAutoWorktree',
+      'autoboundChatCount', 'brandLabel',
+      'sandbox', 'sandboxPaths', 'readIsolationSupported', 'backendType',
+      'usageDisplay', 'usageSupported',
+      'disableStreamingCard', 'pinStreamingCard', 'silentTurnReactions',
+      'codexAppCleanInput', 'writableTerminalLinkInCard', 'privateCard',
+      'thinkingCard', 'senderTag', 'overloadAlert', 'botToBotSameDir',
+      'autoStartOnGroupJoin', 'autoStartOnGroupJoinPrompt', 'autoStartOnNewTopic',
+      'summaryRange', 'summaryMemory', 'summaryMemoryPath',
+      'regularGroupReplyMode', 'regularGroupMentionMode', 'docSubscribeDefaultMode',
+      'substituteMode', 'feedback',
+      'restrictGrantCommands', 'autoGrantRequestCards', 'p2pOpen',
+      'grantDefaultDurationMs', 'messageQuotaDefaultLimit', 'p2pMode',
+      'envelopeInjection', 'codexAuthSync',
+      'skillInjection', 'skillInjectionDefault', 'skillInjectionSupport',
+      'maxLiveWorkers', 'logicalSessionCount', 'residentSessionCount', 'dormantSessionCount',
       'sessionOwnerReminder',
+      'startupCommands', 'customPassthroughCommands', 'canTalkDaemonCommands', 'launchShell', 'env',
+      'riff', 'skills',
     ];
-    expect(Object.keys(row)).toEqual(expect.arrayContaining(editableFields));
+    expect(Object.keys(row)).toEqual(editableFields);
   });
 
   it('normalizes the Codex auth policy to the upgrade-compatible shared default', () => {

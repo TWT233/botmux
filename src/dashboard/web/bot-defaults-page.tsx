@@ -3618,6 +3618,23 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
               void savePatch({ thinkingCard: checked }, 'thinking', () => setThinkingCard(previous));
             }}
           />
+          <ToggleRow
+            checked={pinStreamingCard}
+            disabled={busy !== null}
+            dataAction="toggle-pin-streaming-card"
+            title={tr('botDefaults.pinStreamingCard')}
+            description={tr('botDefaults.pinStreamingCardDescription')}
+            help={tr('botDefaults.pinStreamingCardHelp')}
+            onChange={checked => {
+              const previous = pinStreamingCard;
+              setPinStreamingCard(checked);
+              void savePatch(
+                { pinStreamingCard: checked },
+                'pin-streaming',
+                () => setPinStreamingCard(previous),
+              );
+            }}
+          />
         </section>
 
         <section className="bd-card-setting-group" data-card-content-group>
@@ -3646,23 +3663,6 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
             </div>
           )}
           <div className="bd-card-control-list">
-            <ToggleRow
-              checked={pinStreamingCard}
-              disabled={busy !== null}
-              dataAction="toggle-pin-streaming-card"
-              title={tr('botDefaults.pinStreamingCard')}
-              description={tr('botDefaults.pinStreamingCardDescription')}
-              help={tr('botDefaults.pinStreamingCardHelp')}
-              onChange={checked => {
-                const previous = pinStreamingCard;
-                setPinStreamingCard(checked);
-                void savePatch(
-                  { pinStreamingCard: checked },
-                  'pin-streaming',
-                  () => setPinStreamingCard(previous),
-                );
-              }}
-            />
             <ToggleRow
               checked={writableLink}
               disabled={busy !== null}
