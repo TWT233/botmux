@@ -168,6 +168,7 @@ async function updateBotCardPrefsInternal(
 ): Promise<{ ok: true; prefs: BotCardPrefs } | { ok: false; reason: string }> {
   let bot;
   try { bot = getBot(larkAppId); } catch { return { ok: false, reason: 'bot_not_registered' }; }
+  const previousPinStreamingCard = bot.config.pinStreamingCard === true;
 
   const apply = (entry: any, key: keyof BotCardPrefs, val: boolean | undefined) => {
     if (val === undefined) return;
@@ -335,8 +336,9 @@ async function updateBotCardPrefsInternal(
   if (patch.summaryMemoryPath !== undefined) {
     bot.config.summaryMemoryPath = patch.summaryMemoryPath.trim() ? patch.summaryMemoryPath.trim() : undefined;
   }
-  if (patch.pinStreamingCard !== undefined) {
-    notifyPinStreamingCardChanged(larkAppId, patch.pinStreamingCard);
+  const nextPinStreamingCard = bot.config.pinStreamingCard === true;
+  if (patch.pinStreamingCard !== undefined && previousPinStreamingCard !== nextPinStreamingCard) {
+    notifyPinStreamingCardChanged(larkAppId, nextPinStreamingCard);
   }
   logger.info(
     `[card-prefs:${larkAppId}] usageDisplay=${r.result.usageDisplay} ` +
