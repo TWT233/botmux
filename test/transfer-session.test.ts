@@ -1526,6 +1526,23 @@ describe('transferSession', () => {
     expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 
+  it('makes no Lark call for an enabled transfer on an apiOnly transport', async () => {
+    const ds = makeDs({ frozenCards: new Map([
+      ['prior', { messageId: 'om_frozen_card', content: '', title: '', displayMode: 'hidden' }],
+    ]) });
+    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    getBotMock.mockReturnValue({
+      config: { cliId: 'claude-code', larkAppId: 'cli_app_test', pinStreamingCard: true, apiOnly: true },
+      botName: 'TestBot',
+    });
+
+    await expect(callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target')).resolves.toEqual({ ok: true });
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
   it('returns committed transfer success before a slow feature-owned source Unpin settles', async () => {
     const ds = makeDs({ frozenCards: new Map([
       ['prior', { messageId: 'om_frozen_card', content: '', title: '', displayMode: 'hidden' }],

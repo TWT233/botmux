@@ -166,6 +166,18 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock.mock.calls.map(call => call[1])).toEqual(['om_current', 'om_current']);
   });
 
+  it('retains ownership after a thrown Unpin so a later cleanup retries', async () => {
+    const ds = makeDs();
+    activate(ds);
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(true);
+    unpinMessageMock.mockRejectedValueOnce(new Error('transport reset'));
+
+    await reconcileStreamingCardPins(ds, false);
+    await reconcileStreamingCardPins(ds, false);
+
+    expect(unpinMessageMock.mock.calls.map(call => call[1])).toEqual(['om_current', 'om_current']);
+  });
+
   it('serializes a close cleanup Unpin before a same-card resume Pin', async () => {
     const ds = makeDs();
     activate(ds);

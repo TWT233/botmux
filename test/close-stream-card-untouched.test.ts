@@ -22,6 +22,7 @@ vi.mock('../src/bot-registry.js', async (importOriginal) => {
 import { config } from '../src/config.js';
 import * as workerPool from '../src/core/worker-pool.js';
 import { activeSessionKey } from '../src/core/types.js';
+import { saveFrozenCards } from '../src/services/frozen-card-store.js';
 import * as sessionStore from '../src/services/session-store.js';
 
 const tempDirs: string[] = [];
@@ -123,6 +124,107 @@ describe('closeSession leaves the streaming card alone', () => {
 
       releaseUnpin.resolve(false);
       await workerPool.__testOnly_waitForPinStreamingCardIdle();
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('cleans current and frozen cards from a workerless persisted row when enabled', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-workerless-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      s.streamCardId = 'om_stored_current';
+      sessionStore.updateSession(s);
+      saveFrozenCards(s.sessionId, new Map([
+        ['old', { messageId: 'om_stored_frozen', content: '', title: '', displayMode: 'hidden' }],
+      ]));
+      workerPool.setActiveSessionsRegistry(new Map());
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
+
+      await expect(workerPool.closeSession(s.sessionId)).resolves.toEqual({
+        ok: true, outcome: 'closed', alreadyClosed: false, known: true,
+      });
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(new Set(unpinMessage.mock.calls.map(([, messageId]) => messageId))).toEqual(
+        new Set(['om_stored_current', 'om_stored_frozen']),
+      );
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('leaves a workerless persisted row untouched when Pin was never enabled', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-workerless-off-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      s.streamCardId = 'om_stored_current';
+      sessionStore.updateSession(s);
+      saveFrozenCards(s.sessionId, new Map([
+        ['old', { messageId: 'om_stored_frozen', content: '', title: '', displayMode: 'hidden' }],
+      ]));
+      workerPool.setActiveSessionsRegistry(new Map());
+
+      await workerPool.closeSession(s.sessionId);
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(unpinMessage).not.toHaveBeenCalled();
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('does not start cleanup when the durable close save fails', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-save-fail-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      s.streamCardId = 'om_stored_current';
+      sessionStore.updateSession(s);
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
+      const failingClose = vi.spyOn(sessionStore, 'closeSession')
+        .mockImplementationOnce(() => { throw new Error('disk full'); });
+
+      await expect(workerPool.closeSession(s.sessionId)).rejects.toThrow('disk full');
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+      expect(unpinMessage).not.toHaveBeenCalled();
+      failingClose.mockRestore();
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('makes no Lark call for an enabled close on an apiOnly transport', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-api-only-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      s.streamCardId = 'om_stream_card';
+      sessionStore.updateSession(s);
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true, apiOnly: true } });
+
+      await workerPool.closeSession(s.sessionId);
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(unpinMessage).not.toHaveBeenCalled();
     } finally {
       config.session.dataDir = prev;
     }
