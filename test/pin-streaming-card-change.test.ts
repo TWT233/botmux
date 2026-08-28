@@ -16,6 +16,16 @@ import {
   serializePinStreamingCardConfigChange,
 } from '../src/services/pin-streaming-card-change.js';
 
+function deferred<T = void>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('pin-streaming-card change handler seam', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -103,5 +113,33 @@ describe('pin-streaming-card change handler seam', () => {
     ).resolves.toBeUndefined();
 
     expect(calls).toEqual(['first', 'second']);
+  });
+
+  it('allows different larkAppIds to proceed independently while one bot is blocked', async () => {
+    const appAStarted = deferred();
+    const releaseAppA = deferred();
+    const order: string[] = [];
+
+    const blockedA = serializePinStreamingCardConfigChange('app-A', async () => {
+      order.push('A:start');
+      appAStarted.resolve();
+      await releaseAppA.promise;
+      order.push('A:end');
+    });
+
+    await appAStarted.promise;
+
+    await expect(
+      serializePinStreamingCardConfigChange('app-B', async () => {
+        order.push('B:start');
+        order.push('B:end');
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(order).toEqual(['A:start', 'B:start', 'B:end']);
+
+    releaseAppA.resolve();
+    await expect(blockedA).resolves.toBeUndefined();
+    expect(order).toEqual(['A:start', 'B:start', 'B:end', 'A:end']);
   });
 });
