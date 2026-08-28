@@ -339,6 +339,7 @@ vi.mock('../src/core/worker-pool.js', () => ({
   postFreshStreamingCard: vi.fn(async () => false),
   postPrivateSnapshotCard: vi.fn(async () => ({ notReady: false, sent: 1, total: 1 })),
   resolvePrivateCardAudience: vi.fn(() => ['ou_owner']),
+  reconcileBotStreamingCardPins: vi.fn(),
 }));
 
 vi.mock('../src/utils/daemon-discovery.js', () => ({
@@ -518,7 +519,7 @@ import { sessionKey } from '../src/core/types.js';
 import { setTerminalProxyPort } from '../src/core/terminal-url.js';
 import type { DaemonSession } from '../src/core/types.js';
 import type { LarkMessage, Session } from '../src/types.js';
-import { type CloseSessionResult, closeSession, closeSession as closeWorkerPoolSession, killWorker, teardownAuthoritativePersistentBackingBeforeClose, suspendWorker, forkWorker, forkAdoptWorker, forkSession, isForkCapableSession, getCurrentCliVersion, deliverEphemeralOrReply, deliverWritableTerminalCardTo, requestSessionRestart, withActiveSessionKeyLock, postFreshStreamingCard } from '../src/core/worker-pool.js';
+import { type CloseSessionResult, closeSession, closeSession as closeWorkerPoolSession, killWorker, teardownAuthoritativePersistentBackingBeforeClose, suspendWorker, forkWorker, forkAdoptWorker, forkSession, isForkCapableSession, getCurrentCliVersion, deliverEphemeralOrReply, deliverWritableTerminalCardTo, requestSessionRestart, withActiveSessionKeyLock, postFreshStreamingCard, reconcileBotStreamingCardPins } from '../src/core/worker-pool.js';
 import { dashboardEventBus, type DashboardEvent } from '../src/core/dashboard-events.js';
 import { publishClosedSessionPatch } from '../src/core/session-activity.js';
 import { getOwnerOpenId } from '../src/bot-registry.js';
@@ -1164,6 +1165,58 @@ describe('/botconfig set p2pOpen (私聊对话全开) via the real text command'
 });
 
 describe('/botconfig string field goes through coerceConfigValue (maxLen)', () => {
+  it('persists pinStreamingCard and returns promptly even when hot reconciliation throws or hangs', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-botconfig-pinstreaming-'));
+    const configPath = join(dir, 'bots.json');
+    process.env.BOTS_CONFIG = configPath;
+    writeFileSync(configPath, JSON.stringify([{
+      larkAppId: 'app-1',
+      larkAppSecret: 'secret-1',
+      cliId: 'codex',
+      allowedUsers: ['ou_sender'],
+    }]));
+    const bot = {
+      botName: 'Codex',
+      config: {
+        larkAppId: 'app-1',
+        larkAppSecret: 'secret-1',
+        cliId: 'codex' as const,
+        allowedUsers: ['ou_sender'],
+        workingDir: '~/projects',
+        workingDirs: ['~/projects'],
+      },
+      resolvedAllowedUsers: ['ou_sender'],
+    };
+    vi.mocked(getBot).mockReturnValue(bot as any);
+    const run = (text: string) => handleCommand('/botconfig', ROOT_ID, makeLarkMessage(text, { senderId: 'ou_sender' }), makeDeps(), 'app-1');
+    const stored = () => JSON.parse(readFileSync(configPath, 'utf-8'))[0];
+    const change = await import('../src/services/pin-streaming-card-change.js');
+
+    try {
+      const disposeThrow = change.registerPinStreamingCardChangeHandler(() => {
+        throw new Error('reconcile failed');
+      });
+      await expect(run('/botconfig set pinStreamingCard on')).resolves.toBeUndefined();
+      disposeThrow();
+      expect(stored().pinStreamingCard).toBe(true);
+      expect((bot.config as any).pinStreamingCard).toBe(true);
+
+      let release!: () => void;
+      const disposePending = change.registerPinStreamingCardChangeHandler(() => {
+        void new Promise<void>((resolve) => { release = resolve; });
+      });
+      await expect(run('/botconfig set pinStreamingCard off')).resolves.toBeUndefined();
+      disposePending();
+      expect('pinStreamingCard' in stored()).toBe(false);
+      expect((bot.config as any).pinStreamingCard).toBeUndefined();
+      release();
+    } finally {
+      delete process.env.BOTS_CONFIG;
+      rmSync(dir, { recursive: true, force: true });
+      vi.mocked(getBot).mockImplementation(defaultGetBot as any);
+    }
+  });
+
   it('rejects an over-long displayName and persists a valid one', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-botconfig-displayname-'));
     const configPath = join(dir, 'bots.json');

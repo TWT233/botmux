@@ -24,7 +24,8 @@ async function freshModules() {
   vi.resetModules();
   const registry = await import('../src/bot-registry.js');
   const store = await import('../src/services/card-prefs-store.js');
-  return { registry, store };
+  const pinStreamingCardChange = await import('../src/services/pin-streaming-card-change.js');
+  return { registry, store, pinStreamingCardChange };
 }
 
 describe('card-prefs store — 主动开工 fields', () => {
@@ -161,6 +162,54 @@ describe('card-prefs store — 主动开工 fields', () => {
     expect(off.ok && off.prefs.pinStreamingCard).toBe(false);
     expect(readConfig().pinStreamingCard).toBeUndefined();
     expect(registry.getBot('app_default').config.pinStreamingCard).toBeUndefined();
+  });
+
+  it('notifies pinStreamingCard patches only after disk and live memory are synchronized', async () => {
+    writeConfig();
+    const { registry, store, pinStreamingCardChange } = await freshModules();
+    registry.loadBotConfigs().forEach(c => registry.registerBot(c));
+    const observed: Array<{ enabled: boolean; disk: unknown; memory: unknown }> = [];
+    const dispose = pinStreamingCardChange.registerPinStreamingCardChangeHandler((appId, enabled) => {
+      observed.push({
+        enabled,
+        disk: readConfig().pinStreamingCard,
+        memory: registry.getBot(appId).config.pinStreamingCard,
+      });
+    });
+
+    try {
+      const on = await store.updateBotCardPrefs('app_default', { pinStreamingCard: true });
+      expect(on.ok).toBe(true);
+
+      const off = await store.updateBotCardPrefs('app_default', { pinStreamingCard: false });
+      expect(off.ok).toBe(true);
+
+      const unrelated = await store.updateBotCardPrefs('app_default', { autoStartOnNewTopic: true });
+      expect(unrelated.ok).toBe(true);
+    } finally {
+      dispose();
+    }
+
+    expect(observed).toEqual([
+      { enabled: true, disk: true, memory: true },
+      { enabled: false, disk: undefined, memory: undefined },
+    ]);
+  });
+
+  it('does not notify pinStreamingCard changes when the write fails', async () => {
+    writeConfig();
+    const { store, pinStreamingCardChange } = await freshModules();
+    const seen = vi.fn();
+    const dispose = pinStreamingCardChange.registerPinStreamingCardChangeHandler(seen);
+
+    try {
+      const result = await store.updateBotCardPrefs('app_missing', { pinStreamingCard: true });
+      expect(result).toMatchObject({ ok: false, reason: 'bot_not_registered' });
+    } finally {
+      dispose();
+    }
+
+    expect(seen).not.toHaveBeenCalled();
   });
 
   it('botToBotSameDir is default-TRUE: persists only explicit false, clears on true', async () => {

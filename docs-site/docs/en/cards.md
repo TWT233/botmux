@@ -10,6 +10,17 @@ Every conversation turn produces a live-updating Lark card, your primary window 
 - **A fresh card per turn**: the previous card freezes as an archive, keeping conversation history clear and traceable; after a session is moved to another group with [`/relay`](/en/relay), the original card also automatically freezes as an archive (buttons removed).
 - **A "recoverable" card on close**: it carries a "▶️ Resume session" button to click back in anytime; **if the CLI supports native resume** (the adapter implements `buildResumeCommand` and a native session id exists), it also includes the native command (e.g. `claude --resume <id>`) for manual recovery; when unsupported, only botmux's resume button plus a short note is shown.
 
+## Pinning The Current Live Card
+
+When a bot enables `pinStreamingCard`, Botmux tries to pin the **current public live-status card** to the top of the chat so the close-session and terminal entry points stay easy to reach.
+
+- This is a **per-bot, opt-in, default-off** setting.
+- Only the current public live-status real `streamCardId` participates.
+- Repo-picker cards, private `/card` snapshots, final reply cards, CoT, closed cards, and every other interactive card stay **out of scope**.
+- After the switch changes through the dashboard or `/botconfig set pinStreamingCard on/off`, Botmux immediately runs a best-effort hot reconciliation across that bot's **existing active sessions**; the configuration response itself does not wait for Feishu Pin/Unpin completion.
+- Failures are **fail-open**: they never interrupt card publication, transfer, resume, close, or the configuration write. During exceptional periods you may temporarily see zero Pins or multiple Pins.
+- The feature only compensates from the session's known `streamCardId` and frozen-card ids. It does not scan the chat's full Pin state and it does not keep a durable retry journal, so a crash after the remote Pin state changes can leave a stale Pin behind until a later known lifecycle boundary or another hot reconciliation converges it.
+
 > **Open terminal = read-only**: the card's main "🖥️ Open Web Terminal" button is read-only viewing; for **writable** control, tap "🔑 Get operation link" — delivered **privately**: a flat group prefers an in-chat "visible-to-you" ephemeral card (so you never leave the conversation), falling back to a DM only for topic/thread or p2p chats, or when the ephemeral card fails. Management buttons like "🔄 Restart" and "apply profile" live on the **session card**, not on each turn's streaming card.
 
 ## Interrupting / correcting a running turn

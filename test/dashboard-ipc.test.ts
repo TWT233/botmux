@@ -910,6 +910,60 @@ describe('PUT /api/bot-card-prefs — pin streaming card', () => {
       rmSync(dir, { recursive: true, force: true });
     }
   });
+
+  it('returns promptly even when hot reconciliation throws or remains pending', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-pin-streaming-async-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-pin-streaming-async-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    const change = await import('../src/services/pin-streaming-card-change.js');
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'codex',
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+      const base = `http://127.0.0.1:${handle.port}`;
+
+      const disposeThrow = change.registerPinStreamingCardChangeHandler(() => {
+        throw new Error('reconcile failed after write');
+      });
+      const throwRes = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pinStreamingCard: true }),
+      });
+      disposeThrow();
+      expect(throwRes.status).toBe(200);
+      expect(await throwRes.json()).toMatchObject({ ok: true, pinStreamingCard: true });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].pinStreamingCard).toBe(true);
+
+      let release!: () => void;
+      const disposePending = change.registerPinStreamingCardChangeHandler(() => {
+        void new Promise<void>((resolve) => { release = resolve; });
+      });
+      const pendingRes = await fetch(`${base}/api/bot-card-prefs`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ pinStreamingCard: false }),
+      });
+      disposePending();
+      expect(pendingRes.status).toBe(200);
+      expect(await pendingRes.json()).toMatchObject({ ok: true, pinStreamingCard: false });
+      expect(JSON.parse(readFileSync(configPath, 'utf-8'))[0].pinStreamingCard).toBeUndefined();
+      release();
+    } finally {
+      if (handle) await handle.close();
+      handle = null;
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('PUT /api/bot-card-prefs — summary memory', () => {

@@ -28,6 +28,7 @@ import { parseStartupCommandsInput } from '../core/startup-commands.js';
 import { isReservedPerBotEnvKey, sanitizePerBotEnv } from '../core/per-bot-env.js';
 import { normalizeFeedbackPolicy } from './feedback-policy.js';
 import { normalizeFeedbackPolicyLayer, type FeedbackPolicyLayer } from './feedback-policy-resolver.js';
+import { notifyPinStreamingCardChanged } from './pin-streaming-card-change.js';
 import {
   cliModelSupportsReasoningEffort,
   isCodexReasoningEffort,
@@ -324,6 +325,9 @@ export async function applyConfigField(
   }
   if (spec.configKey === 'displayName') {
     try { displayNameRefresher?.(); } catch { /* best effort */ }
+  }
+  if (spec.configKey === 'pinStreamingCard') {
+    notifyPinStreamingCardChanged(larkAppId, effective === true);
   }
   logger.info(`[config:${larkAppId}] set ${spec.key}: ${oldText} -> ${newText}`);
   return { ok: true, oldText, newText, effect: spec.effect };

@@ -38,6 +38,7 @@ import {
   type UsageDisplayMode,
 } from '../bot-registry.js';
 import { logger } from '../utils/logger.js';
+import { notifyPinStreamingCardChanged } from './pin-streaming-card-change.js';
 
 export interface BotCardPrefs {
   /** Where to show native Context / Token usage:
@@ -317,6 +318,9 @@ export async function updateBotCardPrefs(
   }
   if (patch.summaryMemoryPath !== undefined) {
     bot.config.summaryMemoryPath = patch.summaryMemoryPath.trim() ? patch.summaryMemoryPath.trim() : undefined;
+  }
+  if (patch.pinStreamingCard !== undefined) {
+    notifyPinStreamingCardChanged(larkAppId, patch.pinStreamingCard);
   }
   logger.info(
     `[card-prefs:${larkAppId}] usageDisplay=${r.result.usageDisplay} ` +

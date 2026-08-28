@@ -33,12 +33,17 @@ vi.mock('../src/adapters/backend/tmux-backend.js', () => ({ TmuxBackend: class {
 vi.mock('../src/im/lark/card-builder.js', () => ({ buildStreamingCard: vi.fn(() => '{}'), buildSessionCard: vi.fn(() => '{}'), buildTuiPromptCard: vi.fn(() => '{}'), buildTuiPromptResolvedCard: vi.fn(() => '{}'), getCliDisplayName: vi.fn(() => 'Claude') }));
 
 import {
-  CARD_POSTING_SENTINEL, pinStreamingCardIfEnabled, reconcileStreamingCardPins, setActiveSessionsRegistry,
+  CARD_POSTING_SENTINEL, pinStreamingCardIfEnabled, reconcileBotStreamingCardPins, reconcileStreamingCardPins, setActiveSessionsRegistry,
 } from '../src/core/worker-pool.js';
 import { getBot } from '../src/bot-registry.js';
 
-function makeDs(card = 'om_current', frozenCards?: Map<string, FrozenCard>): DaemonSession {
-  return { session: { sessionId: 'pin-session', rootMessageId: 'om_root', chatId: 'oc_chat', title: 'pin', status: 'active', createdAt: Date.now(), updatedAt: Date.now(), pid: null, chatType: 'group' }, worker: null, workerPort: null, workerToken: null, larkAppId: 'app-pin', chatId: 'oc_chat', chatType: 'group', spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(), hasHistory: true, streamCardId: card, frozenCards } as any;
+function makeDs(
+  card = 'om_current',
+  frozenCards?: Map<string, FrozenCard>,
+  sessionId = 'pin-session',
+  rootMessageId = 'om_root',
+): DaemonSession {
+  return { session: { sessionId, rootMessageId, chatId: 'oc_chat', title: 'pin', status: 'active', createdAt: Date.now(), updatedAt: Date.now(), pid: null, chatType: 'group' }, worker: null, workerPort: null, workerToken: null, larkAppId: 'app-pin', chatId: 'oc_chat', chatType: 'group', spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(), hasHistory: true, scope: 'thread', streamCardId: card, frozenCards } as any;
 }
 function activate(ds: DaemonSession) { setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]])); }
 
@@ -73,5 +78,31 @@ describe('streaming-card pin policy', () => {
     await reconcileStreamingCardPins(ds, false);
     expect(pinMessageMock).not.toHaveBeenCalled();
     expect(new Set(unpinMessageMock.mock.calls.map(c => c[1]))).toEqual(new Set(['om_current', 'om_same_topic', 'om_other_topic']));
+  });
+
+  it('reconciles all active sessions for the matching bot, ignores other bots, and isolates one session failure', async () => {
+    const first = makeDs('om_first', undefined, 'pin-session-1', 'om_root_1');
+    const second = makeDs('om_second', undefined, 'pin-session-2', 'om_root_2');
+    const otherBot = { ...makeDs('om_other', undefined, 'pin-session-3', 'om_root_3'), larkAppId: 'app-other' } as DaemonSession;
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(first), first],
+      [activeSessionKey(second), second],
+      [activeSessionKey(otherBot), otherBot],
+    ]));
+
+    pinMessageMock.mockImplementation(async (_appId: string, messageId: string) => {
+      if (messageId === 'om_first') throw new Error('pin failed');
+      return true;
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(pinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
+      ['app-pin', 'om_first'],
+      ['app-pin', 'om_second'],
+    ]);
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-other', 'om_other');
   });
 });
