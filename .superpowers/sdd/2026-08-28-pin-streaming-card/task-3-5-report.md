@@ -67,3 +67,21 @@ Implemented as one lifecycle unit. The focused lifecycle matrix and build pass.
 - `mise exec bun@1.4.0 -- bun run test -- test/streaming-card-pinning.test.ts test/recall-frozen-cards.test.ts test/worker-ready-display-mode.test.ts test/card-integration.test.ts test/card-handler-resume-receipt.test.ts test/transfer-session.test.ts test/session-delete-close-barrier.test.ts test/mojo-explicit-close.test.ts test/close-stream-card-untouched.test.ts` — 9 files passed, 282 tests passed.
 - `mise exec bun@1.4.0 -- bun run build` — passed.
 - `git diff --check` — passed (no output).
+
+## Fix round 2/5
+
+### Finding resolved
+
+- A stale publication after an awaited Pin must suppress captured-card mutation, but it must not strand a later turn already marked pending. Turn-start, worker-ready fresh POST, and screen-update POST now retain their successor-card scheduling path after `reconcilePublishedStreamingCard()` reports lost ownership.
+- The scheduling predicate rechecks the live `streamCardTurnGeneration` after the await instead of relying on the pre-await `superseded` snapshot. This preserves the successor's liveness while the captured-ID fence still excludes recall, refresh patches, timer arming, and other old-card side effects.
+
+### TDD evidence
+
+- RED: three deferred-Pin liveness tests failed with only one POST: turn-start, worker-ready, and screen-update each left the successor pending card unscheduled after the older card lost ownership.
+- GREEN: each orchestration shape now posts its successor (two POSTs total) and clears the successor pending turn, while the earlier concurrency test continues to prove stale continuations do not recall the successor state.
+
+### Verification
+
+- `mise exec bun@1.4.0 -- bun run test -- test/streaming-card-pinning.test.ts test/recall-frozen-cards.test.ts test/worker-ready-display-mode.test.ts test/card-integration.test.ts test/card-handler-resume-receipt.test.ts test/transfer-session.test.ts test/session-delete-close-barrier.test.ts test/mojo-explicit-close.test.ts test/close-stream-card-untouched.test.ts` — 9 files passed, 285 tests passed.
+- `mise exec bun@1.4.0 -- bun run build` — passed.
+- `git diff --check` — passed (no output).

@@ -2297,19 +2297,21 @@ export async function postTurnStartingCard(
       ds.streamCardPendingTurnId = undefined;
     }
     persistStreamCardState(ds);
-    if (!await reconcilePublishedStreamingCard(ds, messageId)) return false;
-    recallFrozenCards(ds);
-    flushPendingLocalCliOpenReadinessPatch(ds);
-    flushPendingRiffUrlPatch(ds);
-    flushPendingActiveRuntimePatch(ds);
-    flushPendingCodexServiceTierPatch(ds);
-    syncUsageRefreshTimer(ds);
-    reconcilePostedStartingCard(ds, turnId, statusRevisionAtPost);
-    logger.info(`[${tag(ds)}] Posted starting card for turn ${turnId.substring(0, 12)}`);
-    if (superseded && ds.streamCardPendingTurnId) {
+    const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, messageId);
+    if (publicationStillCurrent) {
+      recallFrozenCards(ds);
+      flushPendingLocalCliOpenReadinessPatch(ds);
+      flushPendingRiffUrlPatch(ds);
+      flushPendingActiveRuntimePatch(ds);
+      flushPendingCodexServiceTierPatch(ds);
+      syncUsageRefreshTimer(ds);
+      reconcilePostedStartingCard(ds, turnId, statusRevisionAtPost);
+      logger.info(`[${tag(ds)}] Posted starting card for turn ${turnId.substring(0, 12)}`);
+    }
+    if ((ds.streamCardTurnGeneration ?? 0) !== generation && ds.streamCardPendingTurnId) {
       void postTurnStartingCard(ds, sessionReply, ds.streamCardPendingTurnId);
     }
-    return true;
+    return publicationStillCurrent;
   } catch (err) {
     if (!stillOwnsPost()) {
       restorePrePostIdentityForRetirement();
@@ -10840,23 +10842,25 @@ function setupWorkerHandlers(
           }
           ds.parkedStreamCardNonce = undefined;
           persistStreamCardState(ds);
-          if (!await reconcilePublishedStreamingCard(ds, postedCardId)) break;
-          // New card is live — recall any cards frozen by previous turns.
-          // Done after `streamCardId` is committed so we never delete the old
-          // card without a successor visible to the user.
-          recallFrozenCards(ds);
-          flushPendingLocalCliOpenReadinessPatch(ds);
-          flushPendingRiffUrlPatch(ds);
-          flushPendingActiveRuntimePatch(ds);
-          flushPendingCodexServiceTierPatch(ds);
-          // Fresh ready POST: if this turn is already `working` (e.g. relay
-          // resume where the CLI kept running), arm here — same authorized arm
-          // point as the reuse branch, now that streamCardId is the real id.
-          syncUsageRefreshTimer(ds);
-          if (!superseded) {
-            reconcilePostedStartingCard(ds, cardReplyTarget.turnId, statusRevisionAtPost);
+          const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, postedCardId);
+          if (publicationStillCurrent) {
+            // New card is live — recall any cards frozen by previous turns.
+            // Done after `streamCardId` is committed so we never delete the old
+            // card without a successor visible to the user.
+            recallFrozenCards(ds);
+            flushPendingLocalCliOpenReadinessPatch(ds);
+            flushPendingRiffUrlPatch(ds);
+            flushPendingActiveRuntimePatch(ds);
+            flushPendingCodexServiceTierPatch(ds);
+            // Fresh ready POST: if this turn is already `working` (e.g. relay
+            // resume where the CLI kept running), arm here — same authorized arm
+            // point as the reuse branch, now that streamCardId is the real id.
+            syncUsageRefreshTimer(ds);
+            if (!superseded) {
+              reconcilePostedStartingCard(ds, cardReplyTarget.turnId, statusRevisionAtPost);
+            }
           }
-          if (superseded && ds.streamCardPendingTurnId) {
+          if ((ds.streamCardTurnGeneration ?? 0) !== postingGeneration && ds.streamCardPendingTurnId) {
             void postTurnStartingCard(ds, cb.sessionReply, ds.streamCardPendingTurnId);
           }
         } catch (err) {
@@ -11323,23 +11327,25 @@ function setupWorkerHandlers(
               if (!superseded) ds.streamCardPendingTurnId = undefined;
               ds.parkedStreamCardNonce = undefined;
               persistStreamCardState(ds);
-              if (!await reconcilePublishedStreamingCard(ds, msgId)) return;
-              // New card live — recall any cards parked by previous turns
-              // (user message, bot @mention, adopt-bridge new turn, etc.).
-              // This is the main turn-to-turn POST path; without recall here,
-              // every long session would leak old streaming cards into the
-              // thread.
-              recallFrozenCards(ds);
-              flushPendingLocalCliOpenReadinessPatch(ds);
-              flushPendingRiffUrlPatch(ds);
-              flushPendingActiveRuntimePatch(ds);
-              flushPendingCodexServiceTierPatch(ds);
-              // New-turn POST is the FIRST working screen_update of the turn —
-              // the else (same-turn PATCH) branch never runs for it, so arm the
-              // periodic usage refresh here (once the real card id exists, not
-              // the POSTING sentinel). syncUsageRefreshTimer re-checks state.
-              syncUsageRefreshTimer(ds);
-              if (superseded && ds.streamCardPendingTurnId) {
+              const publicationStillCurrent = await reconcilePublishedStreamingCard(ds, msgId);
+              if (publicationStillCurrent) {
+                // New card live — recall any cards parked by previous turns
+                // (user message, bot @mention, adopt-bridge new turn, etc.).
+                // This is the main turn-to-turn POST path; without recall here,
+                // every long session would leak old streaming cards into the
+                // thread.
+                recallFrozenCards(ds);
+                flushPendingLocalCliOpenReadinessPatch(ds);
+                flushPendingRiffUrlPatch(ds);
+                flushPendingActiveRuntimePatch(ds);
+                flushPendingCodexServiceTierPatch(ds);
+                // New-turn POST is the FIRST working screen_update of the turn —
+                // the else (same-turn PATCH) branch never runs for it, so arm the
+                // periodic usage refresh here (once the real card id exists, not
+                // the POSTING sentinel). syncUsageRefreshTimer re-checks state.
+                syncUsageRefreshTimer(ds);
+              }
+              if ((ds.streamCardTurnGeneration ?? 0) !== postingGeneration && ds.streamCardPendingTurnId) {
                 void postTurnStartingCard(ds, cb.sessionReply, ds.streamCardPendingTurnId);
               }
             })

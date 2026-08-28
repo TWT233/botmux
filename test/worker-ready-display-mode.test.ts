@@ -139,7 +139,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => ({
 
 // ─── Imports under test ────────────────────────────────────────────────────
 
-import { CARD_POSTING_SENTINEL, initWorkerPool, __testOnly_setupWorkerHandlers } from '../src/core/worker-pool.js';
+import { CARD_POSTING_SENTINEL, initWorkerPool, postTurnStartingCard, __testOnly_setupWorkerHandlers } from '../src/core/worker-pool.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
 import type { DaemonSession } from '../src/core/types.js';
 import { getBot } from '../src/bot-registry.js';
@@ -248,6 +248,57 @@ describe('Worker ready: set_display_mode re-sync', () => {
     expect(deleteMessageMock).not.toHaveBeenCalledWith('app_test', 'om_frozen_predecessor');
     expect(ds.frozenCards?.has('old')).toBe(true);
     expect(unpinMessageMock).toHaveBeenCalledWith('app_test', 'om_new_card');
+  });
+
+  it('schedules the successor after a turn-start Pin loses ownership', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
+    const ds = makeDs({ worker: makeFakeWorker(), workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
+    const oldPost = postTurnStartingCard(ds, sessionReplyMock, 'om_turn_old');
+    await flush();
+    expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+
+    ds.streamCardTurnGeneration = 1;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'om_turn_successor';
+    ds.streamCardId = undefined;
+    resolvePin(true);
+    await oldPost;
+    await flush();
+    await flush();
+
+    expect(sessionReplyMock).toHaveBeenCalledTimes(2);
+    expect(ds.streamCardPendingTurnId).toBeUndefined();
+  });
+
+  it('schedules the successor after a worker-ready Pin loses ownership', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({ worker: fakeWorker, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_old' });
+    await flush();
+    expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+
+    ds.streamCardTurnGeneration = 1;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'om_turn_successor';
+    ds.streamCardId = undefined;
+    resolvePin(true);
+    await flush();
+    await flush();
+
+    expect(sessionReplyMock).toHaveBeenCalledTimes(2);
+    expect(ds.streamCardPendingTurnId).toBeUndefined();
   });
 
   it('persists the exact shared Herdr target reported by the worker', () => {
@@ -495,6 +546,32 @@ describe('Worker ready: set_display_mode re-sync', () => {
     await flush();
 
     expect(ds.streamCardId).toBe('om_successor');
+  });
+
+  it('schedules the successor after a screen-update Pin loses ownership', async () => {
+    let resolvePin!: (value: boolean) => void;
+    pinMessageMock.mockImplementationOnce(() => new Promise<boolean>((resolve) => { resolvePin = resolve; }));
+    vi.mocked(getBot).mockReturnValue({
+      config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code', pinStreamingCard: true },
+      resolvedAllowedUsers: [], botOpenId: 'ou_bot', botName: 'TestBot',
+    } as any);
+    const fakeWorker = makeFakeWorker();
+    const ds = makeDs({ worker: fakeWorker, workerReady: true, streamCardPending: true, streamCardPendingTurnId: 'om_turn_old', streamCardId: undefined });
+    __testOnly_setupWorkerHandlers(ds, fakeWorker);
+    fakeWorker.emit('message', { type: 'screen_update', content: 'old', status: 'working', turnId: 'om_turn_old' });
+    await flush();
+    expect(sessionReplyMock).toHaveBeenCalledTimes(1);
+
+    ds.streamCardTurnGeneration = 1;
+    ds.streamCardPending = true;
+    ds.streamCardPendingTurnId = 'om_turn_successor';
+    ds.streamCardId = undefined;
+    resolvePin(true);
+    await flush();
+    await flush();
+
+    expect(sessionReplyMock).toHaveBeenCalledTimes(2);
+    expect(ds.streamCardPendingTurnId).toBeUndefined();
   });
 
   it('treats port=0 as ready without Web Terminal and keeps screen/screenshot state flowing', async () => {
