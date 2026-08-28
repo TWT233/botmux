@@ -1526,7 +1526,7 @@ describe('transferSession', () => {
     expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 
-  it('makes no Lark call for an enabled transfer on an apiOnly transport', async () => {
+  it('makes zero Pin or Unpin calls for an enabled transfer on an apiOnly transport', async () => {
     const ds = makeDs({ frozenCards: new Map([
       ['prior', { messageId: 'om_frozen_card', content: '', title: '', displayMode: 'hidden' }],
     ]) });
