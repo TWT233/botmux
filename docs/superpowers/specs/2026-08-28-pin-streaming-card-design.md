@@ -56,7 +56,7 @@ The setting is exposed through both existing operator surfaces:
 
 1. Dashboard: Bot Defaults → Cards, as a toggle describing that only the current
    public live-status card is pinned and failures do not interrupt sessions.
-2. Chat command: `/config set pinStreamingCard on|off`, with `effect: immediate`.
+2. Chat command: `/botconfig set pinStreamingCard on|off`, with `effect: immediate`.
 
 Both mutation paths trigger the same best-effort reconciliation after the
 configuration write succeeds:
@@ -141,12 +141,12 @@ by a failed or racing off-toggle.
 `reconcileBotStreamingCardPins` snapshots active sessions for the target bot and
 launches reconciliation with per-session error isolation. It is deliberately
 fire-and-forget from configuration handlers so Feishu latency cannot delay a
-Dashboard or `/config` response.
+Dashboard or `/botconfig` response.
 
 The config stores notify a small registered callback after the local disk and
 in-memory update succeeds. Registering the callback from daemon startup avoids a
 services-to-worker-pool import cycle and makes both Dashboard card-preference
-writes and generic `/config` writes share the same hot-toggle behavior.
+writes and generic `/botconfig` writes share the same hot-toggle behavior.
 
 ## Lifecycle and ordering
 
@@ -268,7 +268,7 @@ approved QoL/fail-open scope and must be called out in the merge request.
 ### Unit 1: Configuration contract and operator surfaces
 
 Add `pinStreamingCard` to `BotConfig`, card-preference persistence, bot config
-normalization, `/config`, Dashboard IPC/payload/types/UI, and bilingual Dashboard
+normalization, `/botconfig`, Dashboard IPC/payload/types/UI, and bilingual Dashboard
 copy. Verify default-off behavior, true/false round trips, malformed input,
 partial-patch preservation, optimistic UI rollback, and immediate in-memory
 visibility. Commit this unit independently.
@@ -293,7 +293,7 @@ Units 1 and 2 are available.
 Register the preference-change callback, reconcile existing active sessions when
 the setting changes, document the setting and failure semantics, and add the MR
 discussion prompt about a possible future default-on policy. Verify both
-Dashboard and `/config` mutation paths. Commit it independently.
+Dashboard and `/botconfig` mutation paths. Commit it independently.
 
 ## Dependency graph
 
@@ -307,7 +307,7 @@ Unit 2: Lark transport ────────┼─[true blocking]─> Unit 4:
 Unit 3: lifecycle integration ─┘
 ```
 
-Units 1 and 2 are independent. The Dashboard UI and `/config` entry share the
+Units 1 and 2 are independent. The Dashboard UI and `/botconfig` entry share the
 same frozen field contract rather than a runtime dependency. Unit 3 depends on
 both the resolved setting and the Pin transport. Unit 4 depends on all prior
 interfaces because it reconciles already-active sessions.
@@ -316,7 +316,7 @@ interfaces because it reconciles already-active sessions.
 
 Automated verification must include:
 
-- focused config store, Dashboard IPC/payload/UI, and `/config` tests;
+- focused config store, Dashboard IPC/payload/UI, and `/botconfig` tests;
 - focused Lark Pin wrapper tests;
 - streaming-card publication/reuse/replacement tests that assert Pin-before-
   Unpin ordering and no Pin for stale POSTs;
