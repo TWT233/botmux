@@ -2154,10 +2154,12 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
   const state = pendingBotStreamingCardReconciles.get(larkAppId);
   if (!state || state.running) return;
   state.running = true;
+  let settledVersion = state.desiredVersion;
   try {
     while (true) {
       const enabled = state.desiredEnabled;
       const desiredVersion = state.desiredVersion;
+      settledVersion = desiredVersion;
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
       await Promise.allSettled(
         sessions.map(async (ds) => {
@@ -2172,7 +2174,12 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
     }
   } finally {
     state.running = false;
-    if (state.desiredVersion === pendingBotStreamingCardReconciles.get(larkAppId)?.desiredVersion) {
+    // No await occurs between the loop's break condition and this branch, so a
+    // newly-arrived toggle cannot interleave until after `settledVersion` is
+    // compared here. If the desired version is unchanged, this queue instance
+    // fully absorbed the latest bot-wide state and can be removed.
+    if (pendingBotStreamingCardReconciles.get(larkAppId) !== state) return;
+    if (state.desiredVersion === settledVersion) {
       pendingBotStreamingCardReconciles.delete(larkAppId);
       return;
     }
