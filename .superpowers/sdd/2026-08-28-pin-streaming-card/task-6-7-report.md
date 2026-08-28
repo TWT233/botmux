@@ -60,3 +60,11 @@ Implemented as one hot-reconciliation and documentation unit. The focused Task 6
 - Review found that TypeScript still allows an `async` `PinStreamingCardChangeHandler` even when the type was declared as `void`, so the original `notifyPinStreamingCardChanged()` only caught synchronous throws and could leak an unhandled Promise rejection.
 - The seam contract now explicitly accepts `void | PromiseLike<void>`. `notifyPinStreamingCardChanged()` remains non-blocking, wraps the return value with `Promise.resolve(...)`, and logs any asynchronous rejection via `.catch(...)` while still catching synchronous throws in the outer `try/catch`.
 - Added a regression test proving `notifyPinStreamingCardChanged()` does not throw or block when the handler rejects asynchronously, and that the rejection is consumed and logged.
+
+## Follow-up fix: bot-wide latest-state reconciliation queue
+
+- Review found a bot-wide race on rapid `pinStreamingCard` toggles: an older disable reconciliation could still finish its deferred Unpin after a newer enable started, leaving the final `on` state without the current card pinned.
+- `reconcileBotStreamingCardPins()` now uses a per-`larkAppId` fire-and-forget queue. Different bots still reconcile in parallel, but each bot serializes generations and collapses them to the latest desired state before rerunning.
+- Each generation takes a fresh snapshot of matching active sessions only: same `larkAppId`, `session.status === 'active'`, current registry owner for that session key, and not displaced by a newer live owner. Disable uses that same bounded snapshot.
+- Inside one bot generation, per-session reconciliation now runs concurrently with `Promise.allSettled(...)`, so one slow or failing session does not block peer sessions while bot-level generations remain ordered.
+- Added lifecycle regressions for deferred disable→enable and enable→disable ordering, plus snapshot filtering for inactive and displaced sessions, and a test-only queue reset to prevent cross-test leakage.

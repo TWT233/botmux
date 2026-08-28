@@ -2128,15 +2128,74 @@ export async function reconcileStreamingCardPins(ds: DaemonSession, enabled: boo
   }
 }
 
+type PendingBotStreamingCardReconcile = {
+  desiredVersion: number;
+  desiredEnabled: boolean;
+  running: boolean;
+};
+
+const pendingBotStreamingCardReconciles = new Map<string, PendingBotStreamingCardReconcile>();
+
+function snapshotBotStreamingCardReconcileSessions(larkAppId: string): DaemonSession[] {
+  if (!activeSessionsRegistry) return [];
+  const sessions = new Map<string, DaemonSession>();
+  for (const ds of activeSessionsRegistry.values()) {
+    if (ds.larkAppId !== larkAppId) continue;
+    if (ds.session.status !== 'active') continue;
+    if (isSessionTransferring(ds)) continue;
+    const key = sessionKey(sessionAnchorId(ds), ds.larkAppId);
+    if (activeSessionsRegistry.get(key) !== ds) continue;
+    sessions.set(ds.session.sessionId, ds);
+  }
+  return [...sessions.values()];
+}
+
+async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<void> {
+  const state = pendingBotStreamingCardReconciles.get(larkAppId);
+  if (!state || state.running) return;
+  state.running = true;
+  try {
+    while (true) {
+      const enabled = state.desiredEnabled;
+      const desiredVersion = state.desiredVersion;
+      const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
+      await Promise.allSettled(
+        sessions.map(async (ds) => {
+          try {
+            await reconcileStreamingCardPins(ds, enabled);
+          } catch {
+            /* per-session reconciliation remains fail-open */
+          }
+        }),
+      );
+      if (state.desiredVersion === desiredVersion) break;
+    }
+  } finally {
+    state.running = false;
+    if (state.desiredVersion === pendingBotStreamingCardReconciles.get(larkAppId)?.desiredVersion) {
+      pendingBotStreamingCardReconciles.delete(larkAppId);
+      return;
+    }
+    void drainBotStreamingCardReconcileQueue(larkAppId);
+  }
+}
+
 /** Fire-and-forget bot-wide reconciliation so configuration mutation remains
  * responsive even when Lark Pin APIs are slow or unavailable. */
 export function reconcileBotStreamingCardPins(larkAppId: string, enabled: boolean): void {
-  const sessions = activeSessionsRegistry
-    ? [...new Set([...activeSessionsRegistry.values()].filter(ds => ds.larkAppId === larkAppId))]
-    : [];
-  for (const ds of sessions) {
-    void reconcileStreamingCardPins(ds, enabled).catch(() => { /* policy is fail-open */ });
+  const state = pendingBotStreamingCardReconciles.get(larkAppId);
+  if (state) {
+    state.desiredEnabled = enabled;
+    state.desiredVersion += 1;
+    if (!state.running) void drainBotStreamingCardReconcileQueue(larkAppId);
+    return;
   }
+  pendingBotStreamingCardReconciles.set(larkAppId, { desiredEnabled: enabled, desiredVersion: 1, running: false });
+  void drainBotStreamingCardReconcileQueue(larkAppId);
+}
+
+export function __testOnly_resetPinStreamingCardReconcileQueue(): void {
+  pendingBotStreamingCardReconciles.clear();
 }
 
 /** The first visible state for a newly accepted turn.
