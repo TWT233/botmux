@@ -5973,6 +5973,7 @@ export async function closeSession(
   // public streaming-card ids before that transaction, never await their
   // cleanup on the close path.
   const closeAppId = ds?.larkAppId ?? stored?.larkAppId;
+  let closeStoredOwner: StreamingCardOwner | undefined;
   let closePinnedStreamingIds: string[] = [];
   if (closeAppId) {
     if (ds) {
@@ -5992,10 +5993,11 @@ export async function closeSession(
       } catch (err) {
         logger.debug(`[${sessionId.slice(0, 8)}] could not load frozen cards for close Pin cleanup: ${err instanceof Error ? err.message : String(err)}`);
       }
+      closeStoredOwner = { sessionId: stored.sessionId, larkAppId: closeAppId };
       closePinnedStreamingIds = captureLifecycleStreamingCardCleanupIds(
         closeAppId,
         stored.chatId,
-        stored,
+        closeStoredOwner,
         [...ids],
       );
     }
@@ -6125,8 +6127,9 @@ export async function closeSession(
       }
     }
     if (hadPreviewTarget) publishSessionPreviewCleared(sessionId);
-    if (closeAppId && closePinnedStreamingIds.length > 0) {
-      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, ds ?? stored);
+    const closeStreamingOwner = ds ?? closeStoredOwner;
+    if (closeAppId && closeStreamingOwner && closePinnedStreamingIds.length > 0) {
+      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, closeStreamingOwner);
     }
   }
 
