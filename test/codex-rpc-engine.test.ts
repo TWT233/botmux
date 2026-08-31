@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess, type SpawnOptions } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRpcEngine } from '../src/codex-rpc-engine.js';
@@ -12,12 +12,17 @@ const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } ca
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-codex-rpc-server.mjs', import.meta.url));
 beforeAll(() => { chmodSync(FIXTURE, 0o755); });
 
-function makeEngine(over: Partial<ConstructorParameters<typeof CodexRpcEngine>[0]> = {}) {
+type EngineDependencies = NonNullable<ConstructorParameters<typeof CodexRpcEngine>[1]>;
+
+function makeEngine(
+  over: Partial<ConstructorParameters<typeof CodexRpcEngine>[0]> = {},
+  dependencies?: EngineDependencies,
+) {
   return new CodexRpcEngine({
-    cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+    cliBin: FIXTURE, cwd: tmpdir(), env: process.env,
     sessionId: `test-${Math.round(performance.now())}-${over.sessionId ?? ''}`,
     ...over,
-  });
+  }, dependencies);
 }
 const owner = (turnId: string, dispatchAttempt?: number) => ({
   turnId,
@@ -25,17 +30,44 @@ const owner = (turnId: string, dispatchAttempt?: number) => ({
 });
 
 describe('CodexRpcEngine — happy-path lifecycle against a fake app-server', () => {
-  it('passes generic process config only to the model-owning app-server', async () => {
+  it('passes exact argv and env to the model-owning app-server through a portable spawn seam', async () => {
+    const launches: Array<{ command: string; args: string[]; options: SpawnOptions }> = [];
+    const childEnv = { ...process.env, BOTMUX_SESSION_ID: 'rpc-spawn-capture' };
+    const cwd = tmpdir();
     const engine = makeEngine({
-      appServerConfig: ['hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]'],
+      cwd,
+      env: childEnv,
+      appServerFeatures: ['feature-a', 'feature-b'],
+      appServerConfig: ['config-a', 'hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]'],
+    }, {
+      spawnProcess(command: string, args: string[], options: SpawnOptions): ChildProcess {
+        launches.push({ command, args: [...args], options });
+        return spawn(command, args, options);
+      },
     });
-    await engine.start();
-    const pid = engine.appServerPid;
-    expect(pid).toBeTypeOf('number');
-    const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
-    engine.stop();
-    expect(argv).toContain('-c');
-    expect(argv).toContain('hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]');
+    try {
+      await engine.start();
+      expect(launches).toHaveLength(1);
+      expect(launches[0]).toEqual({
+        command: FIXTURE,
+        args: [
+          'app-server',
+          '--enable', 'feature-a',
+          '--enable', 'feature-b',
+          '-c', 'config-a',
+          '-c', 'hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]',
+          '--listen', engine.wsUrl,
+        ],
+        options: {
+          cwd,
+          env: childEnv,
+          stdio: ['ignore', 'ignore', 'pipe'],
+          detached: true,
+        },
+      });
+    } finally {
+      engine.stop();
+    }
   }, 20_000);
 
   it('start (spawn → /readyz → connect → initialize) then startThread → sendTurn → stop', async () => {
