@@ -1,5 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { hookCommandFor, sessionReadyHookCommand } from '../src/adapters/hook-command.js';
+import {
+  hookCommandFor,
+  nativeSubagentRuntimeHookCommand,
+  sessionReadyHookCommand,
+} from '../src/adapters/hook-command.js';
 
 // 回归保护：hook 命令必须指向 cli.js（有 `hook` 子命令分发），
 // 绝不能指向 index-daemon.js（只 startDaemon、不处理 hook）。
@@ -30,5 +34,13 @@ describe('sessionReadyHookCommand', () => {
   it('Node 路径与 cli 路径均加引号（容忍空格），无 cliId 参数', () => {
     const cmd = sessionReadyHookCommand();
     expect(cmd).toMatch(/^".+" ".+cli\.js" session-ready$/);
+  });
+});
+
+describe('nativeSubagentRuntimeHookCommand', () => {
+  it('renders the Node CLI entry and exact native-subagent-runtime-hook subcommand', () => {
+    const cmd = nativeSubagentRuntimeHookCommand();
+    expect(cmd).toMatch(/^".+" ".+cli\.js" native-subagent-runtime-hook$/);
+    expect(cmd).not.toContain('index-daemon');
   });
 });

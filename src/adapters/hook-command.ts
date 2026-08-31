@@ -114,3 +114,16 @@ export function sessionReadyHookCommand(): string {
 export function userPromptHookCommand(): string {
   return renderShellCommand(undefined, 'user-prompt-hook');
 }
+<<<<<<< HEAD
+=======
+
+/**
+ * Construct the process-scoped TraeCode `spawn_agent` runtime-policy hook.
+ * The command has the same Node/standalone split as every other external hook:
+ * a compiled binary re-execs itself, while Node needs the physical cli.js path.
+ */
+export function nativeSubagentRuntimeHookCommand(): string {
+  return renderShellCommand(undefined, 'native-subagent-runtime-hook');
+}
+
+>>>>>>> be1a303b (feat(subagent): 接入运行时策略钩子)

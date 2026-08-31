@@ -302,6 +302,102 @@ describe('dashboard IPC server', () => {
   });
 });
 
+describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
+  const SESSION_ID = 'native-runtime-session';
+  const SESSION_APP = 'native-runtime-owner';
+  const OTHER_APP = 'native-runtime-attacker';
+  const CAPABILITY = 'ab'.repeat(32);
+
+  function installRuntimeSession(policy?: unknown) {
+    registerBot({
+      larkAppId: SESSION_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+      ...(policy === undefined ? {} : { nativeSubagentRuntime: policy as any }),
+    });
+    registerBot({
+      larkAppId: OTHER_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+      nativeSubagentRuntime: { model: { mode: 'custom', value: 'attacker-model' } },
+    });
+    const session = { sessionId: SESSION_ID, rootMessageId: 'om_native' } as any;
+    const active = {
+      session, worker: null, workerPort: null, workerToken: null,
+      larkAppId: SESSION_APP, chatId: 'oc_native', chatType: 'group', scope: 'thread',
+      spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(),
+      hasHistory: true, managedTurnOrigin: { capability: CAPABILITY, turnId: 'turn-native' },
+    } as any;
+    workerPool.setActiveSessionsRegistry(new Map([[SESSION_ID, active]]));
+    return active;
+  }
+
+  async function post(body: Record<string, unknown>, headers: Record<string, string> = {}) {
+    const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+    return fetch(`http://127.0.0.1:${handle!.port}${path}`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', ...headers },
+      body: JSON.stringify(body),
+    });
+  }
+
+  afterEach(() => workerPool.setActiveSessionsRegistry(new Map()));
+
+  it('returns only the session bot normalized policy to trusted-host HMAC callers', async () => {
+    installRuntimeSession({ model: { mode: 'custom', value: 'session-model' } });
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+    const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+    const res = await post(
+      { larkAppId: OTHER_APP, botId: OTHER_APP },
+      trustedHostHeaders('POST', path, handle.port),
+    );
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({
+      ok: true,
+      policy: { model: { mode: 'custom', value: 'session-model' } },
+    });
+  });
+
+  it('accepts the exact live managed-origin capability and rejects cross-session/stale/missing claims', async () => {
+    const active = installRuntimeSession({ reasoningEffort: { mode: 'custom', value: 'high' } });
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+
+    const accepted = await post({ originCapability: CAPABILITY });
+    expect(accepted.status).toBe(200);
+    expect(await accepted.json()).toEqual({
+      ok: true,
+      policy: { reasoningEffort: { mode: 'custom', value: 'high' } },
+    });
+
+    active.managedTurnOrigin = { capability: 'cd'.repeat(32), turnId: 'turn-new' };
+    for (const body of [
+      { originCapability: CAPABILITY },
+      {},
+      { sessionId: 'some-other-session', originCapability: CAPABILITY },
+    ]) {
+      const denied = await post(body);
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ ok: false, error: 'origin_unproven' });
+    }
+  });
+
+  it('fails open to an absent policy for missing or malformed persisted state', async () => {
+    const active = installRuntimeSession();
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+    const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+    const headers = trustedHostHeaders('POST', path, handle.port);
+
+    const absent = await post({}, headers);
+    expect(await absent.json()).toEqual({ ok: true });
+
+    (getBot(active.larkAppId).config as any).nativeSubagentRuntime = {
+      reasoningEffort: { mode: 'custom', value: 'impossible' },
+    };
+    const malformed = await post({}, trustedHostHeaders('POST', path, handle.port));
+    expect(malformed.status).toBe(200);
+    expect(await malformed.json()).toEqual({ ok: true });
+  });
+});
+
 // The verifier's REAL on-disk secret read (ipcAuthSecret → loadDashboardSecret)
 // — every other test injects the key via setIpcAuthSecret and never exercises
 // this branch. This is a per-request verifier on ~96 daemon IPC routes; a
