@@ -110,7 +110,7 @@ describe('clone 目录形态：源目录不能被目标的默认值遮蔽', () =
 describe('clone native subagent runtime policy', () => {
   it('copies the policy as behavior configuration', () => {
     const nativeSubagentRuntime = {
-      model: { mode: 'inherit' },
+      model: { mode: 'custom', value: 'GPT-5.6-Sol' },
       reasoningEffort: { mode: 'custom', value: 'high' },
     };
     const cloned = cloneBotConfig(
