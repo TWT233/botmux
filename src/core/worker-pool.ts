@@ -13267,7 +13267,15 @@ function setupWorkerHandlers(
         // from clearing a capability already rotated for turn N+1.
         if (ds.managedTurnOrigin?.turnId === msg.turnId
           && ds.managedTurnOrigin.dispatchAttempt === msg.dispatchAttempt) {
-          ds.managedTurnOrigin = undefined;
+          ds.managedTurnOrigin = ds.managedTurnOrigin.policyCapability
+            ? {
+                capability: randomBytes(32).toString('hex'),
+                ...(ds.managedTurnOrigin.originChannelId
+                  ? { originChannelId: ds.managedTurnOrigin.originChannelId }
+                  : {}),
+                policyCapability: ds.managedTurnOrigin.policyCapability,
+              }
+            : undefined;
         }
         // Settle this turn's native CoT message, if one is live. Cosmetic and
         // self-catching — must never delay or fail the terminal path
@@ -13592,6 +13600,7 @@ function setupWorkerHandlers(
                 sessionId: msg.sessionId,
                 channelId: msg.originChannelId,
                 capability: msg.capability,
+                ...(msg.policyCapability ? { policyCapability: msg.policyCapability } : {}),
                 larkAppId: ds.larkAppId,
                 bootInstanceId: getDaemonBootId(),
                 ...(Number.isSafeInteger(ipcPort) && ipcPort > 0 && ipcPort <= 65_535
@@ -13612,6 +13621,7 @@ function setupWorkerHandlers(
         const preexistingProcessIdentities = currentTurnProcessIdentities(ds, msg.turnId);
         ds.managedTurnOrigin = {
           capability: msg.capability,
+          ...(msg.policyCapability ? { policyCapability: msg.policyCapability } : {}),
           ...(msg.originChannelId ? { originChannelId: msg.originChannelId } : {}),
           ...(msg.turnId ? { turnId: msg.turnId } : {}),
           ...(msg.dispatchAttempt !== undefined
@@ -13656,7 +13666,15 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Ignored unbound stale managed turn origin revoke`);
           break;
         }
-        ds.managedTurnOrigin = undefined;
+        ds.managedTurnOrigin = ds.managedTurnOrigin?.policyCapability
+          ? {
+              capability: randomBytes(32).toString('hex'),
+              ...(msg.originChannelId ?? ds.managedTurnOrigin.originChannelId
+                ? { originChannelId: msg.originChannelId ?? ds.managedTurnOrigin.originChannelId }
+                : {}),
+              policyCapability: ds.managedTurnOrigin.policyCapability,
+            }
+          : undefined;
         break;
       }
 

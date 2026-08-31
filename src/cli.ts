@@ -200,6 +200,7 @@ import {
   managedOriginLegacyIsolationProbeAccess,
   readManagedOriginRootLocator,
   readManagedOriginCapability,
+  readManagedOriginPolicyCapability,
 } from './core/managed-origin-capability.js';
 import {
   attestManagedOrigin,
@@ -12177,14 +12178,14 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     if (!process.env.BOTMUX_SEND_RELAY) {
       try { hostSecret = loadDaemonIpcSecret(); } catch { /* isolated */ }
     }
-    let claim: ReturnType<typeof readManagedOriginCapability> = null;
+    let policyClaim: ReturnType<typeof readManagedOriginPolicyCapability> = null;
     if (!hostSecret) {
       const originChannelId = process.env.BOTMUX_ORIGIN_CHANNEL_ID;
       if (!originChannelId) return;
-      claim = readManagedOriginCapability(
+      policyClaim = readManagedOriginPolicyCapability(
         resolveDataDir(), sessionId, undefined, originChannelId,
       );
-      if (!claim) return;
+      if (!policyClaim) return;
     }
     let daemon: DaemonDescriptorLite | null = null;
     if (hostSecret) {
@@ -12195,10 +12196,10 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     // deliberately not consulted on this path.
     const ipcPort = hostSecret
       ? resolveDaemonIpcPort(daemon?.ipcPort, process.env.BOTMUX_DAEMON_IPC_PORT)
-      : claim?.ipcPort;
+      : policyClaim?.ipcPort;
     if (!ipcPort) return;
-    const targetLarkAppId = hostSecret ? daemon?.larkAppId : claim?.larkAppId;
-    const targetBootInstanceId = hostSecret ? daemon?.bootInstanceId : claim?.bootInstanceId;
+    const targetLarkAppId = hostSecret ? daemon?.larkAppId : policyClaim?.larkAppId;
+    const targetBootInstanceId = hostSecret ? daemon?.bootInstanceId : policyClaim?.bootInstanceId;
     if (targetLarkAppId !== larkAppId || !targetBootInstanceId) return;
     const path = `/api/sessions/${encodeURIComponent(sessionId)}/native-subagent-runtime`;
     const requestNonce = generateNativeSubagentRuntimeNonce();
@@ -12207,17 +12208,13 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           larkAppId: targetLarkAppId, bootInstanceId: targetBootInstanceId, nonce: requestNonce,
         })
       : nativeSubagentRuntimeCapabilityHeaders({
-          capability: claim!.capability,
+          capability: policyClaim!.policyCapability,
           method: 'POST',
           path,
           port: ipcPort,
           sessionId,
           larkAppId: targetLarkAppId,
           bootInstanceId: targetBootInstanceId,
-          ...(claim!.turnId ? { turnId: claim!.turnId } : {}),
-          ...(claim!.dispatchAttempt !== undefined
-            ? { dispatchAttempt: claim!.dispatchAttempt }
-            : {}),
           nonce: requestNonce,
         });
     const controller = new AbortController();
@@ -12235,20 +12232,7 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
       response = hostSecret
         ? await fetchDaemonIpc(ipcPort, path, init, hostSecret)
         : await loopbackFetch(`http://127.0.0.1:${ipcPort}${path}`, init);
-      if (response.status === 429) {
-        void response.body?.cancel().catch(() => {});
-        nativeSubagentDiagnostic('policy service overloaded; denying spawn');
-        await writeNativeSubagentHookDirective({
-          hookSpecificOutput: {
-            hookEventName: 'PreToolUse',
-            permissionDecision: 'deny',
-            permissionDecisionReason:
-              'Native subagent runtime policy is temporarily overloaded; retry spawn_agent',
-          },
-        });
-        return;
-      }
-      if (!response.ok) {
+      if (response.status !== 429 && !response.ok) {
         void response.body?.cancel().catch(() => {});
         return;
       }
@@ -12259,9 +12243,9 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     const responseBinding = {
       requestNonce, method: 'POST', path, port: ipcPort, status: response.status, raw,
       sessionId, larkAppId: targetLarkAppId, bootInstanceId: targetBootInstanceId,
-      ...(!hostSecret && claim!.turnId ? { turnId: claim!.turnId } : {}),
-      ...(!hostSecret && claim!.dispatchAttempt !== undefined
-        ? { dispatchAttempt: claim!.dispatchAttempt }
+      ...(!hostSecret && policyClaim!.turnId ? { turnId: policyClaim!.turnId } : {}),
+      ...(!hostSecret && policyClaim!.dispatchAttempt !== undefined
+        ? { dispatchAttempt: policyClaim!.dispatchAttempt }
         : {}),
     };
     const responseAuthenticated = hostSecret
@@ -12279,23 +12263,35 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           signature: response.headers.get(NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature),
         })
       : false;
-    const proofAuthenticated = !hostSecret && claim?.channelId
+    const proofAuthenticated = !hostSecret && policyClaim?.channelId
       ? readNativeSubagentRuntimeResponseProof({
           dataDir: resolveDataDir(),
-          channelId: claim.channelId,
+          channelId: policyClaim.channelId,
           nonce: requestNonce,
           response: {
             method: 'POST', path, port: ipcPort, status: response.status, body: raw, sessionId,
             larkAppId: targetLarkAppId, bootInstanceId: targetBootInstanceId,
-            ...(claim.turnId ? { turnId: claim.turnId } : {}),
-            ...(claim.dispatchAttempt !== undefined
-              ? { dispatchAttempt: claim.dispatchAttempt }
+            ...(policyClaim.turnId ? { turnId: policyClaim.turnId } : {}),
+            ...(policyClaim.dispatchAttempt !== undefined
+              ? { dispatchAttempt: policyClaim.dispatchAttempt }
               : {}),
           },
         })
       : false;
     if (hostSecret ? !responseAuthenticated : !proofAuthenticated) {
       nativeSubagentDiagnostic('daemon response authentication failed; allowing spawn');
+      return;
+    }
+    if (response.status === 429) {
+      nativeSubagentDiagnostic('policy service overloaded; denying spawn');
+      await writeNativeSubagentHookDirective({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason:
+            'Native subagent runtime policy is temporarily overloaded; retry spawn_agent',
+        },
+      });
       return;
     }
     const data = JSON.parse(raw) as { ok?: unknown; invalidPolicy?: unknown; policy?: unknown };

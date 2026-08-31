@@ -18,12 +18,13 @@
 - Preserve every unrelated spawn field. Do not rewrite role, prompt, history/fork mode, service tier, or background mode.
 - Built-in role conflicts must remain explicit TraeCode errors; never silently downgrade, remove a policy, or change the role.
 - The hook must compose with existing global/project hooks and must not mutate `~/.trae/hooks.json`.
-- Hook transport failures and malformed stored state fail open with diagnostics, except that an explicit daemon `429` overload response must deny the spawn.
+- Hook transport failures and malformed stored state fail open with diagnostics, except that an explicit authenticated daemon `429` overload response must deny the spawn.
 - Never send the managed-origin capability; use it only as a local HMAC key for the sandbox request proof, and authenticate sandbox responses through the daemon-written exact-response proof.
 - Bound the response body to 16 KiB and the complete hook request to two seconds.
 - Bound preauth admission, nonce replay storage, and outstanding response-proof issuance so overload returns `429` rather than silently bypassing policy.
 - Host response HMAC must bind challenge, method, path, port, status, exact bytes, session, app, and boot identity.
 - Sandboxed callers must prefer the protected read-only per-channel claim's IPC port over mutable discovery data.
+- Runtime-policy lookup must use a separate session-lifetime `policyCapability`; turn terminal and intentional restart revoke only the live send capability, while worker-generation turnover revokes both.
 - Persistent sandboxed panes must treat isolation-policy digest drift as a cold-spawn boundary; no inherit mode exists anywhere in this feature.
 - Use the shared worktree `node_modules` symlink; never run `bun install` in a worktree.
 - Every implementation unit follows RED-GREEN, is committed, and is pushed before the next unit begins.
@@ -128,15 +129,17 @@ Host callers keep the route-and-port-bound dashboard-secret request HMAC and add
 a random 32-byte response challenge. The host response HMAC must bind challenge,
 method, exact path, actual port, status, exact response bytes, session, app, and
 daemon boot identity. Sandboxed callers prefer the protected read-only
-per-channel claim's IPC port and use the rotating managed-origin capability only
-as a local HMAC key, never as a transmitted bearer. The sandbox request proof
-binds timestamp, nonce, method, exact path, actual port, session, app, boot,
-current turn, and dispatch attempt. Sandbox response authenticity is not another
-capability HMAC: the daemon writes a short-lived read-only exact-response proof,
-and the hook must verify that proof before JSON parsing. Preauth admission,
-nonce replay, and outstanding proof issuance are all bounded; an exhausted bound
-returns `429`, and the hook intentionally denies `spawn_agent` only for that
-explicit overload response while other transport/protocol/authentication failures
+per-channel claim's IPC port and use the session-lifetime `policyCapability`
+only as a local HMAC key, never as a transmitted bearer; the ordinary live send
+capability remains reserved for turn-bound send/ask routes. The sandbox request
+proof binds timestamp, nonce, method, exact path, actual port, session, app,
+boot, current turn, and dispatch attempt. Sandbox response authenticity is not
+another capability HMAC: the daemon writes a short-lived read-only
+exact-response proof, and the hook must verify that proof before JSON parsing.
+Preauth admission, nonce replay, and outstanding proof issuance are all bounded;
+an exhausted bound returns `429`, and the hook intentionally denies
+`spawn_agent` only for an authenticated overload response while other
+transport/protocol/authentication failures, including forged `429` responses,
 remain fail-open. The daemon serves one authoritative in-memory
 absent/valid/invalid policy state without rereading `bots.json`. The hook
 cancels a stream that exceeds 16 KiB or the two-second deadline. It does not
