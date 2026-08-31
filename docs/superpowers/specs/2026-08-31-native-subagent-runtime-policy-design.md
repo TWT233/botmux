@@ -142,13 +142,16 @@ drop or downgrade the configured value.
 6. TraeCode performs its normal schema, model-catalog, fork, and role validation
    and either starts the child or reports the conflict to the parent.
 
-The hook transport is fail-open when the owning daemon is unavailable, matching
-Botmux's existing hook resilience: a daemon outage must not make an otherwise
-usable local TraeCode session unable to spawn children. Malformed hook input or
-an invalid stored policy also fails open and emits a debug diagnostic; persisted
-policy has already passed the Dashboard/config-loader validation boundary, and a
-bad local record must not brick every spawn. No diagnostic contains credentials
-or the rest of the bot configuration.
+The hook transport is fail-open for transport, parsing, and ordinary policy
+lookup failures: daemon unavailability, malformed hook input, malformed daemon
+payloads, failed response authentication, or an invalid stored policy all emit a
+bounded diagnostic and then allow the spawn. This preserves Botmux's existing
+hook resilience: a daemon outage must not make an otherwise usable local
+TraeCode session unable to spawn children. The only intentional fail-closed case
+is an explicit `429` overload response from the selected trusted/protected daemon
+destination, which denies `spawn_agent` so quota pressure cannot bypass a
+configured runtime policy. No diagnostic contains credentials or the rest of the
+bot configuration.
 
 The daemon serves the policy from one authoritative in-memory per-bot state:
 absent, valid, or invalid. It never rereads `bots.json` on the spawn hot path.
@@ -156,8 +159,15 @@ An invalid state is reported as a fixed flag without returning the raw value.
 
 Sessions created after this feature is installed always contain the process hook.
 Policy edits therefore apply to their next spawn without restarting the parent.
-A TraeCode process that survived an upgrade from an older Botmux build may need
-one session restart because it started before the process-scoped hook existed.
+The hook command is rendered through the stable daemon-updated `botmux` wrapper
+rather than a checkout-local `dist/cli.js` path, so long-lived panes pick up the
+current Node or standalone build automatically. For persistent sandboxed panes,
+warm reattach remains gated by the daemon-managed isolation marker and its policy
+digest: install-root or native-hook protocol drift invalidates warm reattach and
+forces a cold spawn under the current policy instead of inheriting stale runtime
+state. A TraeCode process that survived an upgrade from an older Botmux build may
+still need one session restart because it started before the process-scoped hook
+existed.
 
 ## Dashboard behavior
 
@@ -193,14 +203,22 @@ live updates and resume-time reconstruction.
 - Hook stdin is size-bounded and parsed as an object. Malformed input produces no
   rewrite and a debug diagnostic.
 - Host requests retain the route-and-port-bound dashboard-secret request HMAC
-  and add a random challenge. The daemon signs the exact status and response
-  bytes with that challenge, method, path, port, and session identity.
+  and add a random nonce challenge. The daemon signs the exact status and
+  response bytes with that challenge, method, path, port, session, app, and
+  daemon boot identity.
 - Sandboxed callers use the rotating managed-origin capability only as a local
   HMAC key; the raw capability is never transmitted. The request proof binds a
-  timestamp, nonce, method, path, port, session, turn, and dispatch attempt, and
-  the response is signed over the same live identity plus its exact bytes.
+  protected read-only per-channel claim to timestamp, nonce, method, path, port,
+  session, app, boot, turn, and dispatch attempt, and the hook prefers that
+  protected claim's IPC port over mutable discovery data.
+- Sandboxed response authenticity does not reuse the capability HMAC. Instead the
+  daemon writes a short-lived read-only exact-response proof keyed by the managed
+  origin channel, and the hook accepts the response only when that proof matches
+  the exact response bytes plus status, method, path, port, session, app, boot,
+  turn, and dispatch attempt.
 - Nonces are replay-protected, timestamps allow at most 30 seconds of skew, and
-  the hook prefers the protected claim's IPC port on the capability path.
+  the preauth, nonce-store, and outstanding-proof paths are all explicitly
+  bounded; an exhausted preauth/nonce/proof quota returns `429`.
 - The endpoint returns only normalized policy data; it never returns credentials
   or arbitrary bot configuration.
 - Response reads have a two-second deadline and a streaming 16 KiB cap; overflow
@@ -224,13 +242,21 @@ Automated coverage will prove:
   cross-provider pair;
 - unsupported legacy modes are dropped at config load; daemon unavailability
   remains fail-open;
+- explicit daemon overload (`429`) denies the spawn while other IPC/auth/parse
+  failures still fail open;
 - process hook arguments are present in plain TUI and app-server launches and do
   not remove unrelated hooks;
+- host responses bind challenge/method/path/port/status/exact bytes/session/app/boot,
+  while sandbox responses require the daemon-written exact-response proof rather
+  than a capability-HMAC response;
 - Dashboard GET/PUT preserves, replaces, clears, validates, and renders the policy;
 - clone retains the policy while public bot summaries and current preset export do
   not expose it;
 - `collab_agent_spawn_end` no longer changes parent runtime while later
   `turn_context` records still do;
+- the stable daemon-written wrapper is used for the hook command, and persistent
+  sandboxed panes cold-spawn when the isolation policy digest drifts instead of
+  inheriting stale hook/runtime assumptions;
 - build, focused suites, the full unit suite, and a real isolated TraeCode spawn
   smoke all pass.
 
