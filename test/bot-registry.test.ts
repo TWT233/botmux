@@ -105,6 +105,17 @@ describe('registerBot', () => {
     expect(invalid.nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
   });
 
+  it('keeps invalid provenance when the same direct config object is registered again', () => {
+    const cfg = makeCfg({
+      larkAppId: 'direct-invalid-repeat',
+      cliId: 'traex',
+      nativeSubagentRuntime: { reasoningEffort: { mode: 'custom', value: 'impossible' } },
+    }) as any;
+
+    expect(mod.registerBot(cfg).nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
+    expect(mod.registerBot(cfg).nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
+  });
+
   it('publishes live policy and metadata together through the narrow registry updater', () => {
     const state = mod.registerBot(makeCfg({ larkAppId: 'live-policy', cliId: 'traex' }) as any);
 
