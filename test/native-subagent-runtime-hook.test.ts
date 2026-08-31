@@ -1,14 +1,25 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawnTsScript } from './helpers/ts-runner.js';
+import { NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS, signNativeSubagentRuntimeResponse, writeNativeSubagentRuntimeResponseProof } from '../src/core/native-subagent-runtime-ipc-auth.js';
+import {
+  ensureManagedOriginAttestationDirectory,
+  managedOriginCapabilityPath,
+  replaceManagedOriginCapabilityFile,
+} from '../src/core/managed-origin-capability.js';
 
 const CLI = resolve('src/cli.ts');
 const CAPABILITY = 'ab'.repeat(32);
+const HOST_SECRET = 'native-runtime-test-host-secret';
+const APP_ID = 'app-native';
+const BOOT_ID = 'B'.repeat(43);
+const CHANNEL_ID = 'cd'.repeat(32);
 let server: Server | undefined;
 let dir: string | undefined;
+let capturedRequests: Array<{ body: string; headers: Record<string, string | string[] | undefined> }> = [];
 
 afterEach(async () => {
   if (server) await new Promise<void>(resolveClose => server!.close(() => resolveClose()));
@@ -17,12 +28,68 @@ afterEach(async () => {
   dir = undefined;
 });
 
-async function listen(policy: unknown, status = 200, response?: unknown): Promise<number> {
+async function listen(options: {
+  policy?: unknown;
+  status?: number;
+  response?: unknown;
+  authKind?: 'host' | 'capability';
+  signResponse?: boolean;
+  responseKey?: string;
+  responseMode?: 'normal' | 'oversized-never-ending' | 'partial-never-ending';
+  writeHostProof?: boolean;
+}): Promise<number> {
   if (server) await new Promise<void>(resolveClose => server!.close(() => resolveClose()));
-  server = createServer((req, res) => {
-    req.resume();
-    res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(response ?? (status === 200 ? { ok: true, policy } : { ok: false })));
+  server = createServer(async (req, res) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of req) chunks.push(Buffer.from(chunk));
+    capturedRequests.push({ body: Buffer.concat(chunks).toString('utf8'), headers: req.headers });
+    const status = options.status ?? 200;
+    const raw = JSON.stringify(options.response ?? (status === 200
+      ? { ok: true, policy: options.policy }
+      : { ok: false }));
+    const nonce = req.headers[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.nonce];
+    const port = (server!.address() as { port: number }).port;
+    const responseHeaders: Record<string, string> = { 'content-type': 'application/json' };
+    if ((options.authKind ?? 'capability') === 'host' && options.signResponse !== false && typeof nonce === 'string') {
+      responseHeaders[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature] =
+        signNativeSubagentRuntimeResponse({
+          key: options.responseKey ?? ((options.authKind ?? 'capability') === 'host' ? HOST_SECRET : CAPABILITY),
+          requestNonce: nonce,
+          method: 'POST',
+          path: '/api/sessions/session-native/native-subagent-runtime',
+          port,
+          status,
+          body: raw,
+          sessionId: 'session-native',
+          larkAppId: APP_ID,
+          bootInstanceId: BOOT_ID,
+          ...((options.authKind ?? 'capability') === 'capability'
+            ? { turnId: 'turn-1', dispatchAttempt: 1 }
+            : {}),
+        });
+    }
+    if ((options.authKind ?? 'capability') === 'capability'
+      && options.writeHostProof !== false && typeof nonce === 'string') {
+      writeNativeSubagentRuntimeResponseProof({
+        dataDir: dir!, channelId: CHANNEL_ID, nonce,
+        response: {
+          method: 'POST', path: '/api/sessions/session-native/native-subagent-runtime',
+          port, status, body: raw, sessionId: 'session-native',
+          larkAppId: APP_ID, bootInstanceId: BOOT_ID, turnId: 'turn-1', dispatchAttempt: 1,
+        },
+      });
+    }
+    res.writeHead(status, responseHeaders);
+    if (options.responseMode === 'oversized-never-ending') {
+      res.write(Buffer.alloc(16 * 1024));
+      res.write(Buffer.from([1]));
+      return;
+    }
+    if (options.responseMode === 'partial-never-ending') {
+      res.write('{');
+      return;
+    }
+    res.end(raw);
   });
   await new Promise<void>(resolveListen => server!.listen(0, '127.0.0.1', resolveListen));
   return (server.address() as { port: number }).port;
@@ -38,16 +105,18 @@ async function runHook(
     exitTimeoutMs?: number;
     transcriptRecords?: readonly Record<string, unknown>[];
     response?: unknown;
+    authKind?: 'host' | 'capability';
+    signResponse?: boolean;
+    responseKey?: string;
+    responseMode?: 'normal' | 'oversized-never-ending' | 'partial-never-ending';
+    writeHostProof?: boolean;
+    relayPort?: number;
   } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-hook-'));
   const relay = join(dir, 'relay');
   const transcript = join(dir, 'rollout.jsonl');
-  const { mkdirSync } = await import('node:fs');
   mkdirSync(relay, { mode: 0o700 });
-  writeFileSync(join(relay, '.botmux-origin-capability.json'), JSON.stringify({
-    capability: CAPABILITY, turnId: 'turn-1', dispatchAttempt: 1,
-  }), { mode: 0o600 });
   const transcriptRecords = options.transcriptRecords ?? [
     { type: 'turn_context', payload: { model: 'old', reasoning_effort: 'low' } },
     { type: 'turn_context', payload: {
@@ -60,7 +129,28 @@ async function runHook(
   ].join('\n'));
   const port = options.startServer === false
     ? 9
-    : await listen(options.policy, options.status ?? 200, options.response);
+    : await listen(options);
+  ensureManagedOriginAttestationDirectory(dir, 'session-native', CHANNEL_ID);
+  replaceManagedOriginCapabilityFile(
+    managedOriginCapabilityPath(dir, 'session-native', CHANNEL_ID),
+    JSON.stringify({
+      sessionId: 'session-native', channelId: CHANNEL_ID, capability: CAPABILITY,
+      larkAppId: APP_ID, bootInstanceId: BOOT_ID, turnId: 'turn-1', dispatchAttempt: 1,
+      ipcPort: port,
+    }),
+  );
+  writeFileSync(join(relay, '.botmux-origin-capability.json'), JSON.stringify({
+    token: CAPABILITY, turnId: 'turn-1', dispatchAttempt: 1, ipcPort: options.relayPort ?? port,
+  }), { mode: 0o600 });
+  if (options.authKind === 'host') {
+    mkdirSync(join(dir, '.botmux'), { mode: 0o700 });
+    writeFileSync(join(dir, '.botmux', '.dashboard-secret'), HOST_SECRET, { mode: 0o600 });
+    const descriptorDir = join(dir, 'dashboard-daemons');
+    mkdirSync(descriptorDir, { mode: 0o700 });
+    writeFileSync(join(descriptorDir, `${APP_ID}.json`), JSON.stringify({
+      larkAppId: APP_ID, ipcPort: port, bootInstanceId: BOOT_ID, lastHeartbeat: Date.now(),
+    }), { mode: 0o600 });
+  }
   const parsed = (() => { try { return JSON.parse(payloadText); } catch { return null; } })();
   if (parsed && typeof parsed === 'object' && !('transcript_path' in parsed)) {
     parsed.transcript_path = transcript;
@@ -74,9 +164,10 @@ async function runHook(
       HOME: dir,
       SESSION_DATA_DIR: dir,
       BOTMUX_SESSION_ID: 'session-native',
-      BOTMUX_LARK_APP_ID: 'app-native',
+      BOTMUX_LARK_APP_ID: APP_ID,
       BOTMUX_DAEMON_IPC_PORT: String(port),
-      BOTMUX_SEND_RELAY: relay,
+      ...(options.authKind === 'host' ? {} : { BOTMUX_SEND_RELAY: relay }),
+      ...(options.authKind === 'host' ? {} : { BOTMUX_ORIGIN_CHANNEL_ID: CHANNEL_ID }),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
@@ -109,6 +200,7 @@ const spawnPayload = {
 };
 
 describe('native-subagent-runtime-hook CLI', () => {
+  afterEach(() => { capturedRequests = []; });
   it('is a no-op for unrelated tools and malformed or oversized stdin', async () => {
     for (const input of [
       JSON.stringify({ ...spawnPayload, tool_name: 'Bash' }),
@@ -171,6 +263,97 @@ describe('native-subagent-runtime-hook CLI', () => {
       if (diagnostic) expect(result.stderr).toContain(diagnostic);
     }
   });
+
+  it('never sends the raw capability and rejects a stale listener forged response', async () => {
+    const result = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'custom', value: 'forged-model' } },
+      writeHostProof: false,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('response authentication failed');
+    expect(capturedRequests).toHaveLength(1);
+    expect(capturedRequests[0].body).toBe('{}');
+    expect(JSON.stringify(capturedRequests[0])).not.toContain(CAPABILITY);
+  });
+
+  it('ignores a forged writable relay port and uses the protected host claim', async () => {
+    const result = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'custom', value: 'protected-model' } },
+      relayPort: 9,
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
+      model_provider: 'trae',
+      model: 'protected-model',
+    });
+  });
+
+  it('rejects a forged response even when the stale listener knows the capability', async () => {
+    const forged = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'custom', value: 'forged-model' } },
+      responseKey: CAPABILITY,
+      writeHostProof: false,
+    });
+    expect(forged.stdout).toBe('');
+    expect(forged.stderr).toContain('response authentication failed');
+  });
+
+  it('rejects the wrong host response key and accepts the current host daemon', async () => {
+    const forgedHost = await runHook(JSON.stringify(spawnPayload), {
+      authKind: 'host',
+      policy: { model: { mode: 'custom', value: 'forged-host-model' } },
+      responseKey: 'wrong-host-secret',
+    });
+    expect(forgedHost.stdout).toBe('');
+    expect(forgedHost.stderr).toContain('response authentication failed');
+
+    const host = await runHook(JSON.stringify(spawnPayload), {
+      authKind: 'host',
+      policy: { model: { mode: 'custom', value: 'host-model' } },
+    });
+    expect(JSON.parse(host.stdout).hookSpecificOutput.updatedInput).toMatchObject({
+      model_provider: 'trae',
+      model: 'host-model',
+    });
+  });
+
+  it('fails closed on an explicit overload response from the protected destination', async () => {
+    const overloaded = await runHook(JSON.stringify(spawnPayload), {
+      status: 429,
+      response: { ok: false, error: 'native_runtime_overloaded' },
+      writeHostProof: false,
+    });
+
+    expect(overloaded.status).toBe(0);
+    expect(JSON.parse(overloaded.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason:
+          'Native subagent runtime policy is temporarily overloaded; retry spawn_agent',
+      },
+    });
+    expect(overloaded.stderr).toContain('policy service overloaded; denying spawn');
+  });
+
+  it('cancels oversized and timed-out never-ending response streams', async () => {
+    const oversized = await runHook(JSON.stringify(spawnPayload), {
+      responseMode: 'oversized-never-ending',
+      exitTimeoutMs: 6_000,
+    });
+    expect(oversized.timedOut).toBe(false);
+    expect(oversized.stdout).toBe('');
+
+    const partial = await runHook(JSON.stringify(spawnPayload), {
+      responseMode: 'partial-never-ending',
+      exitTimeoutMs: 6_000,
+    });
+    expect(partial.timedOut).toBe(false);
+    expect(partial.stdout).toBe('');
+  }, 12_000);
 
   it('rewrites spawn input from the latest complete immediate-parent turn context', async () => {
     const result = await runHook(JSON.stringify(spawnPayload), {

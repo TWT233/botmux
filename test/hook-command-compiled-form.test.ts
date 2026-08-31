@@ -31,6 +31,9 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import {
   hookCommandParts,
   hookCommandFor,
@@ -74,9 +77,26 @@ describe('hook-command — compiled binary form', () => {
     expect(hookCommandFor('claude-code')).toBe(`"${process.execPath}" hook claude-code`);
     expect(sessionReadyHookCommand()).toBe(`"${process.execPath}" session-ready`);
     expect(userPromptHookCommand()).toBe(`"${process.execPath}" user-prompt-hook`);
-    expect(nativeSubagentRuntimeHookCommand()).toBe(
-      `"${process.execPath}" native-subagent-runtime-hook`,
+    expect(nativeSubagentRuntimeHookCommand()).toMatch(
+      /^".+[/\\]\.botmux[/\\]bin[/\\]botmux(?:\.cmd)?" native-subagent-runtime-hook$/,
     );
+  });
+
+  it('keeps the native runtime hook on the canonical stable wrapper path under a symlinked HOME', () => {
+    if (process.platform === 'win32') return;
+    asCompiledBinary();
+    const root = mkdtempSync(join(tmpdir(), 'botmux-hook-compiled-home-'));
+    const realHome = join(root, 'real-home');
+    const aliasHome = join(root, 'alias-home');
+    mkdirSync(join(realHome, '.botmux', 'bin'), { recursive: true });
+    symlinkSync(realHome, aliasHome, 'dir');
+    try {
+      expect(nativeSubagentRuntimeHookCommand({ HOME: aliasHome }, 'linux'))
+        .toBe(`"${join(realpathSync(join(realHome, '.botmux', 'bin')), 'botmux')}" native-subagent-runtime-hook`);
+      expect(nativeSubagentRuntimeHookCommand({ HOME: aliasHome }, 'linux')).not.toContain(aliasHome);
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 
   it('survives a shell round-trip with the subcommand intact', () => {
@@ -115,9 +135,10 @@ describe('hook-command — Node form stays byte-identical', () => {
     const script = hookCommandParts('x').args[0];
     expect(sessionReadyHookCommand()).toBe(`"${process.execPath}" "${script}" session-ready`);
     expect(userPromptHookCommand()).toBe(`"${process.execPath}" "${script}" user-prompt-hook`);
-    expect(nativeSubagentRuntimeHookCommand()).toBe(
-      `"${process.execPath}" "${script}" native-subagent-runtime-hook`,
+    expect(nativeSubagentRuntimeHookCommand()).toMatch(
+      /^".+[/\\]\.botmux[/\\]bin[/\\]botmux(?:\.cmd)?" native-subagent-runtime-hook$/,
     );
+    expect(nativeSubagentRuntimeHookCommand()).not.toContain(script);
   });
 
   it('the two forms differ exactly by the script argument', () => {

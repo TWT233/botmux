@@ -15,6 +15,8 @@ export interface ManagedOriginCapabilityClaim {
   sessionId: string;
   channelId?: string;
   capability: string;
+  larkAppId?: string;
+  bootInstanceId?: string;
   turnId?: string;
   dispatchAttempt?: number;
   /** Current daemon port, host-written on every capability rotation. */
@@ -389,6 +391,8 @@ export function hasManagedOriginIsolationMarker(
       domain?: unknown;
       sessionId?: unknown;
       channelId?: unknown;
+      larkAppId?: unknown;
+      bootInstanceId?: unknown;
     };
     return parsed.domain === 'botmux.read-isolation-origin.v1'
       && parsed.sessionId === sessionId
@@ -578,9 +582,11 @@ export function readManagedOriginCapability(
       dispatchAttempt?: unknown;
       ipcPort?: unknown;
       channelId?: unknown;
+      larkAppId?: unknown;
+      bootInstanceId?: unknown;
     };
-    if (!relay && parsed.sessionId !== sessionId) return null;
-    if (!relay && parsed.channelId !== channelId) return null;
+    if (parsed.sessionId !== undefined && parsed.sessionId !== sessionId) return null;
+    if (channelId && parsed.channelId !== channelId) return null;
     const capability = typeof parsed.capability === 'string'
       ? parsed.capability
       : parsed.token;
@@ -602,10 +608,25 @@ export function readManagedOriginCapability(
       && parsed.ipcPort > 0 && parsed.ipcPort <= 65_535
       ? parsed.ipcPort
       : undefined;
+    const parsedChannelId = typeof parsed.channelId === 'string'
+      && /^[a-f0-9]{64}$/.test(parsed.channelId)
+      ? parsed.channelId
+      : undefined;
+    if (relay && channelId && parsedChannelId !== channelId) return null;
+    const larkAppId = typeof parsed.larkAppId === 'string'
+      && parsed.larkAppId.length > 0 && parsed.larkAppId.length <= 256
+      ? parsed.larkAppId
+      : undefined;
+    const bootInstanceId = typeof parsed.bootInstanceId === 'string'
+      && /^[A-Za-z0-9_-]{43}$/.test(parsed.bootInstanceId)
+      ? parsed.bootInstanceId
+      : undefined;
     return {
       sessionId,
-      ...(!relay && channelId ? { channelId } : {}),
+      ...(parsedChannelId ? { channelId: parsedChannelId } : {}),
       capability,
+      ...(larkAppId ? { larkAppId } : {}),
+      ...(bootInstanceId ? { bootInstanceId } : {}),
       ...(turnId ? { turnId } : {}),
       ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
       ...(ipcPort !== undefined ? { ipcPort } : {}),

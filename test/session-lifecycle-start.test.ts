@@ -159,11 +159,16 @@ import {
   detachWorkerForTransfer,
   forkAdoptWorker,
   forkWorker,
+  getDaemonBootId,
   initWorkerPool,
   promoteQueuedActivationTail,
   sendWorkerInput,
   suspendWorker,
 } from '../src/core/worker-pool.js';
+import {
+  managedOriginCapabilityDirectory,
+  readManagedOriginCapability,
+} from '../src/core/managed-origin-capability.js';
 import type { DaemonSession } from '../src/core/types.js';
 import * as sessionStore from '../src/services/session-store.js';
 import { getBot } from '../src/bot-registry.js';
@@ -3809,6 +3814,47 @@ describe('blocker #3: forkAdoptWorker refuses sandbox-enabled bots', () => {
 });
 
 describe('managed turn authority worker generations', () => {
+  it('keeps daemon routing identity when publishing a protected origin claim', () => {
+    const ds = makeDs();
+    const channelId = 'd1'.repeat(32);
+    const capability = 'a1'.repeat(32);
+    const claimDir = managedOriginCapabilityDirectory(
+      '/tmp/test-sessions',
+      ds.session.sessionId,
+      channelId,
+    );
+    rmSync(claimDir, { recursive: true, force: true });
+    try {
+      forkWorker(ds, 'first', false);
+      const worker = forkMock.mock.results.at(-1)!.value;
+      worker.emit('message', {
+        type: 'managed_turn_origin',
+        sessionId: ds.session.sessionId,
+        capability,
+        originChannelId: channelId,
+        turnId: 'turn-protected-claim',
+        dispatchAttempt: 2,
+      });
+
+      expect(readManagedOriginCapability(
+        '/tmp/test-sessions',
+        ds.session.sessionId,
+        undefined,
+        channelId,
+      )).toMatchObject({
+        sessionId: ds.session.sessionId,
+        channelId,
+        capability,
+        larkAppId: ds.larkAppId,
+        bootInstanceId: getDaemonBootId(),
+        turnId: 'turn-protected-claim',
+        dispatchAttempt: 2,
+      });
+    } finally {
+      rmSync(claimDir, { recursive: true, force: true });
+    }
+  });
+
   it('revokes the old capability immediately when a normal double-fork replacement fails', () => {
     const oldWorker = makeFakeWorker();
     const ds = makeDs({

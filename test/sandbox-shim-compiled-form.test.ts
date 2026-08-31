@@ -180,7 +180,7 @@ describe('relay host re-exec — botmuxCliInvocation', () => {
  * layout, where the launcher and the platform binary are separate files.
  */
 describe('sandbox shim overlay — install.sh layout (shim path === exec target)', () => {
-  function overlayTargets(trusted: string): string[] {
+  function overlayTargets(trusted: string, stableBotmuxWrapperPath?: string): string[] {
     const root = mkdtempSync(join(tmpdir(), 'sbx-overlay-'));
     const proj = join(root, 'proj');
     const home = join(root, 'home');
@@ -195,6 +195,7 @@ describe('sandbox shim overlay — install.sh layout (shim path === exec target)
       cliBin: '/bin/sh',
       cliArgs: ['-c', 'true'],
       trustedBotmuxCommandPaths: [trusted],
+      stableBotmuxWrapperPath,
     });
     if (!spawn) return [];
     const out: string[] = [];
@@ -221,5 +222,24 @@ describe('sandbox shim overlay — install.sh layout (shim path === exec target)
     writeFileSync(launcher, '#!/bin/sh\nexec /somewhere/botmux "$@"\n', { mode: 0o755 });
     chmodSync(launcher, 0o755);
     expect(overlayTargets(launcher)).toEqual([launcher]);
+  });
+
+  it('skips the overlay for the stable daemon-updated wrapper path too', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sbx-stable-wrapper-'));
+    const stable = join(dir, 'botmux');
+    writeFileSync(stable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    chmodSync(stable, 0o755);
+    expect(overlayTargets(stable, stable)).toEqual([]);
+  });
+
+  it('still overlays a separate configured gateway launcher', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sbx-gateway-wrapper-'));
+    const stable = join(dir, 'stable-botmux');
+    const gateway = join(dir, 'configured-gateway');
+    writeFileSync(stable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(gateway, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    chmodSync(stable, 0o755);
+    chmodSync(gateway, 0o755);
+    expect(overlayTargets(gateway, stable)).toEqual([gateway]);
   });
 });
