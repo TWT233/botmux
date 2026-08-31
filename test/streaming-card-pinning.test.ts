@@ -855,4 +855,71 @@ describe('streaming-card pin policy', () => {
 
     expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_vanished_target_old');
   });
+
+  it('does not unpin captured authoritative ids for an apiOnly session', async () => {
+    const ds = makeDs('om_api_only_captured');
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        apiOnly: true,
+        noPinStreamingCardChats: ['oc_chat'],
+      },
+    } as any);
+
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_chat', false);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('does not unpin captured authoritative ids when transport becomes apiOnly before queued drain', async () => {
+    const leading = withChat(
+      makeDs('om_transport_drift_leading', undefined, 'pin-transport-drift-leading', 'om_transport_drift_leading_root'),
+      'oc_transport_leading',
+    );
+    const target = withChat(
+      makeDs('om_transport_drift', undefined, 'pin-transport-drift-target', 'om_transport_drift_target_root'),
+      'oc_transport_target',
+    );
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(leading), leading],
+      [activeSessionKey(target), target],
+    ]));
+    let apiOnly = false;
+    let disabledChats: string[] | undefined = ['oc_transport_leading'];
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        apiOnly,
+        noPinStreamingCardChats: disabledChats,
+      },
+    }) as any);
+
+    const firstReconcileStarted = deferred<void>();
+    const releaseFirstReconcile = deferred<boolean>();
+    unpinMessageMock.mockImplementation((appId: string, messageId: string) => {
+      if (appId === 'app-pin' && messageId === 'om_transport_drift_leading') {
+        firstReconcileStarted.resolve();
+        return releaseFirstReconcile.promise;
+      }
+      return Promise.resolve(true);
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_transport_leading', false);
+    await firstReconcileStarted.promise;
+
+    disabledChats = ['oc_transport_leading', 'oc_transport_target'];
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_transport_target', false);
+    apiOnly = true;
+    releaseFirstReconcile.resolve(true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_transport_drift');
+  });
 });

@@ -2420,7 +2420,7 @@ export async function reconcileStreamingCardPins(
 type PendingBotStreamingCardReconcileRequest = {
   enabled: boolean;
   chatId?: string;
-  authoritativeCleanupIdsBySession: Map<string, string[]>;
+  authoritativeCleanupBySession: Map<string, { chatId: string; ids: string[] }>;
 };
 
 type PendingBotStreamingCardReconcile = {
@@ -2453,22 +2453,24 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
     while (true) {
       const request = state.pending.shift();
       if (!request) break;
-      const { enabled, chatId, authoritativeCleanupIdsBySession } = request;
+      const { enabled, chatId, authoritativeCleanupBySession } = request;
       // An on->off transition grants authority over the exact card IDs visible
       // at that transition.  This work must not depend on a later active-registry
       // lookup: close/removal can happen while an earlier reconcile request is
       // still draining.  Do not resolve a session again here; a reused session
       // id or a replacement current card must never expand this cleanup scope.
-      const authoritativeCleanup = [...authoritativeCleanupIdsBySession]
-        .map(([sessionId, ids]) => ({
+      const authoritativeCleanup = [...authoritativeCleanupBySession]
+        .map(([sessionId, { chatId, ids }]) => ({
           owner: { larkAppId, sessionId },
+          chatId,
           ids: [...new Set(ids.filter(isRealStreamingCardId))],
         }))
         .filter(({ ids }) => ids.length > 0);
       for (let offset = 0; offset < authoritativeCleanup.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
         const batch = authoritativeCleanup.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
-        await Promise.allSettled(batch.map(async ({ owner, ids }) => {
+        await Promise.allSettled(batch.map(async ({ owner, chatId, ids }) => {
           try {
+            if (!retainsLarkStreamingCardTransportFor(larkAppId, chatId)) return;
             await unpinStreamingCardIds(larkAppId, ids, owner);
           } catch {
             /* captured cleanup remains fail-open */
@@ -2511,17 +2513,17 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
 function snapshotAuthoritativeCleanupIdsForChat(
   larkAppId: string,
   chatId: string,
-): Map<string, string[]> {
+): Map<string, { chatId: string; ids: string[] }> {
   return new Map(
     snapshotBotStreamingCardReconcileSessions(larkAppId)
       .filter(ds => ds.chatId === chatId)
-      .map(ds => [ds.session.sessionId, snapshotStreamingCardIds(ds)]),
+      .map(ds => [ds.session.sessionId, { chatId: ds.chatId, ids: snapshotStreamingCardIds(ds) }]),
   );
 }
 
 function snapshotAuthoritativeCleanupIdsForBotWideOff(
   larkAppId: string,
-): Map<string, string[]> {
+): Map<string, { chatId: string; ids: string[] }> {
   let disabledChats: string[] | undefined;
   try {
     disabledChats = getBot(larkAppId).config.noPinStreamingCardChats;
@@ -2531,7 +2533,7 @@ function snapshotAuthoritativeCleanupIdsForBotWideOff(
   return new Map(
     snapshotBotStreamingCardReconcileSessions(larkAppId)
       .filter(ds => !disabledChats?.includes(ds.chatId))
-      .map(ds => [ds.session.sessionId, snapshotStreamingCardIds(ds)]),
+      .map(ds => [ds.session.sessionId, { chatId: ds.chatId, ids: snapshotStreamingCardIds(ds) }]),
   );
 }
 
@@ -2544,17 +2546,17 @@ export function reconcileBotStreamingCardPins(
   chatEnabled?: boolean,
 ): void {
   const state = pendingBotStreamingCardReconciles.get(larkAppId);
-  const authoritativeCleanupIdsBySession = chatId !== undefined
+  const authoritativeCleanupBySession = chatId !== undefined
     ? chatEnabled === false
       ? snapshotAuthoritativeCleanupIdsForChat(larkAppId, chatId)
-      : new Map<string, string[]>()
+      : new Map<string, { chatId: string; ids: string[] }>()
     : enabled === false
       ? snapshotAuthoritativeCleanupIdsForBotWideOff(larkAppId)
-      : new Map<string, string[]>();
+      : new Map<string, { chatId: string; ids: string[] }>();
   const request: PendingBotStreamingCardReconcileRequest = {
     enabled,
     chatId,
-    authoritativeCleanupIdsBySession,
+    authoritativeCleanupBySession,
   };
   if (state) {
     state.pending.push(request);
