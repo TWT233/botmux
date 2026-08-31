@@ -63,14 +63,16 @@ describe('pinMessage/unpinMessage boolean contract', () => {
     await expect(unpinMessage('u_missing', 'om_pin')).resolves.toBe(false);
   });
 
-  it('returns false when the SDK throws and warning is sanitized (no auth token)', async () => {
+  it('returns false when the SDK throws and logs only at debug without leaking auth tokens', async () => {
     const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {});
     const err: any = new Error('sdk failed');
     err.config = { headers: { Authorization: 'Bearer fake_authorization_token' } };
     setPinImpl('p_throw', async () => { throw err; });
     await expect(pinMessage('p_throw', 'om_pin')).resolves.toBe(false);
-    expect(warn).toHaveBeenCalled();
-    const joined = warn.mock.calls.map((c) => c.join(' ')).join(' ');
+    expect(warn).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalled();
+    const joined = debug.mock.calls.map((c) => c.join(' ')).join(' ');
     const lowered = joined.toLowerCase();
     expect(lowered).not.toContain('fake_authorization_token');
     expect(lowered).not.toContain('authorization');

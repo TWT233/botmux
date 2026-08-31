@@ -295,6 +295,32 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-other', 'om_other');
   });
 
+  it('bounds bot-wide reconciliation to at most 20 concurrent sessions', async () => {
+    const sessions = Array.from({ length: 45 }, (_, index) =>
+      makeDs(`om_card_${index}`, undefined, `pin-session-${index}`, `om_root_${index}`));
+    setActiveSessionsRegistry(new Map(sessions.map(ds => [activeSessionKey(ds), ds])));
+    const releasePins = deferred<void>();
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    pinMessageMock.mockImplementation(async () => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await releasePins.promise;
+      concurrent -= 1;
+      return true;
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true);
+    await drainMicrotasks(5);
+    const observedBeforeRelease = maxConcurrent;
+    releasePins.resolve();
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(observedBeforeRelease).toBeGreaterThan(0);
+    expect(observedBeforeRelease).toBeLessThanOrEqual(20);
+    expect(pinMessageMock).toHaveBeenCalledTimes(45);
+  });
+
   it('serializes bot-wide disable then enable and reruns the latest desired state after deferred unpin completes', async () => {
     const first = makeDs(
       'om_current',

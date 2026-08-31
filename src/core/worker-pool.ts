@@ -2136,9 +2136,11 @@ const pendingPinStreamingCardTasks = new Set<Promise<void>>();
 let ownedStreamingCardRegistryEpoch = 0;
 
 function trackPinStreamingCardTask(task: Promise<void>): void {
-  const tracked = task.finally(() => {
-    pendingPinStreamingCardTasks.delete(tracked);
-  });
+  let tracked!: Promise<void>;
+  tracked = task.then(
+    () => { pendingPinStreamingCardTasks.delete(tracked); },
+    () => { pendingPinStreamingCardTasks.delete(tracked); },
+  );
   pendingPinStreamingCardTasks.add(tracked);
 }
 
@@ -2299,6 +2301,9 @@ export async function pinStreamingCardIfEnabled(
         return true;
       }
       try {
+        // Direct call is required: this callback already runs inside this
+        // messageId's mutation queue. Requeueing through
+        // unpinStreamingCardIds() would wait on itself forever.
         const unpinned = await unpinMessage(appId, messageId);
         if (unpinned) forgetOwnedStreamingCard(ds, messageId);
       } catch {
@@ -2388,11 +2393,9 @@ export async function reconcileStreamingCardPins(
       ? [...new Set([...ids, ...snapshotStreamingCardIds(ds)])]
       : ids;
   const currentId = isRealStreamingCardId(ds.streamCardId) ? ds.streamCardId : undefined;
-  const frozenIds = enabled
-    ? snapshotStreamingCardIds(ds).filter(id => id !== currentId)
-    : cleanupIds.filter(id => id !== currentId);
   try {
     if (enabled) {
+      const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== currentId);
       if (currentId && await pinStreamingCardIfEnabled(ds, currentId)) {
         await unpinStreamingCardIds(ds.larkAppId, frozenIds, ds);
       }
@@ -2412,6 +2415,7 @@ type PendingBotStreamingCardReconcile = {
 };
 
 const pendingBotStreamingCardReconciles = new Map<string, PendingBotStreamingCardReconcile>();
+const BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE = 20;
 
 function snapshotBotStreamingCardReconcileSessions(larkAppId: string): DaemonSession[] {
   if (!activeSessionsRegistry) return [];
@@ -2438,15 +2442,18 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
       const desiredVersion = state.desiredVersion;
       settledVersion = desiredVersion;
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
-      await Promise.allSettled(
-        sessions.map(async (ds) => {
-          try {
-            await reconcileStreamingCardPins(ds, enabled ? { enabled: true } : { enabled: false, cleanupKnownIds: true });
-          } catch {
-            /* per-session reconciliation remains fail-open */
-          }
-        }),
-      );
+      for (let offset = 0; offset < sessions.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
+        const batch = sessions.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
+        await Promise.allSettled(
+          batch.map(async (ds) => {
+            try {
+              await reconcileStreamingCardPins(ds, enabled ? { enabled: true } : { enabled: false, cleanupKnownIds: true });
+            } catch {
+              /* per-session reconciliation remains fail-open */
+            }
+          }),
+        );
+      }
       if (state.desiredVersion === desiredVersion) break;
     }
   } finally {
@@ -2455,12 +2462,13 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
     // newly-arrived toggle cannot interleave until after `settledVersion` is
     // compared here. If the desired version is unchanged, this queue instance
     // fully absorbed the latest bot-wide state and can be removed.
-    if (pendingBotStreamingCardReconciles.get(larkAppId) !== state) return;
-    if (state.desiredVersion === settledVersion) {
-      pendingBotStreamingCardReconciles.delete(larkAppId);
-      return;
+    if (pendingBotStreamingCardReconciles.get(larkAppId) === state) {
+      if (state.desiredVersion === settledVersion) {
+        pendingBotStreamingCardReconciles.delete(larkAppId);
+      } else {
+        void drainBotStreamingCardReconcileQueue(larkAppId);
+      }
     }
-    void drainBotStreamingCardReconcileQueue(larkAppId);
   }
 }
 
