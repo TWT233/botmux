@@ -1072,7 +1072,7 @@ describe('parseBotConfigsFromText — native subagent runtime policy', () => {
         cliId: 'traex',
         nativeSubagentRuntime: {
           model: { mode: 'custom', value: '  GPT-5.6-Sol  ' },
-          reasoningEffort: { mode: 'inherit' },
+          reasoningEffort: { mode: 'custom', value: 'xhigh' },
         },
       },
       {
@@ -1085,9 +1085,59 @@ describe('parseBotConfigsFromText — native subagent runtime policy', () => {
 
     expect(configured.nativeSubagentRuntime).toEqual({
       model: { mode: 'custom', value: 'GPT-5.6-Sol' },
-      reasoningEffort: { mode: 'inherit' },
+      reasoningEffort: { mode: 'custom', value: 'xhigh' },
     });
     expect(empty.nativeSubagentRuntime).toBeUndefined();
+  });
+
+  it('drops legacy inherit policies and emits a bounded diagnostic for each invalid dimension', () => {
+    const stderr = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const configs = mod.parseBotConfigsFromText(JSON.stringify([
+        {
+          larkAppId: 'legacy-model-inherit',
+          larkAppSecret: 's',
+          cliId: 'traex',
+          nativeSubagentRuntime: { model: { mode: 'inherit' } },
+        },
+        {
+          larkAppId: 'legacy-effort-inherit',
+          larkAppSecret: 's',
+          cliId: 'traex',
+          nativeSubagentRuntime: { reasoningEffort: { mode: 'inherit' } },
+        },
+      ]));
+
+      expect(configs.map(config => config.nativeSubagentRuntime)).toEqual([undefined, undefined]);
+      const diagnostics = stderr.mock.calls.map(([message]) => String(message)).join('');
+      expect(diagnostics).toContain(
+        '[bot-registry:legacy-model-inherit] nativeSubagentRuntime ignored: '
+          + 'nativeSubagentRuntime.model.mode must be custom',
+      );
+      expect(diagnostics).toContain(
+        '[bot-registry:legacy-effort-inherit] nativeSubagentRuntime ignored: '
+          + 'nativeSubagentRuntime.reasoningEffort.mode must be custom',
+      );
+      expect(diagnostics).not.toContain('\"mode\":\"inherit\"');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('drops a valid policy after normalization when the bot is not TraeCode', () => {
+    const [cfg] = mod.parseBotConfigsFromText(JSON.stringify([
+      {
+        larkAppId: 'claude-policy-app',
+        larkAppSecret: 's',
+        cliId: 'claude-code',
+        nativeSubagentRuntime: {
+          model: { mode: 'custom', value: '  GPT-5.6-Sol  ' },
+          reasoningEffort: { mode: 'custom', value: 'high' },
+        },
+      },
+    ]));
+
+    expect(cfg.nativeSubagentRuntime).toBeUndefined();
   });
 
   it('drops malformed persisted policy state without affecting the rest of the bot config', () => {
