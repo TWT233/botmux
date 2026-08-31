@@ -11,9 +11,7 @@ describe('normalizeNativeSubagentRuntimePolicy', () => {
   });
 
   it.each([
-    [{ model: { mode: 'inherit' } }, { model: { mode: 'inherit' } }],
     [{ model: { mode: 'custom', value: '  GPT-5.6-Sol  ' } }, { model: { mode: 'custom', value: 'GPT-5.6-Sol' } }],
-    [{ reasoningEffort: { mode: 'inherit' } }, { reasoningEffort: { mode: 'inherit' } }],
     [{ reasoningEffort: { mode: 'custom', value: 'ultra' } }, { reasoningEffort: { mode: 'custom', value: 'ultra' } }],
   ])('accepts and defensively copies one independent configured dimension', (raw, value) => {
     const result = normalizeNativeSubagentRuntimePolicy(raw);
@@ -26,15 +24,17 @@ describe('normalizeNativeSubagentRuntimePolicy', () => {
     [[], 'policy object'],
     [{ extra: true }, 'unknown'],
     [{ model: null }, 'model'],
-    [{ model: { mode: 'passthrough' } }, 'model.mode'],
-    [{ model: { mode: 'inherit', value: 'GPT-5.4' } }, 'unknown'],
+    [{ model: { mode: 'passthrough' } }, 'model.mode must be custom'],
+    [{ model: { mode: 'inherit' } }, 'model.mode must be custom'],
+    [{ model: { mode: 'inherit', value: 'GPT-5.4' } }, 'model.mode must be custom'],
     [{ model: { mode: 'custom' } }, 'model.value'],
     [{ model: { mode: 'custom', value: '   ' } }, 'model.value'],
     [{ model: { mode: 'custom', value: 'x'.repeat(257) } }, 'model.value'],
     [{ model: { mode: 'custom', value: 'GPT-5.4', extra: true } }, 'unknown'],
     [{ reasoningEffort: null }, 'reasoningEffort'],
-    [{ reasoningEffort: { mode: 'passthrough' } }, 'reasoningEffort.mode'],
-    [{ reasoningEffort: { mode: 'inherit', value: 'high' } }, 'unknown'],
+    [{ reasoningEffort: { mode: 'passthrough' } }, 'reasoningEffort.mode must be custom'],
+    [{ reasoningEffort: { mode: 'inherit' } }, 'reasoningEffort.mode must be custom'],
+    [{ reasoningEffort: { mode: 'inherit', value: 'high' } }, 'reasoningEffort.mode must be custom'],
     [{ reasoningEffort: { mode: 'custom' } }, 'reasoningEffort.value'],
     [{ reasoningEffort: { mode: 'custom', value: 'extreme' } }, 'reasoningEffort.value'],
     [{ reasoningEffort: { mode: 'custom', value: 'high', extra: true } }, 'unknown'],
@@ -58,16 +58,12 @@ describe('rewriteNativeSubagentSpawnInput', () => {
     reasoning_effort: 'low',
     metadata: { trace: 'keep-the-same-reference' },
   };
-  const parentRuntime = { model: 'GPT-5.6-Sol', reasoningEffort: 'high' as const };
-
   const modelPolicies = [
     ['passthrough', undefined, 'openrouter', 'parent-selected-model'],
-    ['inherit', { mode: 'inherit' }, 'trae', 'GPT-5.6-Sol'],
     ['custom', { mode: 'custom', value: 'GPT-5.4' }, 'trae', 'GPT-5.4'],
   ] as const;
   const effortPolicies = [
     ['passthrough', undefined, 'low'],
-    ['inherit', { mode: 'inherit' }, 'high'],
     ['custom', { mode: 'custom', value: 'xhigh' }, 'xhigh'],
   ] as const;
 
@@ -81,10 +77,9 @@ describe('rewriteNativeSubagentSpawnInput', () => {
     })),
   ))('applies the independent $name policy combination', ({ policy, expectedProvider, expectedModel, expectedEffort }) => {
     const snapshot = structuredClone(original);
-    const result = rewriteNativeSubagentSpawnInput(original, policy, parentRuntime);
+    const result = rewriteNativeSubagentSpawnInput(original, policy);
 
     expect(result.kind).toBe(policy.model || policy.reasoningEffort ? 'rewritten' : 'unchanged');
-    if (result.kind === 'denied') throw new Error(result.reason);
     expect(result.input).not.toBe(original);
     expect(result.input).toEqual({
       ...original,
@@ -101,7 +96,6 @@ describe('rewriteNativeSubagentSpawnInput', () => {
     const result = rewriteNativeSubagentSpawnInput(
       input,
       { model: { mode: 'custom', value: 'GPT-5.5' } },
-      {},
     );
 
     expect(result).toEqual({
@@ -111,17 +105,4 @@ describe('rewriteNativeSubagentSpawnInput', () => {
     expect(input).toEqual({ task_name: 'build', model_provider: 'anthropic', model: 'claude-opus', role: 'worker' });
   });
 
-  it.each([
-    [{ model: { mode: 'inherit' } } as NativeSubagentRuntimePolicy, {}, 'model'],
-    [{ reasoningEffort: { mode: 'inherit' } } as NativeSubagentRuntimePolicy, { model: 'GPT-5.4' }, 'reasoning effort'],
-  ])('denies unresolved inheritance without exposing a partially rewritten input', (policy, parent, dimension) => {
-    const result = rewriteNativeSubagentSpawnInput(original, policy, parent);
-    expect(result).toEqual({
-      kind: 'denied',
-      reason: `Cannot inherit native subagent ${dimension}: immediate parent runtime is unavailable`,
-    });
-    expect(original.model_provider).toBe('openrouter');
-    expect(original.model).toBe('parent-selected-model');
-    expect(original.reasoning_effort).toBe('low');
-  });
 });
