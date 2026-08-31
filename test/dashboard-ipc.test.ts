@@ -3707,6 +3707,44 @@ describe('PUT /api/bot-agent', () => {
     }
   });
 
+  it('ignores a malformed native-subagent policy and deletes the stale policy when switching away from TraeX', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-switch-away-ipc-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-native-subagent-switch-away-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId,
+        larkAppSecret: 'secret',
+        cliId: 'traex',
+        nativeSubagentRuntime: { model: { mode: 'inherit' } },
+      }], null, 2));
+      loadBotConfigs().forEach((c: any) => registerBot(c));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+
+      const response = await fetch(`http://127.0.0.1:${handle.port}/api/bot-agent`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({
+          cliId: 'claude-code',
+          model: '',
+          nativeSubagentRuntime: { model: { mode: 'custom', value: '' } },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ nativeSubagentRuntime: null });
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))[0]).not.toHaveProperty('nativeSubagentRuntime');
+      expect(getBot(appId).config.nativeSubagentRuntime).toBeUndefined();
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('updates cli selection and model through bots.json and live config', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-agent-ipc-'));
     const configPath = join(dir, 'bots.json');
