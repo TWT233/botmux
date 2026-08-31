@@ -4534,7 +4534,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   const supportsReasoningEffort = isConfigurableReasoningCliId(selected.cliId);
   const nativeSubagentRuntimeFieldPresent = Object.prototype.hasOwnProperty.call(body, 'nativeSubagentRuntime');
   let requestedNativeSubagentRuntime: BotConfig['nativeSubagentRuntime'];
-  if (nativeSubagentRuntimeFieldPresent && body.nativeSubagentRuntime !== null) {
+  if (selected.cliId === 'traex' && nativeSubagentRuntimeFieldPresent && body.nativeSubagentRuntime !== null) {
     const normalized = normalizeNativeSubagentRuntimePolicy(body.nativeSubagentRuntime);
     if (!normalized.ok) {
       return jsonRes(res, 400, {
