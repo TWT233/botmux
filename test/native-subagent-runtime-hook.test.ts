@@ -17,12 +17,12 @@ afterEach(async () => {
   dir = undefined;
 });
 
-async function listen(policy: unknown, status = 200): Promise<number> {
+async function listen(policy: unknown, status = 200, response?: unknown): Promise<number> {
   if (server) await new Promise<void>(resolveClose => server!.close(() => resolveClose()));
   server = createServer((req, res) => {
     req.resume();
     res.writeHead(status, { 'content-type': 'application/json' });
-    res.end(JSON.stringify(status === 200 ? { ok: true, policy } : { ok: false }));
+    res.end(JSON.stringify(response ?? (status === 200 ? { ok: true, policy } : { ok: false })));
   });
   await new Promise<void>(resolveListen => server!.listen(0, '127.0.0.1', resolveListen));
   return (server.address() as { port: number }).port;
@@ -37,6 +37,7 @@ async function runHook(
     endStdin?: boolean;
     exitTimeoutMs?: number;
     transcriptRecords?: readonly Record<string, unknown>[];
+    response?: unknown;
   } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-hook-'));
@@ -59,7 +60,7 @@ async function runHook(
   ].join('\n'));
   const port = options.startServer === false
     ? 9
-    : await listen(options.policy, options.status ?? 200);
+    : await listen(options.policy, options.status ?? 200, options.response);
   const parsed = (() => { try { return JSON.parse(payloadText); } catch { return null; } })();
   if (parsed && typeof parsed === 'object' && !('transcript_path' in parsed)) {
     parsed.transcript_path = transcript;
@@ -151,9 +152,14 @@ describe('native-subagent-runtime-hook CLI', () => {
   it('fails open for daemon failure, invalid response policy, and pass-through policy', async () => {
     const cases = [
       { options: { startServer: false }, diagnostic: undefined },
+      { options: { status: 503 }, diagnostic: undefined },
       {
         options: { policy: { model: { mode: 'custom', value: '' } } },
         diagnostic: 'daemon returned invalid policy; allowing spawn',
+      },
+      {
+        options: { response: { ok: true, invalidPolicy: true } },
+        diagnostic: 'daemon rejected invalid stored policy; allowing spawn',
       },
       { options: { policy: undefined }, diagnostic: undefined },
     ];
@@ -220,7 +226,12 @@ describe('native-subagent-runtime-hook CLI', () => {
   });
 
   it('uses payload.model only as model fallback and explicitly denies unresolved inheritance', async () => {
-    const missingTranscript = { ...spawnPayload, transcript_path: join(tmpdir(), 'missing-rollout.jsonl') };
+    const missingTranscript = {
+      ...spawnPayload,
+      reasoning_effort: 'ultra',
+      effort: 'max',
+      transcript_path: join(tmpdir(), 'missing-rollout.jsonl'),
+    };
     const model = await runHook(JSON.stringify(missingTranscript), {
       policy: { model: { mode: 'inherit' } },
     });

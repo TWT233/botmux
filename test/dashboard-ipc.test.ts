@@ -265,19 +265,11 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
   const CAPABILITY = 'ab'.repeat(32);
   const OTHER_CAPABILITY = 'ef'.repeat(32);
 
-  function installRuntimeSession(policy?: unknown) {
-    registerBot({
-      larkAppId: SESSION_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
-      ...(policy === undefined ? {} : { nativeSubagentRuntime: policy as any }),
-    });
-    registerBot({
-      larkAppId: OTHER_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
-      nativeSubagentRuntime: { model: { mode: 'custom', value: 'attacker-model' } },
-    });
+  function installRuntimeSessions(sessionApp = SESSION_APP) {
     const session = { sessionId: SESSION_ID, rootMessageId: 'om_native' } as any;
     const active = {
       session, worker: null, workerPort: null, workerToken: null,
-      larkAppId: SESSION_APP, chatId: 'oc_native', chatType: 'group', scope: 'thread',
+      larkAppId: sessionApp, chatId: 'oc_native', chatType: 'group', scope: 'thread',
       spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(),
       hasHistory: true, managedTurnOrigin: { capability: CAPABILITY, turnId: 'turn-native' },
     } as any;
@@ -293,6 +285,18 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       [OTHER_SESSION_ID, otherActive],
     ]));
     return active;
+  }
+
+  function installRuntimeSession(policy?: unknown) {
+    registerBot({
+      larkAppId: SESSION_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+      ...(policy === undefined ? {} : { nativeSubagentRuntime: policy as any }),
+    });
+    registerBot({
+      larkAppId: OTHER_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+      nativeSubagentRuntime: { model: { mode: 'custom', value: 'attacker-model' } },
+    });
+    return installRuntimeSessions();
   }
 
   async function post(
@@ -405,7 +409,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'body_timeout' });
   }, 5_000);
 
-  it('fails open to an absent policy for missing or malformed persisted state', async () => {
+  it('distinguishes invalid live policy without exposing it while still failing open', async () => {
     const active = installRuntimeSession();
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
@@ -420,7 +424,123 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     };
     const malformed = await post({}, trustedHostHeaders('POST', path, handle.port));
     expect(malformed.status).toBe(200);
-    expect(await malformed.json()).toEqual({ ok: true });
+    expect(await malformed.json()).toEqual({ ok: true, invalidPolicy: true });
+  });
+
+  it('distinguishes invalid persisted policy after config loading drops the malformed value', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-native-runtime-'));
+    const configPath = join(dir, 'bots.json');
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: SESSION_APP,
+        larkAppSecret: '',
+        cliId: 'traex',
+        apiOnly: true,
+        nativeSubagentRuntime: { reasoningEffort: { mode: 'custom', value: 'secret-invalid-value' } },
+      }]));
+      loadBotConfigs().forEach(config => registerBot(config));
+      installRuntimeSessions();
+      expect(getBot(SESSION_APP).config.nativeSubagentRuntime).toBeUndefined();
+
+      setIpcAuthSecret(TEST_IPC_SECRET);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+      const malformed = await post({}, trustedHostHeaders('POST', path, handle.port));
+
+      expect(malformed.status).toBe(200);
+      expect(await malformed.json()).toEqual({ ok: true, invalidPolicy: true });
+
+      getBot(SESSION_APP).config.nativeSubagentRuntime = {
+        model: { mode: 'custom', value: 'stale-secret-model' },
+      };
+      const staleLive = await post({}, trustedHostHeaders('POST', path, handle.port));
+      expect(await staleLive.json()).toEqual({ ok: true, invalidPolicy: true });
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fails open without returning stale live policy when the loaded config becomes unavailable', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-native-runtime-'));
+    const configPath = join(dir, 'bots.json');
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: SESSION_APP,
+        larkAppSecret: '',
+        cliId: 'traex',
+        apiOnly: true,
+        nativeSubagentRuntime: { model: { mode: 'custom', value: 'stale-secret-model' } },
+      }]));
+      loadBotConfigs().forEach(config => registerBot(config));
+      installRuntimeSessions();
+      rmSync(configPath);
+
+      setIpcAuthSecret(TEST_IPC_SECRET);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+      for (const breakConfig of [
+        () => rmSync(configPath, { force: true }),
+        () => writeFileSync(configPath, '{bad json'),
+        () => writeFileSync(configPath, JSON.stringify([{
+          larkAppId: OTHER_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+        }])),
+      ]) {
+        breakConfig();
+        const unavailable = await post({}, trustedHostHeaders('POST', path, handle.port));
+        expect(unavailable.status).toBe(503);
+        expect(await unavailable.json()).toEqual({ ok: false, error: 'policy_unavailable' });
+      }
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('uses live policy when registry provenance is explicitly synthetic', async () => {
+    const syntheticApp = 'local_native_runtime';
+    const previous = {
+      coreOnly: process.env.BOTMUX_CORE_ONLY,
+      apiOnlyBot: process.env.BOTMUX_API_ONLY_BOT,
+      coreCli: process.env.BOTMUX_CORE_CLI,
+      botsConfig: process.env.BOTS_CONFIG,
+    };
+    try {
+      process.env.BOTMUX_CORE_ONLY = '1';
+      process.env.BOTMUX_API_ONLY_BOT = syntheticApp;
+      process.env.BOTMUX_CORE_CLI = 'traex';
+      delete process.env.BOTS_CONFIG;
+      const [syntheticConfig] = loadBotConfigs();
+      syntheticConfig.nativeSubagentRuntime = { model: { mode: 'custom', value: 'synthetic-model' } };
+      registerBot(syntheticConfig);
+      installRuntimeSessions(syntheticApp);
+
+      setIpcAuthSecret(TEST_IPC_SECRET);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+      const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+      const response = await post({}, trustedHostHeaders('POST', path, handle.port));
+
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({
+        ok: true,
+        policy: { model: { mode: 'custom', value: 'synthetic-model' } },
+      });
+    } finally {
+      if (previous.coreOnly === undefined) delete process.env.BOTMUX_CORE_ONLY;
+      else process.env.BOTMUX_CORE_ONLY = previous.coreOnly;
+      if (previous.apiOnlyBot === undefined) delete process.env.BOTMUX_API_ONLY_BOT;
+      else process.env.BOTMUX_API_ONLY_BOT = previous.apiOnlyBot;
+      if (previous.coreCli === undefined) delete process.env.BOTMUX_CORE_CLI;
+      else process.env.BOTMUX_CORE_CLI = previous.coreCli;
+      if (previous.botsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = previous.botsConfig;
+    }
   });
 });
 

@@ -11793,8 +11793,12 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     if (!response.ok) return;
     const raw = await response.text();
     if (raw.length > 16 * 1024) return;
-    const data = JSON.parse(raw) as { ok?: unknown; policy?: unknown };
+    const data = JSON.parse(raw) as { ok?: unknown; invalidPolicy?: unknown; policy?: unknown };
     if (data.ok !== true) return;
+    if (data.invalidPolicy === true) {
+      nativeSubagentDiagnostic('daemon rejected invalid stored policy; allowing spawn');
+      return;
+    }
     const normalized = normalizeNativeSubagentRuntimePolicy(data.policy);
     if (!normalized.ok || !normalized.value) {
       if (!normalized.ok) nativeSubagentDiagnostic('daemon returned invalid policy; allowing spawn');
