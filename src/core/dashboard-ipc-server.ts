@@ -231,7 +231,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, MAX_TURN_TIMEOUT_MS, type BotConfig, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
+import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, getLoadedConfigProvenance, MAX_TURN_TIMEOUT_MS, type BotConfig, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
 import { generateAuthUrl, tryHandleCallbackUrl, getFeedGroupAuthStatus, FEED_GROUP_OAUTH_SCOPES } from '../utils/user-token.js';
 import { clampSessionTagName, defaultSessionTagName } from '../services/feed-group-tagger.js';
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
@@ -1278,9 +1278,27 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
   let rawPolicy: unknown;
   try { rawPolicy = getBot(ds.larkAppId).config.nativeSubagentRuntime; } catch { /* stale session */ }
   const normalized = normalizeNativeSubagentRuntimePolicy(rawPolicy);
+  let persistedPolicyInvalid = false;
+  if (getLoadedConfigProvenance() === 'loaded') {
+    try {
+      const rawConfig = await readRawConfig(requireConfigPath());
+      const index = findEntryIndex(rawConfig, ds.larkAppId);
+      if (index < 0) {
+        return jsonRes(res, 503, { ok: false, error: 'policy_unavailable' });
+      }
+      persistedPolicyInvalid = !normalizeNativeSubagentRuntimePolicy(
+        rawConfig[index]?.nativeSubagentRuntime,
+      ).ok;
+    } catch {
+      return jsonRes(res, 503, { ok: false, error: 'policy_unavailable' });
+    }
+  }
+  if (!normalized.ok || persistedPolicyInvalid) {
+    return jsonRes(res, 200, { ok: true, invalidPolicy: true });
+  }
   jsonRes(res, 200, {
     ok: true,
-    ...(normalized.ok && normalized.value ? { policy: normalized.value } : {}),
+    ...(normalized.value ? { policy: normalized.value } : {}),
   });
 });
 
