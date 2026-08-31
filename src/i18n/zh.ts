@@ -654,7 +654,7 @@ export const messages: Record<string, string> = {
   'cmd.retry.cooldown': '⏳ 重试冷却中，请在 {seconds} 秒后再试。',
   'cmd.retry.success': '🔁 已重新提交上一条失败的任务（错误码：{errorCode}），请等待执行。',
   'cmd.retry.submit_failed': '⚠️ 重试提交失败：worker 当前不接受输入，请稍后再试。',
-  'help.card': '/card       - 手动弹出当前会话的流式卡片（关流式时也能临时召唤，并恢复实时刷新；开了私密卡片则改发仅授权人可见的静态快照）',
+  'help.card': '/card       - 手动弹出当前会话的流式卡片（关流式时也能临时召唤，并恢复实时刷新；开了私密卡片则改发仅授权人可见的静态快照）。`/card off｜on` 控制本群是否出流式卡；`/card pin off｜on｜status` 控制当前群的流式卡片置顶开关',
   'help.term': '/term       - 获取当前会话的「可操作终端」（带写权限）链接，私密发给 owner（群内仅你可见，话题/单聊回退私信，不在群里暴露）',
   'help.dashboard': '/dashboard [模块] - 在飞书里打开 Dashboard 控制卡片（sessions/schedules/groups/settings/help 等）',
   'help.issue': '/issue      - 打开 Issue Board 看板，直接在卡片上领取平台任务（自动建群并开工）；任务群里可发 `/issue status` 查现状、`/issue done` 验收完成、`/issue release` 退回待领取',

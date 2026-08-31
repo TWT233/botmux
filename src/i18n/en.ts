@@ -653,7 +653,7 @@ export const messages: Record<string, string> = {
   'cmd.retry.cooldown': '⏳ Retry cooldown active. Try again in {seconds}s.',
   'cmd.retry.success': '🔁 Re-submitted the last failed task (error: {errorCode}). Waiting for execution.',
   'cmd.retry.submit_failed': '⚠️ Retry submission failed: worker is not accepting input. Try again later.',
-  'help.card': '/card       - Manually post the streaming card for this session (summons it even when streaming is off, and resumes live updates; with private-card mode on, sends a static snapshot visible only to authorized users instead)',
+  'help.card': '/card       - Manually post the streaming card for this session (summons it even when streaming is off, and resumes live updates; with private-card mode on, sends a static snapshot visible only to authorized users instead). `/card off|on` toggles streaming cards for this chat; `/card pin off|on|status` controls the per-chat streaming-card Pin override',
   'help.term': '/term       - Get the operable (write-enabled) terminal link for this session, delivered privately to the owner (visible-to-you in-chat, falling back to DM in topic/p2p — never exposed in the group)',
   'help.dashboard': '/dashboard [module] - Open Dashboard control cards in Feishu (sessions/schedules/groups/settings/help, etc.)',
   'help.issue': '/issue      - Open the Issue Board and claim a platform task right from the card (auto-creates a group and starts work); inside the task group use `/issue status` to inspect, `/issue done` to accept, `/issue release` to hand it back',
