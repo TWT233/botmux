@@ -23,7 +23,7 @@
  *   botmux whiteboard status|enable|disable|current|list|read|update|write — local project whiteboard
  */
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, statSync, unlinkSync, rmSync, realpathSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, statSync, unlinkSync, rmSync, realpathSync, chmodSync, closeSync, openSync, readSync } from 'node:fs';
 import { underReadIsolation, sendCredFilePath } from './adapters/cli/read-isolation.js';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, dirname, basename, resolve } from 'node:path';
@@ -207,6 +207,12 @@ import {
 } from './cli/bots-list-output.js';
 import { ensureBotChatGrantMatrix, requestExactChatGrant } from './cli/exact-chat-grant-client.js';
 import { loopbackFetch } from './core/loopback-fetch.js';
+import { isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
+import {
+  normalizeNativeSubagentRuntimePolicy,
+  rewriteNativeSubagentSpawnInput,
+  type NativeSubagentParentRuntime,
+} from './services/native-subagent-runtime-policy.js';
 import {
   buildFooterAddressing,
   hasKnownBotMention,
@@ -11616,6 +11622,196 @@ async function cmdUserPromptHook(): Promise<void> {
   process.exit(0);
 }
 
+// ─── botmux native-subagent-runtime-hook ─────────────────────────────────────
+
+const NATIVE_SUBAGENT_HOOK_STDIN_MAX_BYTES = 256 * 1024;
+const NATIVE_SUBAGENT_TRANSCRIPT_SCAN_MAX_BYTES = 4 * 1024 * 1024;
+const NATIVE_SUBAGENT_DIAGNOSTIC_MAX_CHARS = 512;
+
+function nativeSubagentDiagnostic(message: string): void {
+  process.stderr.write(`[native-subagent-runtime-hook] ${message}`
+    .slice(0, NATIVE_SUBAGENT_DIAGNOSTIC_MAX_CHARS) + '\n');
+}
+
+async function readNativeSubagentHookStdin(): Promise<string | undefined> {
+  const chunks: Buffer[] = [];
+  let size = 0;
+  let tooLarge = false;
+  try {
+    for await (const raw of process.stdin) {
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      size += chunk.length;
+      if (size > NATIVE_SUBAGENT_HOOK_STDIN_MAX_BYTES) {
+        tooLarge = true;
+        continue;
+      }
+      chunks.push(chunk);
+    }
+  } catch {
+    nativeSubagentDiagnostic('stdin read failed; allowing spawn');
+    return undefined;
+  }
+  if (tooLarge) {
+    nativeSubagentDiagnostic('stdin exceeded size limit; allowing spawn');
+    return undefined;
+  }
+  return Buffer.concat(chunks).toString('utf8');
+}
+
+function readImmediateParentRuntime(
+  transcriptPath: string | undefined,
+  payloadModel: unknown,
+): NativeSubagentParentRuntime {
+  const fallbackModel = typeof payloadModel === 'string'
+    && payloadModel.trim()
+    && payloadModel.trim().length <= 256
+    ? payloadModel.trim()
+    : undefined;
+  if (!transcriptPath || transcriptPath.length > 4096 || transcriptPath.includes('\0')) {
+    return fallbackModel ? { model: fallbackModel } : {};
+  }
+  try {
+    const stat = statSync(transcriptPath);
+    if (!stat.isFile()) return fallbackModel ? { model: fallbackModel } : {};
+    const length = Math.min(stat.size, NATIVE_SUBAGENT_TRANSCRIPT_SCAN_MAX_BYTES);
+    const buffer = Buffer.alloc(length);
+    const fd = openSync(transcriptPath, 'r');
+    let offset = 0;
+    try {
+      while (offset < length) {
+        const count = readSync(fd, buffer, offset, length - offset, stat.size - length + offset);
+        if (count <= 0) break;
+        offset += count;
+      }
+    } finally {
+      closeSync(fd);
+    }
+    const tail = buffer.subarray(0, offset).toString('utf8');
+    const lines = tail.split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i].trim();
+      if (!line) continue;
+      let entry: any;
+      try { entry = JSON.parse(line); } catch { continue; }
+      if (entry?.type !== 'turn_context' || !entry.payload || typeof entry.payload !== 'object') continue;
+      const settings = entry.payload.collaboration_mode?.settings;
+      const modelValue = entry.payload.model ?? settings?.model;
+      const effortValue = entry.payload.reasoning_effort
+        ?? entry.payload.effort
+        ?? settings?.reasoning_effort;
+      const model = typeof modelValue === 'string' && modelValue.trim()
+        ? modelValue.trim()
+        : fallbackModel;
+      const reasoningEffort = isCodexReasoningEffort(effortValue)
+        ? effortValue
+        : undefined;
+      return { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
+    }
+  } catch { /* missing/unreadable transcript: model-only payload fallback */ }
+  return fallbackModel ? { model: fallbackModel } : {};
+}
+
+async function writeNativeSubagentHookDirective(value: unknown): Promise<void> {
+  await new Promise<void>(resolveWrite => {
+    process.stdout.write(JSON.stringify(value), () => resolveWrite());
+  });
+}
+
+/** TraeCode PreToolUse(spawn_agent) hook. Every error except a valid unresolved
+ * inherit policy is fail-open: empty stdout and exit 0. */
+async function cmdNativeSubagentRuntimeHook(): Promise<void> {
+  const stdinText = await readNativeSubagentHookStdin();
+  if (stdinText === undefined) return;
+  let payload: Record<string, unknown>;
+  try {
+    const parsed = JSON.parse(stdinText);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('not object');
+    payload = parsed;
+  } catch {
+    nativeSubagentDiagnostic('malformed hook input; allowing spawn');
+    return;
+  }
+  if (payload.hook_event_name !== 'PreToolUse' || payload.tool_name !== 'spawn_agent') return;
+  if (!payload.tool_input || typeof payload.tool_input !== 'object' || Array.isArray(payload.tool_input)) {
+    nativeSubagentDiagnostic('invalid spawn input; allowing spawn');
+    return;
+  }
+
+  const sessionId = process.env.BOTMUX_SESSION_ID?.trim();
+  const larkAppId = process.env.BOTMUX_LARK_APP_ID?.trim();
+  if (!sessionId || !larkAppId) return;
+  try {
+    let discoveredPort: number | undefined;
+    try { discoveredPort = findDaemon(larkAppId)?.ipcPort; } catch { /* isolated */ }
+    const ipcPort = resolveDaemonIpcPort(discoveredPort, process.env.BOTMUX_DAEMON_IPC_PORT);
+    if (!ipcPort) return;
+    const body: Record<string, unknown> = {};
+    let hostSecret: string | undefined;
+    if (!process.env.BOTMUX_SEND_RELAY) {
+      try { hostSecret = loadDaemonIpcSecret(); } catch { /* isolated */ }
+    }
+    if (!hostSecret) {
+      const claim = readManagedOriginCapability(
+        resolveDataDir(), sessionId, process.env.BOTMUX_SEND_RELAY,
+        process.env.BOTMUX_ORIGIN_CHANNEL_ID,
+      );
+      if (!claim) return;
+      body.originCapability = claim.capability;
+      if (claim.turnId) body.originTurnId = claim.turnId;
+      if (claim.dispatchAttempt !== undefined) body.originDispatchAttempt = claim.dispatchAttempt;
+    }
+    const path = `/api/sessions/${encodeURIComponent(sessionId)}/native-subagent-runtime`;
+    const init = {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(2_000),
+    } satisfies RequestInit;
+    const response = hostSecret
+      ? await fetchDaemonIpc(ipcPort, path, init, hostSecret)
+      : await loopbackFetch(`http://127.0.0.1:${ipcPort}${path}`, init);
+    if (!response.ok) return;
+    const raw = await response.text();
+    if (raw.length > 16 * 1024) return;
+    const data = JSON.parse(raw) as { ok?: unknown; policy?: unknown };
+    if (data.ok !== true) return;
+    const normalized = normalizeNativeSubagentRuntimePolicy(data.policy);
+    if (!normalized.ok || !normalized.value) {
+      if (!normalized.ok) nativeSubagentDiagnostic('daemon returned invalid policy; allowing spawn');
+      return;
+    }
+    const parentRuntime = readImmediateParentRuntime(
+      typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined,
+      payload.model,
+    );
+    const rewritten = rewriteNativeSubagentSpawnInput(
+      payload.tool_input as Record<string, unknown>,
+      normalized.value,
+      parentRuntime,
+    );
+    if (rewritten.kind === 'unchanged') return;
+    if (rewritten.kind === 'denied') {
+      await writeNativeSubagentHookDirective({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'deny',
+          permissionDecisionReason: rewritten.reason,
+        },
+      });
+      return;
+    }
+    await writeNativeSubagentHookDirective({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'allow',
+        updatedInput: rewritten.input,
+      },
+    });
+  } catch {
+    nativeSubagentDiagnostic('policy lookup failed; allowing spawn');
+  }
+}
+
 async function cmdBots(sub: string, rest: string[]): Promise<void> {
   process.env.SESSION_DATA_DIR ??= resolveDataDir();
 
@@ -13471,6 +13667,10 @@ switch (command) {
     // `botmux user-prompt-hook` — Claude 家族 UserPromptSubmit hook 客户端，
     // 按内容指纹读回 per-turn sidecar 并注入为该轮 system-reminder（#794）。
     await cmdUserPromptHook();
+    break;
+  }
+  case 'native-subagent-runtime-hook': {
+    await cmdNativeSubagentRuntimeHook();
     break;
   }
   case 'workflow': {

@@ -235,6 +235,7 @@ import { validateSlashInjection } from './slash-inject.js';
 import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
 import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
+import { normalizeNativeSubagentRuntimePolicy } from '../services/native-subagent-runtime-policy.js';
 import { normalizeSessionTitleSource, updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
 import {
@@ -718,6 +719,7 @@ function routeHasNarrowUntrustedAuth(method: string, pathname: string): boolean 
   // 走 body 里的 per-turn capability；handler 内 sessionCliIpcAuth 绑定到 URL 的
   // sessionId + 按 managedTurnOrigin.turnId 权威取（同 /close 姿势）。
   if (method === 'POST' && /^\/api\/sessions\/[^/]+\/prompt-ctx\/claim$/.test(pathname)) return true;
+  if (method === 'POST' && /^\/api\/sessions\/[^/]+\/native-subagent-runtime$/.test(pathname)) return true;
   if (method === 'POST' && pathname === '/api/hooks/emit') return true;
   if (method === 'POST' && pathname === '/api/attention') return true;
   // A sandboxed report cannot read the host HMAC secret. This narrow route
@@ -1221,6 +1223,26 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
   const envelope = claimPromptContext(params.sessionId, turnId, fingerprint, prefix);
   if (!envelope) return jsonRes(res, 404, { ok: false, error: 'not_found' });
   jsonRes(res, 200, { ok: true, envelope });
+});
+
+/** Return only the live bot's normalized native-subagent policy. The session
+ * identity is selected by the authenticated URL/capability pair; body bot ids
+ * are deliberately ignored so callers cannot read another bot's config. */
+ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req, res, params) => {
+  const body = await readJsonBody<Record<string, unknown>>(req)
+    .catch(() => ({} as Record<string, unknown>));
+  const ds = findActiveBySessionId(params.sessionId);
+  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body, { allowReceiver: true });
+  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
+
+  let rawPolicy: unknown;
+  try { rawPolicy = getBot(ds.larkAppId).config.nativeSubagentRuntime; } catch { /* stale session */ }
+  const normalized = normalizeNativeSubagentRuntimePolicy(rawPolicy);
+  jsonRes(res, 200, {
+    ok: true,
+    ...(normalized.ok && normalized.value ? { policy: normalized.value } : {}),
+  });
 });
 
 // `botmux list` zombie pruning is maintenance, not explicit abandon. Serialize

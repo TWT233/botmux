@@ -34,6 +34,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import {
   hookCommandParts,
   hookCommandFor,
+  nativeSubagentRuntimeHookCommand,
   sessionReadyHookCommand,
   userPromptHookCommand,
 } from '../src/adapters/hook-command.js';
@@ -54,6 +55,7 @@ describe('hook-command — compiled binary form', () => {
       hookCommandFor('claude-code'),
       sessionReadyHookCommand(),
       userPromptHookCommand(),
+      nativeSubagentRuntimeHookCommand(),
       ...hookCommandParts('claude-code').args,
       hookCommandParts('claude-code').cmd,
     ];
@@ -72,6 +74,9 @@ describe('hook-command — compiled binary form', () => {
     expect(hookCommandFor('claude-code')).toBe(`"${process.execPath}" hook claude-code`);
     expect(sessionReadyHookCommand()).toBe(`"${process.execPath}" session-ready`);
     expect(userPromptHookCommand()).toBe(`"${process.execPath}" user-prompt-hook`);
+    expect(nativeSubagentRuntimeHookCommand()).toBe(
+      `"${process.execPath}" native-subagent-runtime-hook`,
+    );
   });
 
   it('survives a shell round-trip with the subcommand intact', () => {
@@ -106,10 +111,13 @@ describe('hook-command — Node form stays byte-identical', () => {
     expect(s.endsWith(' hook claude-code')).toBe(true);
   });
 
-  it('session-ready and user-prompt-hook carry the script path too', () => {
+  it('session-ready, user-prompt-hook, and native runtime hook carry the script path too', () => {
     const script = hookCommandParts('x').args[0];
     expect(sessionReadyHookCommand()).toBe(`"${process.execPath}" "${script}" session-ready`);
     expect(userPromptHookCommand()).toBe(`"${process.execPath}" "${script}" user-prompt-hook`);
+    expect(nativeSubagentRuntimeHookCommand()).toBe(
+      `"${process.execPath}" "${script}" native-subagent-runtime-hook`,
+    );
   });
 
   it('the two forms differ exactly by the script argument', () => {
