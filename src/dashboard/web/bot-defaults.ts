@@ -2,6 +2,7 @@ import { store } from './store.js';
 import type { CliRuntimeConfig as SharedCliRuntimeConfig } from '../../adapters/cli/runtime.js';
 import type { FeedbackPolicyLayer } from '../../services/feedback-policy-resolver.js';
 import type { ReplyStyleConfig } from '../../im/lark/reply-card-style.js';
+import type { NativeSubagentRuntimePolicy } from '../../services/native-subagent-runtime-policy.js';
 
 export type CliOption = {
   id: string;
@@ -63,6 +64,7 @@ export type BotDefaultsRow = {
   model?: string;
   modelBackendVariant?: 'standard' | 'max' | null;
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  nativeSubagentRuntime?: NativeSubagentRuntimePolicy;
   /** dsh runner turn timeout (ms); rendered as a dsh-only field. */
   turnTimeoutMs?: number;
   /** dsh runtime variant: 'official' (JSON-RPC runner) or 'tui' (dsh-tui PTY). */
