@@ -45,6 +45,10 @@ import {
 } from './im/lark/reply-card-style.js';
 import { cliModelSupportsReasoningEffort, isConfigurableReasoningCliId, isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
 import {
+  normalizeNativeSubagentRuntimePolicy,
+  type NativeSubagentRuntimePolicy,
+} from './services/native-subagent-runtime-policy.js';
+import {
   normalizeSessionOwnerReminderConfig,
   type SessionOwnerReminderConfig,
 } from './core/session-owner-reminder.js';
@@ -1460,6 +1464,8 @@ export interface BotConfig {
   dshRuntime?: 'official' | 'tui';
   /** Default reasoning effort for newly created sessions on CLIs that support it. */
   reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+  /** Native TraeCode spawn_agent model/effort override policy. */
+  nativeSubagentRuntime?: NativeSubagentRuntimePolicy;
   /**
    * If true, botmux does not add CLI-default approval/sandbox bypass flags
    * such as --yolo or --dangerously-*. Missing/false preserves legacy behavior.
@@ -3269,6 +3275,14 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
     const messageListeners = normalizeMessageListeners(entry.messageListeners, i);
     const commandTriggers = normalizeCommandTriggers(entry.commandTriggers);
     const vcMeetingAgent = normalizeVcMeetingAgentConfig(entry.vcMeetingAgent);
+    const normalizedNativeSubagentRuntime = normalizeNativeSubagentRuntimePolicy(
+      entry.nativeSubagentRuntime,
+    );
+    if (!normalizedNativeSubagentRuntime.ok) {
+      logger.warn(
+        `[bot-registry:${entry.larkAppId}] nativeSubagentRuntime ignored: ${normalizedNativeSubagentRuntime.error}`,
+      );
+    }
 
     // voice：per-bot 语音引擎覆盖。结构化保留（engine ∈ sami|openai，sami/openai
     // 为对象，speaker/rate 透传，asr 为对象）；非对象或 engine 非法 → undefined。
@@ -3359,6 +3373,9 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
           entry.reasoningEffort,
         )
         ? entry.reasoningEffort : undefined,
+      nativeSubagentRuntime: entryCliId === 'traex' && normalizedNativeSubagentRuntime.ok
+        ? normalizedNativeSubagentRuntime.value
+        : undefined,
       disableCliBypass: entry.disableCliBypass === true,
       codexAppCleanInput: entry.codexAppCleanInput === true || undefined,
       codexBrowser,

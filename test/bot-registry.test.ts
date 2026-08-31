@@ -1085,6 +1085,55 @@ describe('parseBotConfigsFromText — brand', () => {
   });
 });
 
+describe('parseBotConfigsFromText — native subagent runtime policy', () => {
+  let mod: Awaited<ReturnType<typeof freshImport>>;
+
+  beforeEach(async () => {
+    mod = await freshImport();
+  });
+
+  it('normalizes a valid TraeCode policy and canonicalizes an empty policy away', () => {
+    const [configured, empty] = mod.parseBotConfigsFromText(JSON.stringify([
+      {
+        larkAppId: 'policy-app',
+        larkAppSecret: 's',
+        cliId: 'traex',
+        nativeSubagentRuntime: {
+          model: { mode: 'custom', value: '  GPT-5.6-Sol  ' },
+          reasoningEffort: { mode: 'inherit' },
+        },
+      },
+      {
+        larkAppId: 'empty-policy-app',
+        larkAppSecret: 's',
+        cliId: 'traex',
+        nativeSubagentRuntime: {},
+      },
+    ]));
+
+    expect(configured.nativeSubagentRuntime).toEqual({
+      model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+      reasoningEffort: { mode: 'inherit' },
+    });
+    expect(empty.nativeSubagentRuntime).toBeUndefined();
+  });
+
+  it('drops malformed persisted policy state without affecting the rest of the bot config', () => {
+    const [cfg] = mod.parseBotConfigsFromText(JSON.stringify([
+      {
+        larkAppId: 'malformed-policy-app',
+        larkAppSecret: 's',
+        cliId: 'traex',
+        model: 'GPT-5.4',
+        nativeSubagentRuntime: { model: { mode: 'custom', value: '' } },
+      },
+    ]));
+
+    expect(cfg.nativeSubagentRuntime).toBeUndefined();
+    expect(cfg.model).toBe('GPT-5.4');
+  });
+});
+
 // ─── parseBotConfigsFromText — autoStartOnGroupJoinSeed ────────────────────
 
 describe('parseBotConfigsFromText — autoStartOnGroupJoinSeed', () => {
