@@ -109,7 +109,7 @@ import { resolveFeedbackPolicyForDelivery, resolveFeedbackTeamId } from '../serv
 /** A random id minted once per daemon process (this lifetime). Stamped onto
  *  isolated persistent panes so a suspend→resume reattach (same id) is
  *  distinguishable from a pane surviving a daemon restart (different id). */
-const DAEMON_BOOT_ID = randomUUID();
+const DAEMON_BOOT_ID = randomBytes(32).toString('base64url');
 const restartCoordinator = new RestartCoordinator();
 const lifecycleRetiringWorkers = new WeakMap<DaemonSession, Set<ChildProcess>>();
 const transferRetiringWorkers = new WeakSet<ChildProcess>();
@@ -13592,6 +13592,8 @@ function setupWorkerHandlers(
                 sessionId: msg.sessionId,
                 channelId: msg.originChannelId,
                 capability: msg.capability,
+                larkAppId: ds.larkAppId,
+                bootInstanceId: getDaemonBootId(),
                 ...(Number.isSafeInteger(ipcPort) && ipcPort > 0 && ipcPort <= 65_535
                   ? { ipcPort }
                   : {}),

@@ -26,6 +26,7 @@ import {
   normalizeIsolationPath,
   shouldRedirectCliData,
 } from '../src/adapters/cli/read-isolation.js';
+import { managedOriginAttestationDirectory, managedOriginCapabilityDirectory } from '../src/core/managed-origin-capability.js';
 
 describe('CLI data redirect gate', () => {
   const base = { supportsReadIsolation: true, sessionDataDir: '/srv/botmux/data' };
@@ -206,6 +207,18 @@ describe('mandatory device credential isolation', () => {
       expect(isCredentialIsolationReservedBasename(name), name).toBe(true);
     }
   });
+
+  it('credential-only Seatbelt must expose both capability and attestation dirs read-only while keeping profileDir write-denied', async () => {
+    const workerSource = await import('node:fs/promises').then(fs =>
+      fs.readFile(new URL('../src/worker.ts', import.meta.url), 'utf8'));
+    const capabilityDir = managedOriginCapabilityDirectory('/tmp/botmux-data', 'session-a', G1);
+    const attestationDir = managedOriginAttestationDirectory('/tmp/botmux-data', 'session-a', G1);
+    expect(workerSource).toContain('[canonical(originDirectory), canonical(attestationDirectory)]');
+    expect(workerSource).toContain('const attestationDirectory = managedOriginAttestationDirectory(');
+    expect(workerSource).toContain('canonical(profileDir)');
+    expect(capabilityDir).toMatch(/^\/tmp\/botmux-data\/read-isolation\/origin-[a-f0-9]{64}$/);
+    expect(attestationDir).toMatch(/^\/tmp\/botmux-data\/read-isolation\/attest-[a-f0-9]{64}$/);
+  });
 });
 
 
@@ -338,6 +351,69 @@ describe('isolatedPaneReattachSafe', () => {
     ), {
       requiredCapabilities: ['credential', 'read'],
       requireOriginChannel: true,
+    })).toBe(false);
+  });
+
+  it('binds Linux warm reattach to the managed-origin digest so install-root or native-hook protocol changes cold-spawn', () => {
+    const linuxDigestA = isolationPanePolicyDigest({
+      readIsolation: false,
+      writeSandbox: false,
+      botmuxHome: '/home/u/.botmux',
+      sessionDataDir: '/home/u/.botmux/data',
+      readOnlyExtraPaths: ['/checkout/a'],
+      readWriteExtraPaths: ['/native-hook-protocol/v1'],
+      cliId: 'traex',
+      resolvedBin: '/usr/bin/traex',
+    });
+    const linuxDigestB = isolationPanePolicyDigest({
+      readIsolation: false,
+      writeSandbox: false,
+      botmuxHome: '/home/u/.botmux',
+      sessionDataDir: '/home/u/.botmux/data',
+      readOnlyExtraPaths: ['/checkout/b'],
+      readWriteExtraPaths: ['/native-hook-protocol/v1'],
+      cliId: 'traex',
+      resolvedBin: '/usr/bin/traex',
+    });
+    const linuxDigestProtocolBump = isolationPanePolicyDigest({
+      readIsolation: false,
+      writeSandbox: false,
+      botmuxHome: '/home/u/.botmux',
+      sessionDataDir: '/home/u/.botmux/data',
+      readOnlyExtraPaths: ['/checkout/a'],
+      readWriteExtraPaths: ['/native-hook-protocol/v2'],
+      cliId: 'traex',
+      resolvedBin: '/usr/bin/traex',
+    });
+    const marker = isolationPaneMarkerContent('linux-fresh', ['credential', 'read', 'write'], {
+      originChannelId: G1,
+      readIsolation: false,
+      writeSandbox: false,
+      policyDigest: linuxDigestA,
+    });
+    expect(isolatedPaneReattachSafe(marker, {
+      requiredCapabilities: ['credential', 'read', 'write'],
+      exactCapabilities: true,
+      readIsolation: false,
+      writeSandbox: false,
+      requireOriginChannel: true,
+      policyDigest: linuxDigestA,
+    })).toBe(true);
+    expect(isolatedPaneReattachSafe(marker, {
+      requiredCapabilities: ['credential', 'read', 'write'],
+      exactCapabilities: true,
+      readIsolation: false,
+      writeSandbox: false,
+      requireOriginChannel: true,
+      policyDigest: linuxDigestB,
+    })).toBe(false);
+    expect(isolatedPaneReattachSafe(marker, {
+      requiredCapabilities: ['credential', 'read', 'write'],
+      exactCapabilities: true,
+      readIsolation: false,
+      writeSandbox: false,
+      requireOriginChannel: true,
+      policyDigest: linuxDigestProtocolBump,
     })).toBe(false);
   });
 });

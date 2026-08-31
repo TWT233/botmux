@@ -31,6 +31,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { isStandaloneBinary } from '../core/self-spawn.js';
+import { resolveStableBotmuxWrapperPath } from '../core/botmux-wrapper.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -119,11 +120,15 @@ export function userPromptHookCommand(): string {
 
 /**
  * Construct the process-scoped TraeCode `spawn_agent` runtime-policy hook.
- * The command has the same Node/standalone split as every other external hook:
- * a compiled binary re-execs itself, while Node needs the physical cli.js path.
+ * The stable daemon-written wrapper lets a long-lived pane pick up the current
+ * Node or standalone build instead of retaining a checkout-local entrypoint.
  */
-export function nativeSubagentRuntimeHookCommand(): string {
-  return renderShellCommand(undefined, 'native-subagent-runtime-hook');
+export function nativeSubagentRuntimeHookCommand(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const executable = resolveStableBotmuxWrapperPath(env, platform);
+  return `"${executable}" native-subagent-runtime-hook`;
 }
 
 >>>>>>> be1a303b (feat(subagent): 接入运行时策略钩子)

@@ -403,7 +403,6 @@ import { defaultBaseDir as v3DefaultBaseDir } from './workflows/v3/grill-state.j
 import { persistV3StartIntent } from './workflows/v3/start-intent.js';
 import {
   createWorkflowDaemonIpcNonceStore,
-  generateWorkflowDaemonBootInstanceId,
   loadWorkflowDaemonIpcSecret,
   signWorkflowDaemonIpcResponse,
   verifyWorkflowDaemonIpcRequest,
@@ -21856,7 +21855,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     pid: process.pid,
     processStartIdentity: daemonProcessStartIdentity,
     startedAt: Date.now(),
-    bootInstanceId: generateWorkflowDaemonBootInstanceId(),
+    bootInstanceId: getDaemonBootId(),
     workflowIpcProtocol: 'v1',
     lastHeartbeat: Date.now(),
     // Dashboard create-group only consumes app-scoped open_ids — publish ONLY

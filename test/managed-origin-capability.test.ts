@@ -148,6 +148,22 @@ describe('managed origin capability transport', () => {
     expect(readManagedOriginCapability(dir, 'session-a', relay)).toBeNull();
   });
 
+  it('reads daemon routing identity from a host-owned channel claim', () => {
+    const dir = makeDir();
+    const path = managedOriginCapabilityPath(dir, 'session-a', G1);
+    replaceManagedOriginCapabilityFile(path, JSON.stringify({
+      sessionId: 'session-a', channelId: G1, capability: 'ef'.repeat(32),
+      larkAppId: 'app-a', bootInstanceId: 'B'.repeat(43), ipcPort: 4310,
+      turnId: 'turn-a', dispatchAttempt: 2,
+    }));
+
+    expect(readManagedOriginCapability(dir, 'session-a', undefined, G1)).toEqual({
+      sessionId: 'session-a', channelId: G1, capability: 'ef'.repeat(32),
+      larkAppId: 'app-a', bootInstanceId: 'B'.repeat(43), ipcPort: 4310,
+      turnId: 'turn-a', dispatchAttempt: 2,
+    });
+  });
+
   it('refuses a symlink capability leaf instead of following it', () => {
     const dir = makeDir();
     const relay = join(dir, 'relay');
