@@ -1,5 +1,5 @@
 import { createServer, type Server } from 'node:http';
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -111,6 +111,7 @@ async function runHook(
     responseMode?: 'normal' | 'oversized-never-ending' | 'partial-never-ending';
     writeHostProof?: boolean;
     relayPort?: number;
+    policyOnlyClaim?: boolean;
   } = {},
 ): Promise<{
   status: number | null;
@@ -129,9 +130,13 @@ async function runHook(
   replaceManagedOriginCapabilityFile(
     managedOriginCapabilityPath(dir, 'session-native', CHANNEL_ID),
     JSON.stringify({
-      sessionId: 'session-native', channelId: CHANNEL_ID, capability: CAPABILITY,
+      sessionId: 'session-native',
+      channelId: CHANNEL_ID,
+      ...(!options.policyOnlyClaim ? { capability: CAPABILITY } : {}),
       policyCapability: POLICY_CAPABILITY,
-      larkAppId: APP_ID, bootInstanceId: BOOT_ID, turnId: 'turn-1', dispatchAttempt: 1,
+      larkAppId: APP_ID,
+      bootInstanceId: BOOT_ID,
+      ...(!options.policyOnlyClaim ? { turnId: 'turn-1', dispatchAttempt: 1 } : {}),
       ipcPort: port,
     }),
   );
@@ -329,6 +334,32 @@ describe('native-subagent-runtime-hook CLI', () => {
     expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
       model_provider: 'trae',
       model: 'protected-model',
+    });
+  });
+
+  it('rewrites spawn input from a policy-only per-channel claim after terminal', async () => {
+    const result = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'custom', value: 'post-terminal-model' } },
+      policyOnlyClaim: true,
+      relayPort: 9,
+    });
+
+    expect(result.status).toBe(0);
+    expect(result.stderr).toBe('');
+    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
+      model_provider: 'trae',
+      model: 'post-terminal-model',
+    });
+    expect(JSON.parse(readFileSync(
+      managedOriginCapabilityPath(dir!, 'session-native', CHANNEL_ID),
+      'utf8',
+    ))).toEqual({
+      sessionId: 'session-native',
+      channelId: CHANNEL_ID,
+      policyCapability: POLICY_CAPABILITY,
+      larkAppId: APP_ID,
+      bootInstanceId: BOOT_ID,
+      ipcPort: expect.any(Number),
     });
   });
 
