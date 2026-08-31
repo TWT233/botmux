@@ -2396,9 +2396,11 @@ export function BotAgentSection(props: {
           cliRuntime: res.body.cliRuntime ?? null,
           wrapperCli: res.body.wrapperCli ?? null,
           model: res.body.model ?? '',
+          reasoningEffort: res.body.reasoningEffort ?? undefined,
           nativeSubagentRuntime: savedNativePolicy ?? undefined,
           agentSelectionKey: res.body.selectionKey ?? 'riff',
         });
+        setReasoningEffort(res.body.reasoningEffort ?? '');
         setNativeModelMode(savedNativePolicy?.model?.mode ?? 'passthrough');
         setNativeModel(savedNativePolicy?.model?.mode === 'custom' ? savedNativePolicy.model.value : '');
         setNativeEffortMode(savedNativePolicy?.reasoningEffort?.mode ?? 'passthrough');
