@@ -140,11 +140,14 @@ not silently drop or downgrade the configured value.
    current model, and original `tool_input`, to the Botmux hook command.
 3. The hook requires the managed `BOTMUX_SESSION_ID` and
    `BOTMUX_LARK_APP_ID`. Non-Botmux sessions return no output.
-4. The hook resolves the immediate parent runtime from the current TraeCode
-   transcript and requests the current bot policy from the owning daemon over
-   the existing authenticated loopback channel. This makes Dashboard changes
-   effective for subsequent spawns in already-running managed sessions whose
-   process contains the hook.
+4. The hook resolves the immediate parent runtime from the hook payload's
+   `transcript_path`, using its latest complete `turn_context`, and requests only
+   the current bot policy from the owning daemon over the existing authenticated
+   loopback channel. The daemon's in-memory runtime belongs to the root Botmux
+   session and therefore cannot represent an immediate parent that is itself a
+   nested subagent. This split keeps recursive inheritance correct while making
+   Dashboard changes effective for subsequent spawns in already-running managed
+   sessions whose process contains the hook.
 5. A pure policy function rewrites only the configured dimensions and emits a
    TraeCode `PreToolUse` allow directive with the complete `updatedInput`. With
    no configured dimensions it emits no directive.
