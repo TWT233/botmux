@@ -250,6 +250,7 @@ import {
   NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS,
   createNativeSubagentRuntimeNonceStore,
   nativeSubagentRuntimeHostRequestNonce,
+  nativeSubagentRuntimeRequestNonce,
   signNativeSubagentRuntimeResponse,
   verifyNativeSubagentRuntimeCapabilityRequest,
   writeNativeSubagentRuntimeResponseProof,
@@ -809,6 +810,16 @@ export function armCoreOnlyReadinessGate(): void { coreOnlyReadinessGate = true;
 export function setCoreOnlyReady(): void { coreOnlyReady = true; }
 /** @internal test-only: reset the core-only readiness gate between cases. */
 export function __testOnly_resetCoreOnlyReadiness(): void { coreOnlyReadinessGate = false; coreOnlyReady = false; }
+/** @internal test-only: clear shared attestation/runtime nonce and proof counters. */
+export function __testOnly_resetManagedOriginRuntimeAuthState(): void {
+  managedOriginOutstandingProofs.clear();
+  managedOriginPreauthInFlight = 0;
+  nativeSubagentRuntimePreauthInFlight = 0;
+  while (nativeSubagentRuntimeNonceStore.size() > 0) {
+    nativeSubagentRuntimeNonceStore = createNativeSubagentRuntimeNonceStore();
+    break;
+  }
+}
 /** True when the readiness gate is armed (core-only) but restore hasn't finished.
  *  The server-level gate returns 503 for the public control routes in this state,
  *  and /healthz reports 'starting' — a barrier so riff can't trigger into a racing
@@ -1251,7 +1262,7 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
 const NATIVE_SUBAGENT_RUNTIME_BODY_MAX_BYTES = 2 * 1024;
 const NATIVE_SUBAGENT_RUNTIME_BODY_TIMEOUT_MS = 1_000;
 const NATIVE_SUBAGENT_RUNTIME_MAX_PREAUTH_IN_FLIGHT = 128;
-const nativeSubagentRuntimeNonceStore = createNativeSubagentRuntimeNonceStore();
+let nativeSubagentRuntimeNonceStore = createNativeSubagentRuntimeNonceStore();
 let nativeSubagentRuntimePreauthInFlight = 0;
 
 function nativeSubagentRuntimeJsonRes(input: {
@@ -1263,60 +1274,66 @@ function nativeSubagentRuntimeJsonRes(input: {
   authKind: 'host' | 'capability';
   key: string;
   requestNonce: string;
-  turnId?: string;
-  dispatchAttempt?: number;
 }): void {
-  const raw = JSON.stringify(input.body);
+  let status = input.status;
+  let body = input.body;
   const path = new URL(input.req.url ?? '/', 'http://localhost').pathname;
   const port = input.req.socket.localPort;
   if (!port) return jsonRes(input.res, 503, { ok: false, error: 'policy_unavailable' });
+  if (input.authKind === 'capability') {
+    const outstanding = managedOriginOutstandingProofs.get(input.sessionId) ?? 0;
+    if (outstanding >= MANAGED_ORIGIN_ATTEST_MAX_OUTSTANDING_PER_SESSION) {
+      status = 429;
+      body = { ok: false, error: 'too_many_attestations' };
+    }
+  }
+  const raw = JSON.stringify(body);
   const responseBinding = {
     requestNonce: input.requestNonce,
     method: input.req.method ?? 'POST',
     path,
     port,
-    status: input.status,
+    status,
     body: raw,
     sessionId: input.sessionId,
     larkAppId: cachedLarkAppId,
     bootInstanceId: getDaemonBootId(),
-    ...(input.turnId ? { turnId: input.turnId } : {}),
-    ...(input.dispatchAttempt !== undefined
-      ? { dispatchAttempt: input.dispatchAttempt }
-      : {}),
   } as const;
   const responseHeaders: Record<string, string> = { 'content-type': 'application/json' };
-  if (input.authKind === 'host') {
-    responseHeaders[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature] =
-      signNativeSubagentRuntimeResponse({ ...responseBinding, key: input.key });
-  } else {
+  responseHeaders[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature] =
+    signNativeSubagentRuntimeResponse({ ...responseBinding, key: input.key });
+  if (input.authKind === 'capability') {
     const ds = findActiveBySessionId(input.sessionId);
     const channelId = ds?.managedTurnOrigin?.originChannelId;
-    if (!channelId) return jsonRes(input.res, 409, { ok: false, error: 'proof_unavailable' });
     const outstanding = managedOriginOutstandingProofs.get(input.sessionId) ?? 0;
-    if (outstanding >= MANAGED_ORIGIN_ATTEST_MAX_OUTSTANDING_PER_SESSION) {
-      return jsonRes(input.res, 429, { ok: false, error: 'too_many_attestations' });
+    if (channelId && outstanding < MANAGED_ORIGIN_ATTEST_MAX_OUTSTANDING_PER_SESSION) {
+      let proofPath: string;
+      try {
+        proofPath = writeNativeSubagentRuntimeResponseProof({
+          dataDir: config.session.dataDir, channelId, nonce: input.requestNonce,
+          response: responseBinding,
+        });
+      } catch (error) {
+        logger.warn(`[native-subagent-runtime] could not write response proof: ${error}`);
+        proofPath = '';
+      }
+      if (proofPath) {
+        managedOriginOutstandingProofs.set(input.sessionId, outstanding + 1);
+        const cleanupTimer = setTimeout(() => {
+          try { unlinkSync(proofPath); } catch { /* expired/already gone */ }
+          const remaining = (managedOriginOutstandingProofs.get(input.sessionId) ?? 1) - 1;
+          if (remaining > 0) managedOriginOutstandingProofs.set(input.sessionId, remaining);
+          else managedOriginOutstandingProofs.delete(input.sessionId);
+        }, NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS + 1_000);
+        cleanupTimer.unref?.();
+      }
+    } else if (!channelId) {
+      logger.warn('[native-subagent-runtime] missing origin channel; returning signed response without proof');
+    } else {
+      logger.warn('[native-subagent-runtime] proof capacity exhausted; returning signed response without proof');
     }
-    let proofPath: string;
-    try {
-      proofPath = writeNativeSubagentRuntimeResponseProof({
-        dataDir: config.session.dataDir, channelId, nonce: input.requestNonce,
-        response: responseBinding,
-      });
-    } catch (error) {
-      logger.warn(`[native-subagent-runtime] could not write response proof: ${error}`);
-      return jsonRes(input.res, 409, { ok: false, error: 'proof_unavailable' });
-    }
-    managedOriginOutstandingProofs.set(input.sessionId, outstanding + 1);
-    const cleanupTimer = setTimeout(() => {
-      try { unlinkSync(proofPath); } catch { /* expired/already gone */ }
-      const remaining = (managedOriginOutstandingProofs.get(input.sessionId) ?? 1) - 1;
-      if (remaining > 0) managedOriginOutstandingProofs.set(input.sessionId, remaining);
-      else managedOriginOutstandingProofs.delete(input.sessionId);
-    }, NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS + 1_000);
-    cleanupTimer.unref?.();
   }
-  input.res.writeHead(input.status, responseHeaders);
+  input.res.writeHead(status, responseHeaders);
   input.res.end(raw);
 }
 
@@ -1374,8 +1391,6 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
     authKind: 'host' | 'capability';
     key: string;
     requestNonce: string;
-    turnId?: string;
-    dispatchAttempt?: number;
   };
   if (hostSecret) {
     if (!hostNonce) return jsonRes(res, 403, { ok: false, error: 'response_challenge_required' });
@@ -1398,18 +1413,24 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
       ...daemonIdentity,
     });
     if (!verified.ok) {
-      return verified.reason === 'capacity_exceeded'
-        ? jsonRes(res, 429, { ok: false, error: 'native_runtime_overloaded' })
-        : jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
+      if (verified.reason === 'capacity_exceeded') {
+        return nativeSubagentRuntimeJsonRes({
+          req,
+          res,
+          sessionId: params.sessionId,
+          status: 429,
+          body: { ok: false, error: 'native_runtime_overloaded' },
+          authKind: 'capability',
+          key: policyCapability,
+          requestNonce: nativeSubagentRuntimeRequestNonce(req.headers) ?? '',
+        });
+      }
+      return jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
     }
     responseAuth = {
       authKind: 'capability',
       key: policyCapability,
       requestNonce: verified.nonce,
-      ...(liveOrigin?.turnId ? { turnId: liveOrigin.turnId } : {}),
-      ...(liveOrigin?.dispatchAttempt !== undefined
-        ? { dispatchAttempt: liveOrigin.dispatchAttempt }
-        : {}),
     };
   }
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });

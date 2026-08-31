@@ -65,9 +65,6 @@ async function listen(options: {
           sessionId: 'session-native',
           larkAppId: APP_ID,
           bootInstanceId: BOOT_ID,
-          ...((options.authKind ?? 'capability') === 'capability'
-            ? { turnId: 'turn-1', dispatchAttempt: 1 }
-            : {}),
         });
     }
     if ((options.authKind ?? 'capability') === 'capability'
@@ -77,7 +74,7 @@ async function listen(options: {
         response: {
           method: 'POST', path: '/api/sessions/session-native/native-subagent-runtime',
           port, status, body: raw, sessionId: 'session-native',
-          larkAppId: APP_ID, bootInstanceId: BOOT_ID, turnId: 'turn-1', dispatchAttempt: 1,
+          larkAppId: APP_ID, bootInstanceId: BOOT_ID,
         },
       });
     }

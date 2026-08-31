@@ -12243,10 +12243,6 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     const responseBinding = {
       requestNonce, method: 'POST', path, port: ipcPort, status: response.status, raw,
       sessionId, larkAppId: targetLarkAppId, bootInstanceId: targetBootInstanceId,
-      ...(!hostSecret && policyClaim!.turnId ? { turnId: policyClaim!.turnId } : {}),
-      ...(!hostSecret && policyClaim!.dispatchAttempt !== undefined
-        ? { dispatchAttempt: policyClaim!.dispatchAttempt }
-        : {}),
     };
     const responseAuthenticated = hostSecret
       ? verifyNativeSubagentRuntimeResponse({
@@ -12262,7 +12258,19 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           bootInstanceId: responseBinding.bootInstanceId,
           signature: response.headers.get(NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature),
         })
-      : false;
+      : verifyNativeSubagentRuntimeResponse({
+          key: policyClaim!.policyCapability,
+          requestNonce: responseBinding.requestNonce,
+          method: responseBinding.method,
+          path: responseBinding.path,
+          port: responseBinding.port,
+          status: responseBinding.status,
+          body: responseBinding.raw,
+          sessionId: responseBinding.sessionId,
+          larkAppId: responseBinding.larkAppId,
+          bootInstanceId: responseBinding.bootInstanceId,
+          signature: response.headers.get(NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature),
+        });
     const proofAuthenticated = !hostSecret && policyClaim?.channelId
       ? readNativeSubagentRuntimeResponseProof({
           dataDir: resolveDataDir(),
@@ -12271,14 +12279,10 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           response: {
             method: 'POST', path, port: ipcPort, status: response.status, body: raw, sessionId,
             larkAppId: targetLarkAppId, bootInstanceId: targetBootInstanceId,
-            ...(policyClaim.turnId ? { turnId: policyClaim.turnId } : {}),
-            ...(policyClaim.dispatchAttempt !== undefined
-              ? { dispatchAttempt: policyClaim.dispatchAttempt }
-              : {}),
           },
         })
       : false;
-    if (hostSecret ? !responseAuthenticated : !proofAuthenticated) {
+    if (hostSecret ? !responseAuthenticated : (!responseAuthenticated && !proofAuthenticated)) {
       nativeSubagentDiagnostic('daemon response authentication failed; allowing spawn');
       return;
     }
