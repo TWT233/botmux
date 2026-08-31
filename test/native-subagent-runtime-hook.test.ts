@@ -36,6 +36,7 @@ async function runHook(
     startServer?: boolean;
     endStdin?: boolean;
     exitTimeoutMs?: number;
+    transcriptRecords?: readonly Record<string, unknown>[];
   } = {},
 ): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-hook-'));
@@ -46,11 +47,14 @@ async function runHook(
   writeFileSync(join(relay, '.botmux-origin-capability.json'), JSON.stringify({
     capability: CAPABILITY, turnId: 'turn-1', dispatchAttempt: 1,
   }), { mode: 0o600 });
-  writeFileSync(transcript, [
-    JSON.stringify({ type: 'turn_context', payload: { model: 'old', reasoning_effort: 'low' } }),
-    JSON.stringify({ type: 'turn_context', payload: {
+  const transcriptRecords = options.transcriptRecords ?? [
+    { type: 'turn_context', payload: { model: 'old', reasoning_effort: 'low' } },
+    { type: 'turn_context', payload: {
       model: 'parent-model', collaboration_mode: { settings: { reasoning_effort: 'xhigh' } },
-    } }),
+    } },
+  ];
+  writeFileSync(transcript, [
+    ...transcriptRecords.map(record => JSON.stringify(record)),
     '{"type":"turn_context","payload":{"model":"partial"',
   ].join('\n'));
   const port = options.startServer === false
@@ -178,6 +182,40 @@ describe('native-subagent-runtime-hook CLI', () => {
           model_provider: 'trae', model: 'parent-model', reasoning_effort: 'xhigh',
         },
       },
+    });
+  });
+
+  it('keeps scanning backward for effort after the newest turn context establishes model', async () => {
+    const result = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'inherit' } },
+      transcriptRecords: [
+        { type: 'turn_context', payload: { reasoning_effort: 'high' } },
+        { type: 'turn_context', payload: { model: 'newest-model' } },
+      ],
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
+      model_provider: 'trae',
+      model: 'newest-model',
+      reasoning_effort: 'high',
+    });
+  });
+
+  it('keeps scanning backward for model after the newest turn context establishes effort', async () => {
+    const result = await runHook(JSON.stringify(spawnPayload), {
+      policy: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'inherit' } },
+      transcriptRecords: [
+        { type: 'turn_context', payload: { model: 'older-model' } },
+        { type: 'turn_context', payload: { reasoning_effort: 'medium' } },
+      ],
+    });
+
+    expect(result.status).toBe(0);
+    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
+      model_provider: 'trae',
+      model: 'older-model',
+      reasoning_effort: 'medium',
     });
   });
 
