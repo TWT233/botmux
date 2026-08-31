@@ -78,6 +78,30 @@ describe('pinMessage/unpinMessage boolean contract', () => {
     expect(lowered).not.toContain('authorization');
   });
 
+  it('unpin failures log only at debug (not warn)', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    const debug = vi.spyOn(logger, 'debug').mockImplementation(() => {});
+
+    setUnpinImpl('u_debug_code', async () => ({ code: 230001, msg: 'fail' }));
+    await expect(unpinMessage('u_debug_code', 'om_pin')).resolves.toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalled();
+
+    warn.mockClear();
+    debug.mockClear();
+
+    const err: any = new Error('sdk failed');
+    err.config = { headers: { Authorization: 'Bearer fake_authorization_token' } };
+    setUnpinImpl('u_debug_throw', async () => { throw err; });
+    await expect(unpinMessage('u_debug_throw', 'om_pin')).resolves.toBe(false);
+    expect(warn).not.toHaveBeenCalled();
+    expect(debug).toHaveBeenCalled();
+    const joined = debug.mock.calls.map((c) => c.join(' ')).join(' ');
+    const lowered = joined.toLowerCase();
+    expect(lowered).not.toContain('fake_authorization_token');
+    expect(lowered).not.toContain('authorization');
+  });
+
   it('two successful unpin calls both return true (wrapper is stateless)', async () => {
     setUnpinImpl('u_idem', async () => ({ code: 0 }));
     await expect(unpinMessage('u_idem', 'om_pin')).resolves.toBe(true);
