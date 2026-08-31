@@ -231,7 +231,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, getLoadedConfigProvenance, MAX_TURN_TIMEOUT_MS, type BotConfig, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
+import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, updateBotNativeSubagentRuntime, MAX_TURN_TIMEOUT_MS, type BotConfig, type NativeSubagentRuntimeConfigState, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
 import { generateAuthUrl, tryHandleCallbackUrl, getFeedGroupAuthStatus, FEED_GROUP_OAUTH_SCOPES } from '../utils/user-token.js';
 import { clampSessionTagName, defaultSessionTagName } from '../services/feed-group-tagger.js';
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
@@ -1275,30 +1275,15 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
   if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
 
-  let rawPolicy: unknown;
-  try { rawPolicy = getBot(ds.larkAppId).config.nativeSubagentRuntime; } catch { /* stale session */ }
-  const normalized = normalizeNativeSubagentRuntimePolicy(rawPolicy);
-  let persistedPolicyInvalid = false;
-  if (getLoadedConfigProvenance() === 'loaded') {
-    try {
-      const rawConfig = await readRawConfig(requireConfigPath());
-      const index = findEntryIndex(rawConfig, ds.larkAppId);
-      if (index < 0) {
-        return jsonRes(res, 503, { ok: false, error: 'policy_unavailable' });
-      }
-      persistedPolicyInvalid = !normalizeNativeSubagentRuntimePolicy(
-        rawConfig[index]?.nativeSubagentRuntime,
-      ).ok;
-    } catch {
-      return jsonRes(res, 503, { ok: false, error: 'policy_unavailable' });
-    }
-  }
-  if (!normalized.ok || persistedPolicyInvalid) {
+  let runtimeState;
+  try { runtimeState = getBot(ds.larkAppId).nativeSubagentRuntimeState; }
+  catch { return jsonRes(res, 404, { ok: false, error: 'bot_not_found' }); }
+  if (runtimeState.status === 'invalid') {
     return jsonRes(res, 200, { ok: true, invalidPolicy: true });
   }
   jsonRes(res, 200, {
     ok: true,
-    ...(normalized.value ? { policy: normalized.value } : {}),
+    ...(runtimeState.status === 'valid' ? { policy: runtimeState.policy } : {}),
   });
 });
 
@@ -4895,7 +4880,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       error?: 'reasoning_effort_not_supported_by_model';
       nextReasoningEffort?: typeof reasoningEffort;
       nextModelBackendVariant?: 'standard' | 'max';
-      nextNativeSubagentRuntime?: BotConfig['nativeSubagentRuntime'];
+      nextNativeSubagentRuntimeState?: NativeSubagentRuntimeConfigState;
     }>(larkAppId, (entry) => {
     const storedModelBackendVariant = entry.modelBackendVariant === 'standard' || entry.modelBackendVariant === 'max'
       ? entry.modelBackendVariant
@@ -4941,16 +4926,23 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       if (reasoningEffort) entry.reasoningEffort = reasoningEffort;
       else delete entry.reasoningEffort;
     }
-    let nextNativeSubagentRuntime: BotConfig['nativeSubagentRuntime'];
+    let nextNativeSubagentRuntimeState: NativeSubagentRuntimeConfigState;
     if (selected.cliId !== 'traex') {
       delete entry.nativeSubagentRuntime;
+      nextNativeSubagentRuntimeState = { status: 'absent' };
     } else if (nativeSubagentRuntimeFieldPresent) {
       if (requestedNativeSubagentRuntime) entry.nativeSubagentRuntime = requestedNativeSubagentRuntime;
       else delete entry.nativeSubagentRuntime;
-      nextNativeSubagentRuntime = requestedNativeSubagentRuntime;
+      nextNativeSubagentRuntimeState = requestedNativeSubagentRuntime
+        ? { status: 'valid', policy: requestedNativeSubagentRuntime }
+        : { status: 'absent' };
     } else {
       const normalized = normalizeNativeSubagentRuntimePolicy(entry.nativeSubagentRuntime);
-      nextNativeSubagentRuntime = normalized.ok ? normalized.value : undefined;
+      nextNativeSubagentRuntimeState = !normalized.ok
+        ? { status: 'invalid' }
+        : normalized.value
+          ? { status: 'valid', policy: normalized.value }
+          : { status: 'absent' };
     }
     // dsh-only turn timeout: non-dsh always drops it; on dsh, an explicit
     // field value writes/clears it, absence preserves the current value.
@@ -4981,7 +4973,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       // turn）。手动的 pty/tmux/herdr/zellij override 不受影响（它们不是远端后端）。
       delete entry.backendType;
     }
-    return { write: true, result: { nextReasoningEffort, nextModelBackendVariant, nextNativeSubagentRuntime } };
+    return { write: true, result: { nextReasoningEffort, nextModelBackendVariant, nextNativeSubagentRuntimeState } };
     });
     if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
     if (r.result.error) {
@@ -5004,7 +4996,10 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       : undefined;
     if (!supportsReasoningEffort) bot.config.reasoningEffort = undefined;
     else bot.config.reasoningEffort = r.result.nextReasoningEffort ?? undefined;
-    bot.config.nativeSubagentRuntime = r.result.nextNativeSubagentRuntime;
+    updateBotNativeSubagentRuntime(
+      larkAppId,
+      r.result.nextNativeSubagentRuntimeState ?? { status: 'absent' },
+    );
     // Mirror the entry write: non-dsh clears it, dsh with an explicit field
     // takes the parsed value, dsh without the field preserves the existing one.
     if (!supportsTurnTimeout) bot.config.turnTimeoutMs = undefined;

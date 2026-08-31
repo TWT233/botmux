@@ -454,8 +454,8 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'body_timeout' });
   }, 5_000);
 
-  it('distinguishes invalid live policy without exposing it while still failing open', async () => {
-    const active = installRuntimeSession();
+  it('serves the authoritative absent or invalid in-memory policy snapshot', async () => {
+    installRuntimeSession();
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
     const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
@@ -464,9 +464,10 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     const absent = await post({}, headers);
     expect(await absent.json()).toEqual({ ok: true });
 
-    (getBot(active.larkAppId).config as any).nativeSubagentRuntime = {
-      reasoningEffort: { mode: 'custom', value: 'impossible' },
-    };
+    registerBot({
+      larkAppId: SESSION_APP, larkAppSecret: '', cliId: 'traex', apiOnly: true,
+      nativeSubagentRuntime: { reasoningEffort: { mode: 'custom', value: 'impossible' } },
+    } as any);
     const malformed = await post({}, trustedHostHeaders('POST', path, handle.port));
     expect(malformed.status).toBe(200);
     expect(await malformed.json()).toEqual({ ok: true, invalidPolicy: true });
@@ -509,7 +510,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     }
   });
 
-  it('fails open without returning stale live policy when the loaded config becomes unavailable', async () => {
+  it('keeps serving the loaded in-memory snapshot when bots.json changes or disappears', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'dashboard-ipc-native-runtime-'));
     const configPath = join(dir, 'bots.json');
     const prevBotsConfig = process.env.BOTS_CONFIG;
@@ -537,9 +538,12 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
         }])),
       ]) {
         breakConfig();
-        const unavailable = await post({}, trustedHostHeaders('POST', path, handle.port));
-        expect(unavailable.status).toBe(503);
-        expect(await unavailable.json()).toEqual({ ok: false, error: 'policy_unavailable' });
+        const response = await post({}, trustedHostHeaders('POST', path, handle.port));
+        expect(response.status).toBe(200);
+        expect(await response.json()).toEqual({
+          ok: true,
+          policy: { model: { mode: 'custom', value: 'stale-secret-model' } },
+        });
       }
     } finally {
       if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
@@ -4050,6 +4054,39 @@ describe('PUT /api/bot-substitute-mode', () => {
 });
 
 describe('PUT /api/bot-agent', () => {
+  it('preserves an invalid policy marker when an old client omits the field', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-invalid-preserve-'));
+    const configPath = join(dir, 'bots.json');
+    const appId = 'test-native-subagent-invalid-preserve-app';
+    const prevBotsConfig = process.env.BOTS_CONFIG;
+    const malformedPolicy = { reasoningEffort: { mode: 'custom', value: 'impossible' } };
+    try {
+      process.env.BOTS_CONFIG = configPath;
+      writeFileSync(configPath, JSON.stringify([{
+        larkAppId: appId, larkAppSecret: 'secret', cliId: 'traex',
+        nativeSubagentRuntime: malformedPolicy,
+      }]));
+      loadBotConfigs().forEach((config: any) => registerBot(config));
+      setLarkAppId(appId);
+      handle = await startIpcServer({ port: 0, host: '127.0.0.1' });
+
+      const response = await fetch(`http://127.0.0.1:${handle.port}/api/bot-agent`, {
+        method: 'PUT',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ cliId: 'traex', model: 'GPT-5.5' }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].nativeSubagentRuntime).toEqual(malformedPolicy);
+      expect(getBot(appId).config.nativeSubagentRuntime).toBeUndefined();
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
+    } finally {
+      if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
+      else process.env.BOTS_CONFIG = prevBotsConfig;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('projects and atomically replaces, preserves, clears, validates, and drops the Trae native-subagent policy', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-agent-ipc-'));
     const configPath = join(dir, 'bots.json');
@@ -4092,6 +4129,7 @@ describe('PUT /api/bot-agent', () => {
       expect(await replace.json()).toMatchObject({ nativeSubagentRuntime: canonical });
       expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].nativeSubagentRuntime).toEqual(canonical);
       expect(getBot(appId).config.nativeSubagentRuntime).toEqual(canonical);
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'valid', policy: canonical });
 
       const preserve = await fetch(`${base}/api/bot-agent`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -4109,6 +4147,7 @@ describe('PUT /api/bot-agent', () => {
       expect(invalid.status).toBe(400);
       expect(await invalid.json()).toMatchObject({ error: 'invalid_native_subagent_runtime' });
       expect(JSON.parse(readFileSync(configPath, 'utf8'))[0].nativeSubagentRuntime).toEqual(canonical);
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'valid', policy: canonical });
 
       const incompatible = await fetch(`${base}/api/bot-agent`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -4130,6 +4169,7 @@ describe('PUT /api/bot-agent', () => {
       });
       expect(await empty.json()).toMatchObject({ nativeSubagentRuntime: null });
       expect(JSON.parse(readFileSync(configPath, 'utf8'))[0]).not.toHaveProperty('nativeSubagentRuntime');
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'absent' });
 
       const restore = await fetch(`${base}/api/bot-agent`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -4142,6 +4182,7 @@ describe('PUT /api/bot-agent', () => {
       });
       expect(await clear.json()).toMatchObject({ nativeSubagentRuntime: null });
       expect(getBot(appId).config.nativeSubagentRuntime).toBeUndefined();
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'absent' });
 
       await fetch(`${base}/api/bot-agent`, {
         method: 'PUT', headers: { 'content-type': 'application/json' },
@@ -4154,6 +4195,7 @@ describe('PUT /api/bot-agent', () => {
       expect(await switchAway.json()).toMatchObject({ nativeSubagentRuntime: null });
       expect(JSON.parse(readFileSync(configPath, 'utf8'))[0]).not.toHaveProperty('nativeSubagentRuntime');
       expect(getBot(appId).config.nativeSubagentRuntime).toBeUndefined();
+      expect(getBot(appId).nativeSubagentRuntimeState).toEqual({ status: 'absent' });
     } finally {
       if (prevBotsConfig === undefined) delete process.env.BOTS_CONFIG;
       else process.env.BOTS_CONFIG = prevBotsConfig;
