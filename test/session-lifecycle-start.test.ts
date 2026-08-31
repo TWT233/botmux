@@ -3942,11 +3942,13 @@ describe('managed turn authority worker generations', () => {
       type: 'managed_turn_origin',
       sessionId: ds.session.sessionId,
       capability: 'before-restart',
+      policyCapability: 'policy-before-restart',
       turnId: 'turn-before-restart',
       dispatchAttempt: 4,
     });
     expect(ds.managedTurnOrigin).toEqual({
       capability: 'before-restart',
+      policyCapability: 'policy-before-restart',
       turnId: 'turn-before-restart',
       dispatchAttempt: 4,
     });
@@ -3960,18 +3962,23 @@ describe('managed turn authority worker generations', () => {
       turnId: 'turn-before-restart',
       dispatchAttempt: 4,
     });
-    expect(ds.managedTurnOrigin).toBeUndefined();
+    expect(ds.managedTurnOrigin).toMatchObject({
+      policyCapability: 'policy-before-restart',
+    });
+    expect(ds.managedTurnOrigin?.capability).not.toBe('before-restart');
 
     // The first real turn on the replacement CLI rotates/re-publishes.
     worker.emit('message', {
       type: 'managed_turn_origin',
       sessionId: ds.session.sessionId,
       capability: 'after-restart',
+      policyCapability: 'policy-after-restart',
       turnId: 'turn-after-restart',
       dispatchAttempt: 5,
     });
     expect(ds.managedTurnOrigin).toEqual({
       capability: 'after-restart',
+      policyCapability: 'policy-after-restart',
       turnId: 'turn-after-restart',
       dispatchAttempt: 5,
     });
@@ -3986,9 +3993,43 @@ describe('managed turn authority worker generations', () => {
     });
     expect(ds.managedTurnOrigin).toEqual({
       capability: 'after-restart',
+      policyCapability: 'policy-after-restart',
       turnId: 'turn-after-restart',
       dispatchAttempt: 5,
     });
+  });
+
+  it('keeps session-lifetime policy authority when turn terminal clears the live send capability', async () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'turn-capability',
+      policyCapability: 'policy-capability',
+      turnId: 'turn-terminal',
+      dispatchAttempt: 9,
+    });
+    expect(ds.managedTurnOrigin).toEqual({
+      capability: 'turn-capability',
+      policyCapability: 'policy-capability',
+      turnId: 'turn-terminal',
+      dispatchAttempt: 9,
+    });
+
+    worker.emit('message', {
+      type: 'turn_terminal',
+      sessionId: ds.session.sessionId,
+      turnId: 'turn-terminal',
+      dispatchAttempt: 9,
+      status: 'completed',
+    });
+    await vi.waitFor(() => expect(ds.managedTurnOrigin).toMatchObject({
+      policyCapability: 'policy-capability',
+    }));
+    expect(ds.managedTurnOrigin?.capability).not.toBe('turn-capability');
   });
 
   it('clears authority on refork and ignores a stale worker announcement', () => {

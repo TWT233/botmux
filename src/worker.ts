@@ -1495,6 +1495,7 @@ let sandboxStopWatcher: (() => void) | null = null;  // stop fn for the sandbox 
 let sandboxCleanup: (() => void) | null = null;      // reclaim deny-mask mountpoints + rm the per-session sandbox tree
 let sandboxRelayOutbox: string | null = null;
 let sandboxRelayCapability: { token: string; turnId?: string; dispatchAttempt?: number } | null = null;
+let sandboxPolicyCapability: string | null = null;
 let readIsolationOriginCapabilityFile: string | null = null;
 let readIsolationOriginChannelId: string | null = null;
 let sandboxTeardownDone = false;                     // guards the exit-time best-effort teardown from double-running / running on suspend-for-resume
@@ -2777,6 +2778,7 @@ function currentGatewayTrustedTurnIdentity() {
 
 function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boolean {
   const daemonIpcPort = parseDaemonIpcPort(process.env.BOTMUX_DAEMON_IPC_PORT);
+  const policyCapability = sandboxPolicyCapability ?? randomBytes(32).toString('hex');
   const capability = {
     token: randomBytes(32).toString('hex'),
     ...(currentBotmuxTurnId ? { turnId: currentBotmuxTurnId } : {}),
@@ -2792,6 +2794,7 @@ function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boo
             sessionId,
             ...(readIsolationOriginChannelId ? { channelId: readIsolationOriginChannelId } : {}),
             token: capability.token,
+            policyCapability,
             ...(lastInitConfig?.larkAppId ? { larkAppId: lastInitConfig.larkAppId } : {}),
             ...(lastInitConfig?.daemonBootId ? { bootInstanceId: lastInitConfig.daemonBootId } : {}),
             ...(capability.turnId ? { turnId: capability.turnId } : {}),
@@ -2813,6 +2816,7 @@ function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boo
             sessionId,
             channelId: readIsolationOriginChannelId,
             capability: capability.token,
+            policyCapability,
             ...(lastInitConfig?.larkAppId ? { larkAppId: lastInitConfig.larkAppId } : {}),
             ...(lastInitConfig?.daemonBootId ? { bootInstanceId: lastInitConfig.daemonBootId } : {}),
             ...(capability.turnId ? { turnId: capability.turnId } : {}),
@@ -2851,11 +2855,13 @@ function publishSandboxRelayCapability(opts: { failClosed?: boolean } = {}): boo
   }
 
   sandboxRelayCapability = capability;
+  sandboxPolicyCapability = policyCapability;
   if (sessionId) {
     send({
       type: 'managed_turn_origin',
       sessionId,
       capability: capability.token,
+      policyCapability,
       ...(readIsolationOriginChannelId
         ? { originChannelId: readIsolationOriginChannelId }
         : {}),
@@ -2888,17 +2894,21 @@ function completeManagedTurnOriginRevocation(
   revoked: typeof sandboxRelayCapability,
   turnId: string | undefined,
   dispatchAttempt: number | undefined,
+  opts: { revokePolicy?: boolean } = {},
 ): void {
   // Clear local authority before queuing daemon IPC. A forked/delayed process
   // can otherwise win the small window between terminal publication and
   // revocation by submitting through the still-live host relay.
   sandboxRelayCapability = null;
+  const revokedPolicyCapability = opts.revokePolicy ? sandboxPolicyCapability : null;
+  if (opts.revokePolicy) sandboxPolicyCapability = null;
   currentVcMeetingImTurnOrigin = undefined;
   if (sessionId) {
     send({
       type: 'managed_turn_origin_revoked',
       sessionId,
       ...(revoked ? { capability: revoked.token } : {}),
+      ...(revokedPolicyCapability ? { policyCapability: revokedPolicyCapability } : {}),
       ...(readIsolationOriginChannelId
         ? { originChannelId: readIsolationOriginChannelId }
         : {}),
@@ -2925,6 +2935,7 @@ function revokeManagedTurnOriginForRestart(): void {
     revoked,
     currentBotmuxTurnId,
     currentBotmuxDispatchAttempt,
+    { revokePolicy: false },
   );
 }
 
@@ -2938,7 +2949,7 @@ function revokeManagedTurnOriginForTerminal(
   if (!revoked
     || revoked.turnId !== turnId
     || revoked.dispatchAttempt !== dispatchAttempt) return;
-  completeManagedTurnOriginRevocation(revoked, turnId, dispatchAttempt);
+  completeManagedTurnOriginRevocation(revoked, turnId, dispatchAttempt, { revokePolicy: false });
 }
 function authorizeManagedSend(
   claim: { capability?: string },
@@ -15942,6 +15953,7 @@ async function spawnCli(
       sandboxRelayCapability,
       exitedTurnId,
       exitedDispatchAttempt,
+      { revokePolicy: true },
     );
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
     if (lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal) {
@@ -16281,6 +16293,7 @@ function killCli(opts: {
     sandboxRelayCapability,
     currentBotmuxTurnId,
     currentBotmuxDispatchAttempt,
+    { revokePolicy: true },
   );
   // Stop the sandbox outbox watcher, then reclaim the deny-mask mountpoints +
   // remove the per-session sandbox tree. In the fs-policy model the CLI writes
@@ -19736,6 +19749,7 @@ function teardownSandboxBestEffort(): void {
   sandboxCleanup = null;
   unlinkManagedOriginCapabilityFiles();
   sandboxRelayCapability = null;
+  sandboxPolicyCapability = null;
   if (seatbeltProfilePath) { try { unlinkSync(seatbeltProfilePath); } catch { /* */ } seatbeltProfilePath = null; }
 }
 // Under pm2 the worker's stdout/stderr are pipes; a broken pipe (e.g. log

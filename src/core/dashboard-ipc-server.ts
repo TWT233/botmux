@@ -1372,11 +1372,12 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
     responseAuth = { authKind: 'host', key: hostSecret, requestNonce: hostNonce };
   } else {
     const liveOrigin = ds?.managedTurnOrigin;
-    if (!ds || !liveOrigin?.capability) {
+    const policyCapability = liveOrigin?.policyCapability;
+    if (!ds || !policyCapability) {
       return jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
     }
     const verified = verifyNativeSubagentRuntimeCapabilityRequest({
-      capability: liveOrigin.capability,
+      capability: policyCapability,
       headers: req.headers,
       remoteAddress: req.socket.remoteAddress,
       nonceStore: nativeSubagentRuntimeNonceStore,
@@ -1385,10 +1386,6 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
       port,
       sessionId: params.sessionId,
       ...daemonIdentity,
-      ...(liveOrigin.turnId ? { turnId: liveOrigin.turnId } : {}),
-      ...(liveOrigin.dispatchAttempt !== undefined
-        ? { dispatchAttempt: liveOrigin.dispatchAttempt }
-        : {}),
     });
     if (!verified.ok) {
       return verified.reason === 'capacity_exceeded'
@@ -1397,10 +1394,10 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
     }
     responseAuth = {
       authKind: 'capability',
-      key: liveOrigin.capability,
+      key: policyCapability,
       requestNonce: verified.nonce,
-      ...(liveOrigin.turnId ? { turnId: liveOrigin.turnId } : {}),
-      ...(liveOrigin.dispatchAttempt !== undefined
+      ...(liveOrigin?.turnId ? { turnId: liveOrigin.turnId } : {}),
+      ...(liveOrigin?.dispatchAttempt !== undefined
         ? { dispatchAttempt: liveOrigin.dispatchAttempt }
         : {}),
     };

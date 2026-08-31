@@ -14,6 +14,7 @@ import {
 
 const CLI = resolve('src/cli.ts');
 const CAPABILITY = 'ab'.repeat(32);
+const POLICY_CAPABILITY = 'ef'.repeat(32);
 const HOST_SECRET = 'native-runtime-test-host-secret';
 const APP_ID = 'app-native';
 const BOOT_ID = 'B'.repeat(43);
@@ -132,12 +133,17 @@ async function runHook(
     managedOriginCapabilityPath(dir, 'session-native', CHANNEL_ID),
     JSON.stringify({
       sessionId: 'session-native', channelId: CHANNEL_ID, capability: CAPABILITY,
+      policyCapability: POLICY_CAPABILITY,
       larkAppId: APP_ID, bootInstanceId: BOOT_ID, turnId: 'turn-1', dispatchAttempt: 1,
       ipcPort: port,
     }),
   );
   writeFileSync(join(relay, '.botmux-origin-capability.json'), JSON.stringify({
-    token: CAPABILITY, turnId: 'turn-1', dispatchAttempt: 1, ipcPort: options.relayPort ?? port,
+    token: CAPABILITY,
+    policyCapability: POLICY_CAPABILITY,
+    turnId: 'turn-1',
+    dispatchAttempt: 1,
+    ipcPort: options.relayPort ?? port,
   }), { mode: 0o600 });
   if (options.authKind === 'host') {
     mkdirSync(join(dir, '.botmux'), { mode: 0o700 });
@@ -358,11 +364,41 @@ describe('native-subagent-runtime-hook CLI', () => {
     });
   });
 
-  it('fails closed on an explicit overload response from the protected destination', async () => {
+  it('fails open for an unsigned 429 from a forged protected listener', async () => {
     const overloaded = await runHook(JSON.stringify(spawnPayload), {
       status: 429,
       response: { ok: false, error: 'native_runtime_overloaded' },
       writeHostProof: false,
+    });
+
+    expect(overloaded.status).toBe(0);
+    expect(overloaded.stdout).toBe('');
+    expect(overloaded.stderr).toContain('response authentication failed');
+  });
+
+  it('fails closed on an authenticated proof-backed overload response from the protected destination', async () => {
+    const overloaded = await runHook(JSON.stringify(spawnPayload), {
+      status: 429,
+      response: { ok: false, error: 'native_runtime_overloaded' },
+    });
+
+    expect(overloaded.status).toBe(0);
+    expect(JSON.parse(overloaded.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'PreToolUse',
+        permissionDecision: 'deny',
+        permissionDecisionReason:
+          'Native subagent runtime policy is temporarily overloaded; retry spawn_agent',
+      },
+    });
+    expect(overloaded.stderr).toContain('policy service overloaded; denying spawn');
+  });
+
+  it('fails closed on an authenticated host-HMAC overload response', async () => {
+    const overloaded = await runHook(JSON.stringify(spawnPayload), {
+      authKind: 'host',
+      status: 429,
+      response: { ok: false, error: 'native_runtime_overloaded' },
     });
 
     expect(overloaded.status).toBe(0);

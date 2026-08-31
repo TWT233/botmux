@@ -153,6 +153,16 @@ destination, which denies `spawn_agent` so quota pressure cannot bypass a
 configured runtime policy. No diagnostic contains credentials or the rest of the
 bot configuration.
 
+For sandboxed/read-isolated callers, runtime-policy lookup authority is
+session-lifetime and intentionally distinct from the live turn send capability.
+The worker publishes a stable `policyCapability` for the current worker
+generation while the ordinary managed-origin `capability` continues to rotate
+per turn. Turn terminal and intentional CLI restart revoke only the live send
+capability; runtime-policy lookup survives those edges and is revoked only when
+the worker generation itself ends or is replaced. This keeps protected runtime
+policy fetches available for long-lived panes after live send authority has been
+cleared, without widening any route that still requires the live send token.
+
 The daemon serves the policy from one authoritative in-memory per-bot state:
 absent, valid, or invalid. It never rereads `bots.json` on the spawn hot path.
 An invalid state is reported as a fixed flag without returning the raw value.
@@ -211,6 +221,11 @@ live updates and resume-time reconstruction.
   protected read-only per-channel claim to timestamp, nonce, method, path, port,
   session, app, boot, turn, and dispatch attempt, and the hook prefers that
   protected claim's IPC port over mutable discovery data.
+- Native subagent runtime policy fetches do not key request authentication from
+  the live turn capability. They use the stable per-generation
+  `policyCapability`, so the route remains callable after turn terminal clears
+  the live send token, but any future generation rotation immediately invalidates
+  the old policy authority.
 - Sandboxed response authenticity does not reuse the capability HMAC. Instead the
   daemon writes a short-lived read-only exact-response proof keyed by the managed
   origin channel, and the hook accepts the response only when that proof matches
@@ -242,8 +257,12 @@ Automated coverage will prove:
   cross-provider pair;
 - unsupported legacy modes are dropped at config load; daemon unavailability
   remains fail-open;
+- sandbox policy lookup survives turn terminal / intentional restart, while the
+  old live send capability is rejected and rotated-out `policyCapability`
+  generations are rejected;
 - explicit daemon overload (`429`) denies the spawn while other IPC/auth/parse
-  failures still fail open;
+  failures still fail open, and unauthenticated/forged `429` responses do not
+  deny the spawn;
 - process hook arguments are present in plain TUI and app-server launches and do
   not remove unrelated hooks;
 - host responses bind challenge/method/path/port/status/exact bytes/session/app/boot,
