@@ -1219,36 +1219,58 @@ describe('riff CLI switch persistence (PR #467 P1)', () => {
 
   it('resets the native-subagent editor from the authoritative Trae-to-Riff response', async () => {
     const previousFetch = globalThis.fetch;
-    (globalThis as any).fetch = async (url: string) => {
+    const agentRequests: any[] = [];
+    (globalThis as any).fetch = async (url: string, init?: any) => {
       if (String(url).includes('/api/cli-options/models')) {
         return { ok: true, status: 200, json: async () => ({ models: [], source: 'static' }) } as any;
       }
-      return String(url).endsWith('/agent')
-        ? { ok: true, status: 200, json: async () => ({ ok: true, cliId: 'riff', wrapperCli: null, model: '', selectionKey: 'riff', nativeSubagentRuntime: null }) } as any
-        : { ok: true, status: 200, json: async () => ({ ok: true, riff: JSON.stringify({ baseUrl: 'https://riff.example' }) }) } as any;
+      if (String(url).endsWith('/agent')) {
+        const body = JSON.parse(init?.body ?? '{}');
+        agentRequests.push(body);
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ok: true,
+            cliId: body.cliId,
+            wrapperCli: null,
+            model: '',
+            reasoningEffort: null,
+            selectionKey: body.cliId,
+            nativeSubagentRuntime: null,
+          }),
+        } as any;
+      }
+      return { ok: true, status: 200, json: async () => ({ ok: true, riff: JSON.stringify({ baseUrl: 'https://riff.example' }) }) } as any;
     };
     try {
+      const patchBot = vi.fn();
       let renderer!: TestRenderer.ReactTestRenderer;
       act(() => {
         renderer = TestRenderer.create(React.createElement(BotAgentSection, {
-        bot: {
-          larkAppId: 'cli_x', cliId: 'traex', agentSelectionKey: 'traex',
-          nativeSubagentRuntime: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'custom', value: 'ultra' } },
-        },
-        sessionFallback: 'traex',
-        cliState: {
-          options: [{ id: 'traex', label: 'TraeX' }, { id: 'riff', label: 'Riff' }],
-          ttadkModelDefault: '', ttadkModelSuggestions: [],
-        },
-        patchBot: vi.fn(),
+          bot: {
+            larkAppId: 'cli_x', cliId: 'traex', agentSelectionKey: 'traex', reasoningEffort: 'high',
+            nativeSubagentRuntime: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'custom', value: 'ultra' } },
+          },
+          sessionFallback: 'traex',
+          cliState: {
+            options: [{ id: 'traex', label: 'TraeX' }, { id: 'riff', label: 'Riff' }],
+            ttadkModelDefault: '', ttadkModelSuggestions: [],
+          },
+          patchBot,
         }));
       });
       const root = renderer.root;
       act(() => root.findByProps({ dataInput: 'agentCliId' }).props.onChange('riff'));
       await act(async () => { await root.findByProps({ 'data-action': 'save-riff' }).props.onClick(); });
+      expect(patchBot).toHaveBeenCalledWith('cli_x', expect.objectContaining({ reasoningEffort: undefined }));
       act(() => root.findByProps({ dataInput: 'agentCliId' }).props.onChange('traex'));
       expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('passthrough');
       expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
+      expect(root.findByProps({ dataInput: 'agentReasoningEffort' }).props.value).toBe('');
+      await act(async () => { await root.findByProps({ 'data-action': 'save-agent' }).props.onClick(); });
+      expect(agentRequests).toHaveLength(2);
+      expect(agentRequests[1]).toMatchObject({ cliId: 'traex', reasoningEffort: '' });
     } finally {
       (globalThis as any).fetch = previousFetch;
     }
