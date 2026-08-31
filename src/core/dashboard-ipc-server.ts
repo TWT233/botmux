@@ -1228,9 +1228,38 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
 /** Return only the live bot's normalized native-subagent policy. The session
  * identity is selected by the authenticated URL/capability pair; body bot ids
  * are deliberately ignored so callers cannot read another bot's config. */
+const NATIVE_SUBAGENT_RUNTIME_BODY_MAX_BYTES = 2 * 1024;
+const NATIVE_SUBAGENT_RUNTIME_BODY_TIMEOUT_MS = 1_000;
+
 ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req, res, params) => {
-  const body = await readJsonBody<Record<string, unknown>>(req)
-    .catch(() => ({} as Record<string, unknown>));
+  let body: Record<string, unknown>;
+  try {
+    body = await readBoundedJsonBody<Record<string, unknown>>(
+      req,
+      NATIVE_SUBAGENT_RUNTIME_BODY_MAX_BYTES,
+      NATIVE_SUBAGENT_RUNTIME_BODY_TIMEOUT_MS,
+    );
+  } catch (err) {
+    if (err instanceof IpcBodyTooLargeError || err instanceof IpcBodyTimeoutError) {
+      closeUntrustedRequestAfterResponse(req, res);
+    }
+    return jsonRes(
+      res,
+      err instanceof IpcBodyTooLargeError
+        ? 413
+        : err instanceof IpcBodyTimeoutError
+          ? 408
+          : 400,
+      {
+        ok: false,
+        error: err instanceof IpcBodyTooLargeError
+          ? 'body_too_large'
+          : err instanceof IpcBodyTimeoutError
+            ? 'body_timeout'
+            : 'bad_json',
+      },
+    );
+  }
   const ds = findActiveBySessionId(params.sessionId);
   const auth = sessionCliIpcAuth(req, ds, params.sessionId, body, { allowReceiver: true });
   if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
