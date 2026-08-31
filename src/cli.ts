@@ -11704,6 +11704,8 @@ function readImmediateParentRuntime(
     }
     const tail = buffer.subarray(0, offset).toString('utf8');
     const lines = tail.split('\n');
+    let model: string | undefined;
+    let reasoningEffort: NativeSubagentParentRuntime['reasoningEffort'];
     for (let i = lines.length - 1; i >= 0; i--) {
       const line = lines[i].trim();
       if (!line) continue;
@@ -11715,14 +11717,16 @@ function readImmediateParentRuntime(
       const effortValue = entry.payload.reasoning_effort
         ?? entry.payload.effort
         ?? settings?.reasoning_effort;
-      const model = typeof modelValue === 'string' && modelValue.trim()
-        ? modelValue.trim()
-        : fallbackModel;
-      const reasoningEffort = isCodexReasoningEffort(effortValue)
-        ? effortValue
-        : undefined;
-      return { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
+      if (!model && typeof modelValue === 'string' && modelValue.trim()) {
+        model = modelValue.trim();
+      }
+      if (!reasoningEffort && isCodexReasoningEffort(effortValue)) {
+        reasoningEffort = effortValue;
+      }
+      if (model && reasoningEffort) break;
     }
+    model ??= fallbackModel;
+    return { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
   } catch { /* missing/unreadable transcript: model-only payload fallback */ }
   return fallbackModel ? { model: fallbackModel } : {};
 }
