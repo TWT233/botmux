@@ -23,7 +23,7 @@
  *   botmux whiteboard status|enable|disable|current|list|read|update|write — local project whiteboard
  */
 import { execSync, execFileSync, spawnSync, spawn } from 'node:child_process';
-import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, statSync, unlinkSync, rmSync, realpathSync, chmodSync, closeSync, openSync, readSync } from 'node:fs';
+import { existsSync, mkdirSync, copyFileSync, readFileSync, writeFileSync, renameSync, readdirSync, readlinkSync, symlinkSync, appendFileSync, statSync, unlinkSync, rmSync, realpathSync, chmodSync } from 'node:fs';
 import { underReadIsolation, sendCredFilePath } from './adapters/cli/read-isolation.js';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, dirname, basename, resolve } from 'node:path';
@@ -215,11 +215,9 @@ import {
 } from './cli/bots-list-output.js';
 import { ensureBotChatGrantMatrix, requestExactChatGrant } from './cli/exact-chat-grant-client.js';
 import { loopbackFetch } from './core/loopback-fetch.js';
-import { isCodexReasoningEffort } from './services/codex-reasoning-effort.js';
 import {
   normalizeNativeSubagentRuntimePolicy,
   rewriteNativeSubagentSpawnInput,
-  type NativeSubagentParentRuntime,
 } from './services/native-subagent-runtime-policy.js';
 import {
   buildFooterAddressing,
@@ -12087,7 +12085,6 @@ async function cmdUserPromptHook(): Promise<void> {
 
 const NATIVE_SUBAGENT_HOOK_STDIN_MAX_BYTES = 256 * 1024;
 const NATIVE_SUBAGENT_HOOK_STDIN_TIMEOUT_MS = 750;
-const NATIVE_SUBAGENT_TRANSCRIPT_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 const NATIVE_SUBAGENT_DIAGNOSTIC_MAX_CHARS = 512;
 
 function nativeSubagentDiagnostic(message: string): void {
@@ -12135,71 +12132,14 @@ async function readNativeSubagentHookStdin(): Promise<string | undefined> {
   });
 }
 
-function readImmediateParentRuntime(
-  transcriptPath: string | undefined,
-  payloadModel: unknown,
-): NativeSubagentParentRuntime {
-  const fallbackModel = typeof payloadModel === 'string'
-    && payloadModel.trim()
-    && payloadModel.trim().length <= 256
-    ? payloadModel.trim()
-    : undefined;
-  if (!transcriptPath || transcriptPath.length > 4096 || transcriptPath.includes('\0')) {
-    return fallbackModel ? { model: fallbackModel } : {};
-  }
-  try {
-    const stat = statSync(transcriptPath);
-    if (!stat.isFile()) return fallbackModel ? { model: fallbackModel } : {};
-    const length = Math.min(stat.size, NATIVE_SUBAGENT_TRANSCRIPT_SCAN_MAX_BYTES);
-    const buffer = Buffer.alloc(length);
-    const fd = openSync(transcriptPath, 'r');
-    let offset = 0;
-    try {
-      while (offset < length) {
-        const count = readSync(fd, buffer, offset, length - offset, stat.size - length + offset);
-        if (count <= 0) break;
-        offset += count;
-      }
-    } finally {
-      closeSync(fd);
-    }
-    const tail = buffer.subarray(0, offset).toString('utf8');
-    const lines = tail.split('\n');
-    let model: string | undefined;
-    let reasoningEffort: NativeSubagentParentRuntime['reasoningEffort'];
-    for (let i = lines.length - 1; i >= 0; i--) {
-      const line = lines[i].trim();
-      if (!line) continue;
-      let entry: any;
-      try { entry = JSON.parse(line); } catch { continue; }
-      if (entry?.type !== 'turn_context' || !entry.payload || typeof entry.payload !== 'object') continue;
-      const settings = entry.payload.collaboration_mode?.settings;
-      const modelValue = entry.payload.model ?? settings?.model;
-      const effortValue = entry.payload.reasoning_effort
-        ?? entry.payload.effort
-        ?? settings?.reasoning_effort;
-      if (!model && typeof modelValue === 'string' && modelValue.trim()) {
-        model = modelValue.trim();
-      }
-      if (!reasoningEffort && isCodexReasoningEffort(effortValue)) {
-        reasoningEffort = effortValue;
-      }
-      if (model && reasoningEffort) break;
-    }
-    model ??= fallbackModel;
-    return { ...(model ? { model } : {}), ...(reasoningEffort ? { reasoningEffort } : {}) };
-  } catch { /* missing/unreadable transcript: model-only payload fallback */ }
-  return fallbackModel ? { model: fallbackModel } : {};
-}
-
 async function writeNativeSubagentHookDirective(value: unknown): Promise<void> {
   await new Promise<void>(resolveWrite => {
     process.stdout.write(JSON.stringify(value), () => resolveWrite());
   });
 }
 
-/** TraeCode PreToolUse(spawn_agent) hook. Every error except a valid unresolved
- * inherit policy is fail-open: empty stdout and exit 0. */
+/** TraeCode PreToolUse(spawn_agent) hook. Every error is fail-open: empty stdout
+ * and exit 0. */
 async function cmdNativeSubagentRuntimeHook(): Promise<void> {
   const stdinText = await readNativeSubagentHookStdin();
   if (stdinText === undefined) return;
@@ -12265,26 +12205,12 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
       if (!normalized.ok) nativeSubagentDiagnostic('daemon returned invalid policy; allowing spawn');
       return;
     }
-    const parentRuntime = readImmediateParentRuntime(
-      typeof payload.transcript_path === 'string' ? payload.transcript_path : undefined,
-      payload.model,
-    );
     const rewritten = rewriteNativeSubagentSpawnInput(
       payload.tool_input as Record<string, unknown>,
       normalized.value,
-      parentRuntime,
+      {},
     );
-    if (rewritten.kind === 'unchanged') return;
-    if (rewritten.kind === 'denied') {
-      await writeNativeSubagentHookDirective({
-        hookSpecificOutput: {
-          hookEventName: 'PreToolUse',
-          permissionDecision: 'deny',
-          permissionDecisionReason: rewritten.reason,
-        },
-      });
-      return;
-    }
+    if (rewritten.kind !== 'rewritten') return;
     await writeNativeSubagentHookDirective({
       hookSpecificOutput: {
         hookEventName: 'PreToolUse',

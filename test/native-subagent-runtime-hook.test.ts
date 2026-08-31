@@ -1,9 +1,10 @@
 import { createServer, type Server } from 'node:http';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import { afterEach, describe, expect, it } from 'vitest';
-import { spawnTsScript } from './helpers/ts-runner.js';
+import { spawnTsEvalWithRepoImports, spawnTsScript } from './helpers/ts-runner.js';
 
 const CLI = resolve('src/cli.ts');
 const CAPABILITY = 'ab'.repeat(32);
@@ -36,38 +37,43 @@ async function runHook(
     startServer?: boolean;
     endStdin?: boolean;
     exitTimeoutMs?: number;
-    transcriptRecords?: readonly Record<string, unknown>[];
+    transcriptPath?: 'missing' | 'hostile';
+    trackTranscriptAccess?: boolean;
     response?: unknown;
   } = {},
-): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean }> {
+): Promise<{
+  status: number | null;
+  stdout: string;
+  stderr: string;
+  timedOut: boolean;
+  transcriptAccessed: boolean;
+}> {
   dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-hook-'));
   const relay = join(dir, 'relay');
-  const transcript = join(dir, 'rollout.jsonl');
   const { mkdirSync } = await import('node:fs');
   mkdirSync(relay, { mode: 0o700 });
   writeFileSync(join(relay, '.botmux-origin-capability.json'), JSON.stringify({
     capability: CAPABILITY, turnId: 'turn-1', dispatchAttempt: 1,
   }), { mode: 0o600 });
-  const transcriptRecords = options.transcriptRecords ?? [
-    { type: 'turn_context', payload: { model: 'old', reasoning_effort: 'low' } },
-    { type: 'turn_context', payload: {
-      model: 'parent-model', collaboration_mode: { settings: { reasoning_effort: 'xhigh' } },
-    } },
-  ];
-  writeFileSync(transcript, [
-    ...transcriptRecords.map(record => JSON.stringify(record)),
-    '{"type":"turn_context","payload":{"model":"partial"',
-  ].join('\n'));
   const port = options.startServer === false
     ? 9
     : await listen(options.policy, options.status ?? 200, options.response);
   const parsed = (() => { try { return JSON.parse(payloadText); } catch { return null; } })();
-  if (parsed && typeof parsed === 'object' && !('transcript_path' in parsed)) {
+  let transcript: string | undefined;
+  if (parsed && typeof parsed === 'object' && options.transcriptPath) {
+    transcript = join(dir, `${options.transcriptPath}-rollout.jsonl`);
+    if (options.transcriptPath === 'hostile') {
+      writeFileSync(transcript, JSON.stringify({
+        type: 'turn_context',
+        payload: { model: 'attacker-model', reasoning_effort: 'minimal' },
+      }));
+    }
     parsed.transcript_path = transcript;
     payloadText = JSON.stringify(parsed);
   }
 
-  const child = spawnTsScript(CLI, ['native-subagent-runtime-hook'], {
+  const accessMarker = join(dir, 'transcript-was-accessed');
+  const childOptions = {
     cwd: resolve('.'),
     env: {
       ...process.env,
@@ -79,7 +85,36 @@ async function runHook(
       BOTMUX_SEND_RELAY: relay,
     },
     stdio: ['pipe', 'pipe', 'pipe'],
-  });
+  } as const;
+  const child = options.trackTranscriptAccess && transcript
+    ? spawnTsEvalWithRepoImports(`
+        import fs from 'node:fs';
+        import { syncBuiltinESMExports } from 'node:module';
+        const originalOpenSync = fs.openSync;
+        const originalReadFileSync = fs.readFileSync;
+        const originalStatSync = fs.statSync;
+        const markTranscriptAccess = path => {
+          if (String(path) === ${JSON.stringify(transcript)}) {
+            fs.writeFileSync(${JSON.stringify(accessMarker)}, 'accessed');
+          }
+        };
+        fs.openSync = function (path, ...args) {
+          markTranscriptAccess(path);
+          return originalOpenSync.call(this, path, ...args);
+        };
+        fs.readFileSync = function (path, ...args) {
+          markTranscriptAccess(path);
+          return originalReadFileSync.call(this, path, ...args);
+        };
+        fs.statSync = function (path, ...args) {
+          markTranscriptAccess(path);
+          return originalStatSync.call(this, path, ...args);
+        };
+        syncBuiltinESMExports();
+        process.argv = [process.execPath, ${JSON.stringify(CLI)}, 'native-subagent-runtime-hook'];
+        await import(${JSON.stringify(pathToFileURL(CLI).href)});
+      `, childOptions)
+    : spawnTsScript(CLI, ['native-subagent-runtime-hook'], childOptions);
   child.stdin!.on('error', () => { /* hook may close oversized/slow input early */ });
   if (options.endStdin === false) child.stdin!.write(payloadText);
   else child.stdin!.end(payloadText);
@@ -98,7 +133,13 @@ async function runHook(
       resolveExit(code);
     });
   });
-  return { status, stdout, stderr, timedOut };
+  return {
+    status,
+    stdout,
+    stderr,
+    timedOut,
+    transcriptAccessed: existsSync(accessMarker),
+  };
 }
 
 const spawnPayload = {
@@ -149,7 +190,7 @@ describe('native-subagent-runtime-hook CLI', () => {
     expect(result.stderr).toContain('stdin read timed out');
   });
 
-  it('fails open for daemon failure, invalid response policy, and pass-through policy', async () => {
+  it('fails open for daemon failure and invalid response policy', async () => {
     const cases = [
       { options: { startServer: false }, diagnostic: undefined },
       { options: { status: 503 }, diagnostic: undefined },
@@ -161,7 +202,6 @@ describe('native-subagent-runtime-hook CLI', () => {
         options: { response: { ok: true, invalidPolicy: true } },
         diagnostic: 'daemon rejected invalid stored policy; allowing spawn',
       },
-      { options: { policy: undefined }, diagnostic: undefined },
     ];
     for (const { options, diagnostic } of cases) {
       const result = await runHook(JSON.stringify(spawnPayload), options);
@@ -172,81 +212,47 @@ describe('native-subagent-runtime-hook CLI', () => {
     }
   });
 
-  it('rewrites spawn input from the latest complete immediate-parent turn context', async () => {
+  it('is a no-op when the policy passes both runtime dimensions through', async () => {
     const result = await runHook(JSON.stringify(spawnPayload), {
-      policy: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'inherit' } },
+      policy: undefined,
     });
+
     expect(result.status).toBe(0);
-    expect(result.stderr.length).toBeLessThanOrEqual(1024);
-    expect(result.stdout.endsWith('\n')).toBe(false);
-    expect(JSON.parse(result.stdout)).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        updatedInput: {
-          task_name: 'child', role: 'worker', fork_turns: 'all',
-          model_provider: 'trae', model: 'parent-model', reasoning_effort: 'xhigh',
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+  });
+
+  it.each(['missing', 'hostile'] as const)(
+    'applies custom runtime without accessing a %s transcript path or trusting payload runtime fields',
+    async transcriptPath => {
+      const result = await runHook(JSON.stringify({
+        ...spawnPayload,
+        model: 'attacker-payload-model',
+        reasoning_effort: 'minimal',
+        effort: 'low',
+      }), {
+        policy: {
+          model: { mode: 'custom', value: 'policy-model' },
+          reasoningEffort: { mode: 'custom', value: 'xhigh' },
         },
-      },
-    });
-  });
+        transcriptPath,
+        trackTranscriptAccess: true,
+      });
 
-  it('keeps scanning backward for effort after the newest turn context establishes model', async () => {
-    const result = await runHook(JSON.stringify(spawnPayload), {
-      policy: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'inherit' } },
-      transcriptRecords: [
-        { type: 'turn_context', payload: { reasoning_effort: 'high' } },
-        { type: 'turn_context', payload: { model: 'newest-model' } },
-      ],
-    });
-
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
-      model_provider: 'trae',
-      model: 'newest-model',
-      reasoning_effort: 'high',
-    });
-  });
-
-  it('keeps scanning backward for model after the newest turn context establishes effort', async () => {
-    const result = await runHook(JSON.stringify(spawnPayload), {
-      policy: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'inherit' } },
-      transcriptRecords: [
-        { type: 'turn_context', payload: { model: 'older-model' } },
-        { type: 'turn_context', payload: { reasoning_effort: 'medium' } },
-      ],
-    });
-
-    expect(result.status).toBe(0);
-    expect(JSON.parse(result.stdout).hookSpecificOutput.updatedInput).toMatchObject({
-      model_provider: 'trae',
-      model: 'older-model',
-      reasoning_effort: 'medium',
-    });
-  });
-
-  it('uses payload.model only as model fallback and explicitly denies unresolved inheritance', async () => {
-    const missingTranscript = {
-      ...spawnPayload,
-      reasoning_effort: 'ultra',
-      effort: 'max',
-      transcript_path: join(tmpdir(), 'missing-rollout.jsonl'),
-    };
-    const model = await runHook(JSON.stringify(missingTranscript), {
-      policy: { model: { mode: 'inherit' } },
-    });
-    expect(JSON.parse(model.stdout).hookSpecificOutput.updatedInput.model).toBe('payload-model-fallback');
-
-    const denied = await runHook(JSON.stringify(missingTranscript), {
-      policy: { reasoningEffort: { mode: 'inherit' } },
-    });
-    expect(denied.status).toBe(0);
-    expect(JSON.parse(denied.stdout)).toEqual({
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'deny',
-        permissionDecisionReason: 'Cannot inherit native subagent reasoning effort: immediate parent runtime is unavailable',
-      },
-    });
-  });
+      expect(result.status).toBe(0);
+      expect(result.stderr).toBe('');
+      expect(result.transcriptAccessed).toBe(false);
+      expect(result.stdout.endsWith('\n')).toBe(false);
+      expect(JSON.parse(result.stdout)).toEqual({
+        hookSpecificOutput: {
+          hookEventName: 'PreToolUse',
+          permissionDecision: 'allow',
+          updatedInput: {
+            task_name: 'child', role: 'worker', fork_turns: 'all',
+            model_provider: 'trae', model: 'policy-model', reasoning_effort: 'xhigh',
+          },
+        },
+      });
+    },
+  );
 });
