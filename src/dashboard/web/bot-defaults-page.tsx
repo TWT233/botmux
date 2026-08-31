@@ -61,7 +61,7 @@ import {
   MAX_GRANT_QUOTA,
 } from '../../services/grant-policy.js';
 import { BOT_DESCRIPTION_MAX_CHARS, normalizeBotDescriptions } from '../../services/bot-description-schema.js';
-import { reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
+import { CODEX_REASONING_EFFORTS, reasoningEffortsForCliModel } from '../../services/codex-reasoning-effort.js';
 import {
   REPLY_HEADER_COLORS,
   REPLY_LAYOUT_TAG_MAX_CODEPOINTS,
@@ -2390,13 +2390,20 @@ export function BotAgentSection(props: {
       const res = await sendJson('PUT', `/api/bots/${encodeURIComponent(bot.larkAppId)}/agent`, { cliId: 'riff', model: '' });
       const summary = parseAgentSwitchSummary(res.body);
       if (res.ok && res.body.ok) {
+        const savedNativePolicy = res.body.nativeSubagentRuntime;
         patchBot(bot.larkAppId, {
           cliId: res.body.cliId,
           cliRuntime: res.body.cliRuntime ?? null,
           wrapperCli: res.body.wrapperCli ?? null,
           model: res.body.model ?? '',
+          nativeSubagentRuntime: savedNativePolicy ?? undefined,
           agentSelectionKey: res.body.selectionKey ?? 'riff',
         });
+        setNativeModelMode(savedNativePolicy?.model?.mode ?? 'passthrough');
+        setNativeModel(savedNativePolicy?.model?.mode === 'custom' ? savedNativePolicy.model.value : '');
+        setNativeEffortMode(savedNativePolicy?.reasoningEffort?.mode ?? 'passthrough');
+        setNativeEffort(savedNativePolicy?.reasoningEffort?.mode === 'custom' ? savedNativePolicy.reasoningEffort.value : '');
+        setNativePolicyTouched(false);
         const note = [
           summary.residual > 0 ? tr('botDefaults.agentClosedResidual', { count: summary.residual }) : '',
           residualIdText(summary, tr),
@@ -2452,11 +2459,10 @@ export function BotAgentSection(props: {
     [cliKey, isCodexSelection, model],
   );
   const nativeReasoningEffortOptions = useMemo(
-    () => reasoningEffortsForCliModel(
-      'traex',
-      nativeModelMode === 'custom' ? nativeModel : nativeModelMode === 'inherit' ? model : undefined,
-    ),
-    [model, nativeModel, nativeModelMode],
+    () => nativeModelMode === 'custom'
+      ? reasoningEffortsForCliModel('traex', nativeModel)
+      : CODEX_REASONING_EFFORTS,
+    [nativeModel, nativeModelMode],
   );
 
   useEffect(() => {

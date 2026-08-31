@@ -480,6 +480,44 @@ describe('Codex-compatible runtime editor', () => {
     }
   });
 
+  it.each([
+    ['passthrough', undefined],
+    ['inherit', { model: { mode: 'inherit' } }],
+  ])('offers every canonical effort for an effort-only override when model mode is %s', (_mode, nativeSubagentRuntime) => {
+    const { root } = renderAgent({
+      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro', nativeSubagentRuntime,
+    });
+    act(() => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.onChange('custom'));
+    const values = root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.options
+      .map((option: { value: string }) => option.value);
+    expect(values).toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  });
+
+  it('rehydrates an effort-only ultra override while the model passes through', () => {
+    const { root } = renderAgent({
+      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro',
+      nativeSubagentRuntime: { reasoningEffort: { mode: 'custom', value: 'ultra' } },
+    });
+    expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('passthrough');
+    expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('custom');
+    expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.value).toBe('ultra');
+  });
+
+  it('rehydrates inherited model with a custom effort without filtering by the parent model', () => {
+    const { root } = renderAgent({
+      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro',
+      nativeSubagentRuntime: {
+        model: { mode: 'inherit' },
+        reasoningEffort: { mode: 'custom', value: 'ultra' },
+      },
+    });
+    expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('inherit');
+    const effort = root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' });
+    expect(effort.props.value).toBe('ultra');
+    expect(effort.props.options.map((option: { value: string }) => option.value))
+      .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
+  });
+
   const dshCliState = {
     options: [
       { id: 'codex', label: 'Codex' },
@@ -1278,6 +1316,43 @@ describe('riff CLI switch persistence (PR #467 P1)', () => {
     expect(puts.map(r => r.url.split('/').pop())).toEqual(['riff', 'agent']);
     expect(puts[1]!.body).toEqual({ cliId: 'riff', model: '' });
     expect(JSON.parse(puts[0]!.body.riff)).toMatchObject({ sandboxCluster: 'cn', reasoningEffort: 'xhigh' });
+  });
+
+  it('resets the native-subagent editor from the authoritative Trae-to-Riff response', async () => {
+    const previousFetch = globalThis.fetch;
+    (globalThis as any).fetch = async (url: string) => {
+      if (String(url).includes('/api/cli-options/models')) {
+        return { ok: true, status: 200, json: async () => ({ models: [], source: 'static' }) } as any;
+      }
+      return String(url).endsWith('/agent')
+        ? { ok: true, status: 200, json: async () => ({ ok: true, cliId: 'riff', wrapperCli: null, model: '', selectionKey: 'riff', nativeSubagentRuntime: null }) } as any
+        : { ok: true, status: 200, json: async () => ({ ok: true, riff: JSON.stringify({ baseUrl: 'https://riff.example' }) }) } as any;
+    };
+    try {
+      let renderer!: TestRenderer.ReactTestRenderer;
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(BotAgentSection, {
+        bot: {
+          larkAppId: 'cli_x', cliId: 'traex', agentSelectionKey: 'traex',
+          nativeSubagentRuntime: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'custom', value: 'ultra' } },
+        },
+        sessionFallback: 'traex',
+        cliState: {
+          options: [{ id: 'traex', label: 'TraeX' }, { id: 'riff', label: 'Riff' }],
+          ttadkModelDefault: '', ttadkModelSuggestions: [],
+        },
+        patchBot: vi.fn(),
+        }));
+      });
+      const root = renderer.root;
+      act(() => root.findByProps({ dataInput: 'agentCliId' }).props.onChange('riff'));
+      await act(async () => { await root.findByProps({ 'data-action': 'save-riff' }).props.onClick(); });
+      act(() => root.findByProps({ dataInput: 'agentCliId' }).props.onChange('traex'));
+      expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('passthrough');
+      expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
   });
 });
 
