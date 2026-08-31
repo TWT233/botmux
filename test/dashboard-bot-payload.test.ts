@@ -10,7 +10,7 @@ describe('dashboard bot payload helpers', () => {
         cliId: 'codex',
         cliRuntime: { id: 'vendor-codex', executable: 'vendor-codex' },
         model: 'gpt-5',
-        nativeSubagentRuntime: { model: { mode: 'inherit' } },
+        nativeSubagentRuntime: { model: { mode: 'custom', value: 'GPT-5.6-Sol' } },
       },
       {},
     );
@@ -36,7 +36,7 @@ describe('dashboard bot payload helpers', () => {
   it('exposes native subagent policy only in private Bot Defaults payloads', () => {
     const nativeSubagentRuntime = {
       model: { mode: 'custom' as const, value: 'GPT-5.6-Sol' },
-      reasoningEffort: { mode: 'inherit' as const },
+      reasoningEffort: { mode: 'custom' as const, value: 'ultra' as const },
     };
     const descriptor = { larkAppId: 'app_traex', cliId: 'traex', nativeSubagentRuntime };
 

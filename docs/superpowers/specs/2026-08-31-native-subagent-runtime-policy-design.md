@@ -11,13 +11,11 @@ defaults differ from the parent. Consequently, a bot configured as
 another supported runtime.
 
 The Bot Config page needs a bot-wide policy for native TraeCode subagents. Model
-and effort are independent dimensions, and each dimension needs three choices:
+and effort are independent dimensions, and each dimension needs two choices:
 
-- **Do not pass (current behavior):** Botmux does not alter that field in the
+- **Pass through request (current behavior):** Botmux does not alter that field in the
   model-generated `spawn_agent` input. An explicit value chosen by the parent is
   preserved; an absent value is resolved by TraeCode and the selected role.
-- **Inherit parent:** Botmux replaces that child field with the spawning agent's
-  actual runtime value at the instant of the call.
 - **Custom:** Botmux replaces that child field with a configured value.
 
 An isolated TraeCode 0.201.6 probe established that a `PreToolUse` hook matching
@@ -34,7 +32,7 @@ This release supports native `spawn_agent` calls made by Botmux-managed TraeCode
 (`cliId: traex`) sessions. It does not change Botmux workflow `subagent` nodes,
 cross-bot dispatch, or other CLI adapters. The policy applies recursively to
 nested native subagents because their hooks retain the owning Botmux session
-identity while their own transcript identifies the immediate spawning agent.
+identity.
 
 The release also fixes the related streaming-card bug where
 `collab_agent_spawn_end` metadata is mistaken for the parent runtime. Parent
@@ -65,13 +63,12 @@ dimension means pass-through, preserving the existing behavior and keeping old
 `bots.json` files byte-compatible.
 
 ```ts
-type NativeSubagentModelPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: string };
+type NativeSubagentModelPolicy = { mode: 'custom'; value: string };
 
-type NativeSubagentEffortPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: CodexReasoningEffort };
+type NativeSubagentEffortPolicy = {
+  mode: 'custom';
+  value: CodexReasoningEffort;
+};
 
 interface NativeSubagentRuntimePolicy {
   model?: NativeSubagentModelPolicy;
@@ -83,11 +80,15 @@ interface BotConfig {
 }
 ```
 
+Only `custom` is accepted in a configured dimension. The removed legacy
+`inherit` mode is invalid; config loading diagnoses it and drops the whole
+policy instead of silently applying a different runtime.
+
 The Dashboard expands absence into the visible `passthrough` state. When both
 dimensions are pass-through, persistence removes `nativeSubagentRuntime` rather
 than writing an empty object. `model_provider` is not exposed as a separate
-control in this release: custom and inherited model overrides use the current
-Trae provider (`trae`) and always write the provider/model pair together.
+control in this release: custom model overrides use the current Trae provider
+(`trae`) and always write the provider/model pair together.
 
 The Dashboard mutation contract uses field-presence semantics:
 
@@ -109,7 +110,6 @@ applies each configured dimension independently:
 | Policy | Model fields | Effort field |
 | --- | --- | --- |
 | pass-through | Preserve `model` and `model_provider` exactly | Preserve `reasoning_effort` exactly |
-| inherit | Set `model` to the immediate parent's actual model and `model_provider` to `trae` | Set `reasoning_effort` to the immediate parent's actual effort |
 | custom | Set `model` to the configured value and `model_provider` to `trae` | Set `reasoning_effort` to the configured value |
 
 All unrelated input fields, including task, role, fork/history mode, service
@@ -117,37 +117,25 @@ tier, and background behavior, remain byte-for-byte equivalent at the JSON
 value level. A model policy always treats `model` and `model_provider` as one
 atomic pair so a stale provider cannot be paired with the selected model.
 
-The immediate parent runtime is resolved from the hook payload's transcript,
-using the latest complete `turn_context`. This is necessary for nested agents
-and for parents changed with `/model` or `/effort`; the root Botmux session's
-cached runtime is not necessarily the spawning agent's runtime. The hook payload
-model may be used only as a model fallback. If an inherited dimension cannot be
-resolved, the hook denies the spawn with a clear diagnostic rather than claiming
-inheritance while silently using another value.
-
 Botmux validates a custom effort against a custom model at save time when both
-are known. Combinations involving pass-through or inherited values are validated
-at call time by TraeCode. Built-in agent-role locks also remain TraeCode's
-authority. A conflict fails the spawn and is surfaced to the parent; Botmux does
-not silently drop or downgrade the configured value.
+are known. Combinations involving pass-through values are validated at call time
+by TraeCode. Built-in agent-role locks also remain TraeCode's authority. A
+conflict fails the spawn and is surfaced to the parent; Botmux does not silently
+drop or downgrade the configured value.
 
 ## Runtime flow
 
 1. A Botmux-managed TraeCode process starts with a process-scoped
    `PreToolUse` hook matching only `spawn_agent`. Existing global/project hooks
    continue to run.
-2. TraeCode sends the hook payload, including `session_id`, `transcript_path`,
-   current model, and original `tool_input`, to the Botmux hook command.
+2. TraeCode sends the hook payload, including `session_id` and original
+   `tool_input`, to the Botmux hook command.
 3. The hook requires the managed `BOTMUX_SESSION_ID` and
    `BOTMUX_LARK_APP_ID`. Non-Botmux sessions return no output.
-4. The hook resolves the immediate parent runtime from the hook payload's
-   `transcript_path`, using its latest complete `turn_context`, and requests only
-   the current bot policy from the owning daemon over the existing authenticated
-   loopback channel. The daemon's in-memory runtime belongs to the root Botmux
-   session and therefore cannot represent an immediate parent that is itself a
-   nested subagent. This split keeps recursive inheritance correct while making
-   Dashboard changes effective for subsequent spawns in already-running managed
-   sessions whose process contains the hook.
+4. The hook requests only the current bot policy from the owning daemon over the
+   existing authenticated loopback channel. Reading the policy at call time
+   makes Dashboard changes effective for subsequent spawns in already-running
+   managed sessions whose process contains the hook.
 5. A pure policy function rewrites only the configured dimensions and emits a
    TraeCode `PreToolUse` allow directive with the complete `updatedInput`. With
    no configured dimensions it emits no directive.
@@ -159,10 +147,12 @@ Botmux's existing hook resilience: a daemon outage must not make an otherwise
 usable local TraeCode session unable to spawn children. Malformed hook input or
 an invalid stored policy also fails open and emits a debug diagnostic; persisted
 policy has already passed the Dashboard/config-loader validation boundary, and a
-bad local record must not brick every spawn. A valid inherit policy whose parent
-dimension cannot be resolved is different: the daemon returns an explicit deny
-because silently proceeding would violate the selected policy. No diagnostic
-contains credentials or the rest of the bot configuration.
+bad local record must not brick every spawn. No diagnostic contains credentials
+or the rest of the bot configuration.
+
+The daemon serves the policy from one authoritative in-memory per-bot state:
+absent, valid, or invalid. It never rereads `bots.json` on the spawn hot path.
+An invalid state is reported as a fixed flag without returning the raw value.
 
 Sessions created after this feature is installed always contain the process hook.
 Policy edits therefore apply to their next spawn without restarting the parent.
@@ -174,13 +164,13 @@ one session restart because it started before the process-scoped hook existed.
 The Agent section gains a `Native subagent runtime` subsection for `traex` bots.
 It contains two independent controls:
 
-- `Subagent model`: `Do not pass (current behavior)`, `Inherit parent`, `Custom`.
-- `Subagent effort`: `Do not pass (current behavior)`, `Inherit parent`, `Custom`.
+- `Subagent model`: `Pass through request`, `Custom`.
+- `Subagent effort`: `Pass through request`, `Custom`.
 
 Selecting Custom reveals the existing model picker or a model-aware effort
 picker. The effort choices use the existing Trae model capability catalog. Help
-text explains that pass-through preserves parent-generated arguments, inheritance
-uses the immediate parent's actual runtime, and role locks can reject an override.
+text explains that pass-through preserves parent-generated arguments and role
+locks can reject a custom override.
 
 The fields use touched/presence tracking so an older or partially loaded page
 cannot erase a policy while saving another Agent setting. The save response is
@@ -202,10 +192,20 @@ live updates and resume-time reconstruction.
 - The hook matches exactly `spawn_agent`; all other tool calls are no-ops.
 - Hook stdin is size-bounded and parsed as an object. Malformed input produces no
   rewrite and a debug diagnostic.
-- The private daemon endpoint uses the existing session-scoped HMAC/origin
-  capability path. A caller cannot select another bot or session.
+- Host requests retain the route-and-port-bound dashboard-secret request HMAC
+  and add a random challenge. The daemon signs the exact status and response
+  bytes with that challenge, method, path, port, and session identity.
+- Sandboxed callers use the rotating managed-origin capability only as a local
+  HMAC key; the raw capability is never transmitted. The request proof binds a
+  timestamp, nonce, method, path, port, session, turn, and dispatch attempt, and
+  the response is signed over the same live identity plus its exact bytes.
+- Nonces are replay-protected, timestamps allow at most 30 seconds of skew, and
+  the hook prefers the protected claim's IPC port on the capability path.
 - The endpoint returns only normalized policy data; it never returns credentials
   or arbitrary bot configuration.
+- Response reads have a two-second deadline and a streaming 16 KiB cap; overflow
+  or timeout cancels the reader before parsing.
+- The hook does not read transcript files or infer the parent runtime.
 - Model strings are trimmed, non-empty, and bounded. Effort values reuse the
   existing canonical effort union and model compatibility helpers.
 - The hook never changes role, prompt, history selection, task name, or worktree
@@ -218,14 +218,12 @@ live updates and resume-time reconstruction.
 Automated coverage will prove:
 
 - old/missing config normalizes to pass-through; malformed policies are dropped;
-- all nine independent model/effort mode combinations rewrite only the intended
+- all four independent model/effort mode combinations rewrite only the intended
   fields;
 - custom model writes `model_provider: trae`; pass-through preserves an existing
   cross-provider pair;
-- inherited values come from the immediate caller transcript, including nested
-  subagents and `/model` or `/effort` changes;
-- missing inherited runtime denies clearly; daemon unavailability remains
-  fail-open;
+- unsupported legacy modes are dropped at config load; daemon unavailability
+  remains fail-open;
 - process hook arguments are present in plain TUI and app-server launches and do
   not remove unrelated hooks;
 - Dashboard GET/PUT preserves, replaces, clears, validates, and renders the policy;
@@ -236,7 +234,7 @@ Automated coverage will prove:
 - build, focused suites, the full unit suite, and a real isolated TraeCode spawn
   smoke all pass.
 
-The live smoke must cover pass-through, inherit, and custom behavior. It must also
+The live smoke must cover pass-through and custom behavior. It must also
 confirm that an incompatible built-in role produces a clear failure rather than a
 downgrade.
 
