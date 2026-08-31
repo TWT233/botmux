@@ -804,4 +804,55 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_target_frozen');
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_target_new_manual');
   });
+
+  it('chat-off drains captured later-batch ids after their queued session vanishes from the active registry', async () => {
+    const leading = Array.from({ length: 20 }, (_, index) =>
+      withChat(
+        makeDs(`om_vanished_leading_${index}`, undefined, `pin-vanished-leading-${index}`, `om_root_vanished_leading_${index}`),
+        'oc_vanished',
+      ));
+    const target = withChat(
+      makeDs('om_vanished_target_old', undefined, 'pin-vanished-target', 'om_root_vanished_target'),
+      'oc_vanished',
+    );
+    setActiveSessionsRegistry(new Map([
+      ...leading.map(ds => [activeSessionKey(ds), ds] as const),
+      [activeSessionKey(target), target] as const,
+    ]));
+
+    let disabledChats: string[] | undefined;
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        noPinStreamingCardChats: disabledChats,
+      },
+    }) as any);
+
+    const firstReconcileStarted = deferred<void>();
+    const releaseFirstReconcile = deferred<boolean>();
+    pinMessageMock.mockImplementation((appId: string, messageId: string) => {
+      if (appId === 'app-pin' && messageId === 'om_vanished_leading_0') {
+        firstReconcileStarted.resolve();
+        return releaseFirstReconcile.promise;
+      }
+      return Promise.resolve(true);
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true);
+    await firstReconcileStarted.promise;
+
+    disabledChats = ['oc_vanished'];
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_vanished', false);
+
+    setActiveSessionsRegistry(new Map([
+      ...leading.map(ds => [activeSessionKey(ds), ds] as const),
+    ]));
+
+    releaseFirstReconcile.resolve(true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_vanished_target_old');
+  });
 });

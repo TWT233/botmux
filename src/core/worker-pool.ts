@@ -2454,6 +2454,27 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
       const request = state.pending.shift();
       if (!request) break;
       const { enabled, chatId, authoritativeCleanupIdsBySession } = request;
+      // An on->off transition grants authority over the exact card IDs visible
+      // at that transition.  This work must not depend on a later active-registry
+      // lookup: close/removal can happen while an earlier reconcile request is
+      // still draining.  Do not resolve a session again here; a reused session
+      // id or a replacement current card must never expand this cleanup scope.
+      const authoritativeCleanup = [...authoritativeCleanupIdsBySession]
+        .map(([sessionId, ids]) => ({
+          owner: { larkAppId, sessionId },
+          ids: [...new Set(ids.filter(isRealStreamingCardId))],
+        }))
+        .filter(({ ids }) => ids.length > 0);
+      for (let offset = 0; offset < authoritativeCleanup.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
+        const batch = authoritativeCleanup.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
+        await Promise.allSettled(batch.map(async ({ owner, ids }) => {
+          try {
+            await unpinStreamingCardIds(larkAppId, ids, owner);
+          } catch {
+            /* captured cleanup remains fail-open */
+          }
+        }));
+      }
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
       const targetSessions = chatId === undefined
         ? sessions
@@ -2464,14 +2485,9 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
           batch.map(async (ds) => {
             try {
               const effectiveEnabled = enabled && pinStreamingCardEnabledFor(ds.larkAppId, ds.chatId);
-              const authoritativeCleanupIds = !effectiveEnabled
-                ? authoritativeCleanupIdsBySession.get(ds.session.sessionId)
-                : undefined;
               await reconcileStreamingCardPins(
                 ds,
-                effectiveEnabled ? { enabled: true } : authoritativeCleanupIds !== undefined
-                  ? { enabled: false, authoritativeCleanupIds }
-                  : { enabled: false },
+                effectiveEnabled ? { enabled: true } : { enabled: false },
               );
             } catch {
               /* per-session reconciliation remains fail-open */
