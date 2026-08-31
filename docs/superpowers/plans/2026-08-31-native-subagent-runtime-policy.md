@@ -11,13 +11,16 @@
 ## Global Constraints
 
 - Scope is native TraeCode `spawn_agent` only; do not change Workflow subagents, cross-bot dispatch, or non-Trae adapters.
-- Model and effort modes are independent: pass-through, inherit immediate parent, or custom.
+- Model and effort modes are independent: pass-through or custom.
+- Legacy `inherit` values are invalid and the config loader drops the whole policy.
 - Missing policy preserves current behavior byte-for-byte and does not close live sessions.
 - Model override always treats `model_provider: "trae"` and `model` as an atomic pair.
 - Preserve every unrelated spawn field. Do not rewrite role, prompt, history/fork mode, service tier, or background mode.
 - Built-in role conflicts must remain explicit TraeCode errors; never silently downgrade, remove a policy, or change the role.
 - The hook must compose with existing global/project hooks and must not mutate `~/.trae/hooks.json`.
-- Hook transport failures and malformed stored state fail open with diagnostics; unresolved values for a valid inherit policy deny explicitly.
+- Hook transport failures and malformed stored state fail open with diagnostics.
+- Never send the managed-origin capability; use it only as a local HMAC key and authenticate exact response bytes.
+- Bound the response body to 16 KiB and the complete hook request to two seconds.
 - Use the shared worktree `node_modules` symlink; never run `bun install` in a worktree.
 - Every implementation unit follows RED-GREEN, is committed, and is pushed before the next unit begins.
 
@@ -32,13 +35,13 @@
 - Test: `test/bot-registry.test.ts`
 
 **Interfaces:**
-- Produces `NativeSubagentRuntimePolicy`, `NativeSubagentParentRuntime`, `normalizeNativeSubagentRuntimePolicy(raw)`, and `rewriteNativeSubagentSpawnInput(input, policy, parentRuntime)`.
+- Produces `NativeSubagentRuntimePolicy`, `normalizeNativeSubagentRuntimePolicy(raw)`, and `rewriteNativeSubagentSpawnInput(input, policy)`.
 - The normalizer returns `{ ok: true, value?: policy }` or `{ ok: false, error }`; an absent/empty policy is a valid `undefined`, while malformed persisted state remains diagnosable.
-- The rewriter returns `{ kind: 'unchanged', input }`, `{ kind: 'rewritten', input }`, or `{ kind: 'denied', reason }`.
+- The rewriter returns `{ kind: 'unchanged', input }` or `{ kind: 'rewritten', input }`.
 
 - [ ] **Step 1: Write failing pure-contract tests**
 
-Cover valid independent modes, trimmed custom model, invalid modes/values/extra keys, empty-object canonicalization, immutable input handling, all nine mode combinations, atomic model/provider replacement, unrelated-field preservation, and unresolved inherit denial.
+Cover valid independent modes, trimmed custom model, invalid modes/values/extra keys (including the removed legacy mode), empty-object canonicalization, immutable input handling, all four mode combinations, atomic model/provider replacement, and unrelated-field preservation.
 
 - [ ] **Step 2: Verify RED**
 
@@ -55,12 +58,11 @@ Expected: failures identify the missing module/type and absent parser behavior.
 Use these shapes exactly:
 
 ```ts
-type NativeSubagentModelPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: string };
-type NativeSubagentEffortPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: CodexReasoningEffort };
+type NativeSubagentModelPolicy = { mode: 'custom'; value: string };
+type NativeSubagentEffortPolicy = {
+  mode: 'custom';
+  value: CodexReasoningEffort;
+};
 type NativeSubagentRuntimePolicy = {
   model?: NativeSubagentModelPolicy;
   reasoningEffort?: NativeSubagentEffortPolicy;
@@ -69,7 +71,7 @@ type NativeSubagentRuntimePolicy = {
 
 `rewriteNativeSubagentSpawnInput` must clone the top-level input, preserve an
 existing provider/model pair in pass-through mode, write provider/model together
-for inherit/custom, and change `reasoning_effort` only when its policy says so.
+for custom mode, and change `reasoning_effort` only when its policy says so.
 
 - [ ] **Step 4: Verify GREEN and commit**
 
@@ -94,17 +96,17 @@ git push fork feat/subagent-runtime-policy
 - Create: `test/native-subagent-runtime-hook.test.ts`
 
 **Interfaces:**
-- Produces `POST /api/sessions/:sessionId/native-subagent-runtime`, returning only `{ ok: true, policy }`.
+- Produces `POST /api/sessions/:sessionId/native-subagent-runtime`, returning only `{ ok: true, policy? }` or `{ ok: true, invalidPolicy: true }`.
 - Produces `nativeSubagentRuntimeHookCommand()` and CLI command `native-subagent-runtime-hook`.
 - Consumes Task 1's normalizer and rewrite function.
 
 - [ ] **Step 1: Write failing daemon-route tests**
 
-Test trusted-host HMAC, managed-origin capability, cross-session rejection, stale/missing capability rejection, absent policy, valid policy, and invalid persisted policy. Assert the route derives the bot from the authenticated session and never accepts a caller-supplied bot ID.
+Test trusted-host challenge request/response HMAC, managed-origin capability-keyed request/response HMAC, nonce replay, timestamp skew, exact path/port/session/turn/attempt binding, cross-session rejection, stale/missing capability rejection, absent policy, valid policy, and invalid persisted policy. Assert the route derives the bot from the authenticated session and never accepts a caller-supplied bot ID.
 
 - [ ] **Step 2: Write failing hook-command tests**
 
-Test Node and standalone-binary command rendering. Test hook stdin bounds and these cases: non-`spawn_agent` no-op; malformed input fail-open; daemon failure fail-open; pass-through no directive; successful rewrite emits only valid hook JSON on stdout; unresolved inheritance emits an explicit deny; stderr contains bounded diagnostics only.
+Test Node and standalone-binary command rendering. Test hook stdin bounds, a two-second deadline, streaming rejection above 16 KiB, missing/tampered response signatures, and these cases: non-`spawn_agent` no-op; malformed input fail-open; daemon failure fail-open; pass-through no directive; successful rewrite emits only valid hook JSON on stdout; stderr contains bounded diagnostics only.
 
 - [ ] **Step 3: Verify RED**
 
@@ -118,11 +120,17 @@ bunx vitest run --project unit \
 
 - [ ] **Step 4: Implement the route and CLI protocol**
 
-The hook reads the immediate parent's latest complete `turn_context` from the
-trusted hook `transcript_path`, using `payload.model` as model-only fallback. It
-authenticates like `user-prompt-hook`: host HMAC when readable, otherwise the
-session's rotating managed-origin capability. The daemon returns only normalized
-policy. No valid policy means empty stdout and exit 0.
+Host callers keep the route-and-port-bound dashboard-secret request HMAC and add
+a random 32-byte response challenge. Sandboxed callers prefer the protected
+claim's IPC port and use the rotating managed-origin capability only as an HMAC
+key, never as a transmitted bearer. Bind request and response proofs to the
+method, exact path, actual port, session, body, and relevant nonce/challenge; the
+sandbox proof additionally binds timestamp, current turn, and dispatch attempt.
+The daemon verifies freshness and nonce replay, signs the exact response bytes,
+and serves one authoritative in-memory absent/valid/invalid policy state without
+rereading `bots.json`. The hook verifies the response before JSON parsing and
+cancels a stream that exceeds 16 KiB or the two-second deadline. It does not read
+the transcript. No valid policy means empty stdout and exit 0.
 
 - [ ] **Step 5: Verify GREEN, commit, and push**
 
@@ -227,7 +235,7 @@ copying, and private/public payload boundaries.
 
 - [ ] **Step 2: Write failing React tests**
 
-Cover Trae-only visibility, independent three-state controls, conditional custom
+Cover Trae-only visibility, independent two-state controls, conditional custom
 pickers, rehydration, untouched-field omission, all-pass-through `null`,
 authoritative response patching, and switching away from Trae.
 
@@ -246,8 +254,8 @@ bunx vitest run --project unit \
 
 Reuse `ModelPickerField`, `DropdownField`, detected Trae model candidates,
 reasoning-effort capability helpers, and the existing atomic `rmwBotEntry` path.
-The model/effort policy selectors use `passthrough | inherit | custom` as UI
-state; only `inherit`/`custom` are persisted. Add matching Chinese and English
+The model/effort policy selectors use `passthrough | custom` as UI state; only
+`custom` is persisted. Add matching Chinese and English
 labels/help and document the JSON shape. Do not add the policy to portable
 presets in this release.
 
@@ -363,10 +371,10 @@ bun run switch:here
 bun run daemon:restart
 ```
 
-In an isolated Botmux/Trae session verify pass-through, inherit, custom, parent
-runtime changes, nested child spawn, hook coexistence, role-conflict failure,
-streaming-card isolation, and policy update without session closure. Capture the
-Dashboard's pass-through/inherit/custom and non-Trae-hidden states. Restore the
+In an isolated Botmux/Trae session verify pass-through, custom, nested child
+spawn, hook coexistence, role-conflict failure, streaming-card isolation, and
+policy update without session closure. Capture the Dashboard's
+pass-through/custom and non-Trae-hidden states. Restore the
 recorded canonical checkout with its own `bun run switch:here && bun run
 daemon:restart`, then verify `command -v botmux`, daemon version, and hook hashes.
 

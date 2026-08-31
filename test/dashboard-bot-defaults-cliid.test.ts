@@ -288,18 +288,23 @@ describe('Codex-compatible runtime editor', () => {
     }
   });
 
-  it('shows independent native-subagent model and effort modes only for TraeX and rehydrates them', () => {
+  it('shows independent pass-through/custom modes only for TraeX and rehydrates them', () => {
     const trae = renderAgent({
       cliId: 'traex',
       agentSelectionKey: 'traex',
       nativeSubagentRuntime: {
         model: { mode: 'custom', value: 'GPT-5.6-Sol' },
-        reasoningEffort: { mode: 'inherit' },
+        // Legacy short-lived builds could persist this now-unsupported mode.
+        reasoningEffort: { mode: 'inherit' } as any,
       },
     });
     expect(trae.root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('custom');
     expect(trae.root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.value).toBe('GPT-5.6-Sol');
-    expect(trae.root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('inherit');
+    const modelMode = trae.root.findByProps({ dataInput: 'nativeSubagentModelMode' });
+    const effortMode = trae.root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' });
+    expect(modelMode.props.options.map((option: { value: string }) => option.value)).toEqual(['passthrough', 'custom']);
+    expect(effortMode.props.options.map((option: { value: string }) => option.value)).toEqual(['passthrough', 'custom']);
+    expect(effortMode.props.value).toBe('passthrough');
     expect(trae.root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
 
     const codex = renderAgent({ cliId: 'codex' });
@@ -340,7 +345,7 @@ describe('Codex-compatible runtime editor', () => {
       const patchBot = vi.fn();
       const { root } = renderAgent({
         cliId: 'traex', agentSelectionKey: 'traex',
-        nativeSubagentRuntime: { model: { mode: 'inherit' } },
+        nativeSubagentRuntime: { model: { mode: 'custom', value: 'GPT-5.6-Sol' } },
       }, patchBot);
       await act(async () => {
         root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
@@ -391,12 +396,9 @@ describe('Codex-compatible runtime editor', () => {
     }
   });
 
-  it.each([
-    ['passthrough', undefined],
-    ['inherit', { model: { mode: 'inherit' } }],
-  ])('offers every canonical effort for an effort-only override when model mode is %s', (_mode, nativeSubagentRuntime) => {
+  it('offers every canonical effort for an effort-only override when the model passes through', () => {
     const { root } = renderAgent({
-      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro', nativeSubagentRuntime,
+      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro',
     });
     act(() => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.onChange('custom'));
     const values = root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.options
@@ -412,21 +414,6 @@ describe('Codex-compatible runtime editor', () => {
     expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('passthrough');
     expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('custom');
     expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.value).toBe('ultra');
-  });
-
-  it('rehydrates inherited model with a custom effort without filtering by the parent model', () => {
-    const { root } = renderAgent({
-      cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro',
-      nativeSubagentRuntime: {
-        model: { mode: 'inherit' },
-        reasoningEffort: { mode: 'custom', value: 'ultra' },
-      },
-    });
-    expect(root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('inherit');
-    const effort = root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' });
-    expect(effort.props.value).toBe('ultra');
-    expect(effort.props.options.map((option: { value: string }) => option.value))
-      .toEqual(['low', 'medium', 'high', 'xhigh', 'max', 'ultra']);
   });
 
   const dshCliState = {
@@ -1250,7 +1237,7 @@ describe('riff CLI switch persistence (PR #467 P1)', () => {
         renderer = TestRenderer.create(React.createElement(BotAgentSection, {
           bot: {
             larkAppId: 'cli_x', cliId: 'traex', agentSelectionKey: 'traex', reasoningEffort: 'high',
-            nativeSubagentRuntime: { model: { mode: 'inherit' }, reasoningEffort: { mode: 'custom', value: 'ultra' } },
+            nativeSubagentRuntime: { model: { mode: 'custom', value: 'GPT-5.6-Sol' }, reasoningEffort: { mode: 'custom', value: 'ultra' } },
           },
           sessionFallback: 'traex',
           cliState: {

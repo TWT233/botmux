@@ -76,6 +76,13 @@ type JsonResponse = {
 };
 
 type RuntimeMode = 'official' | 'legacy' | 'custom';
+type NativePolicyMode = 'passthrough' | 'custom';
+type NativeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
+
+function nativePolicyModeFrom(policy: { mode?: unknown } | undefined): NativePolicyMode {
+  return policy?.mode === 'custom' ? 'custom' : 'passthrough';
+}
+
 type RuntimeDraft = {
   mode: RuntimeMode;
   id: string;
@@ -2011,11 +2018,9 @@ export function BotAgentSection(props: {
   const [cliSelectionTouched, setCliSelectionTouched] = useState(false);
   const [model, setModel] = useState(typeof bot.model === 'string' ? bot.model : '');
   const [reasoningEffort, setReasoningEffort] = useState<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'>(bot.reasoningEffort ?? '');
-  type NativePolicyMode = 'passthrough' | 'inherit' | 'custom';
-  type NativeEffort = 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra';
-  const [nativeModelMode, setNativeModelMode] = useState<NativePolicyMode>(bot.nativeSubagentRuntime?.model?.mode ?? 'passthrough');
+  const [nativeModelMode, setNativeModelMode] = useState<NativePolicyMode>(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
   const [nativeModel, setNativeModel] = useState(bot.nativeSubagentRuntime?.model?.mode === 'custom' ? bot.nativeSubagentRuntime.model.value : '');
-  const [nativeEffortMode, setNativeEffortMode] = useState<NativePolicyMode>(bot.nativeSubagentRuntime?.reasoningEffort?.mode ?? 'passthrough');
+  const [nativeEffortMode, setNativeEffortMode] = useState<NativePolicyMode>(nativePolicyModeFrom(bot.nativeSubagentRuntime?.reasoningEffort));
   const [nativeEffort, setNativeEffort] = useState<'' | NativeEffort>(bot.nativeSubagentRuntime?.reasoningEffort?.mode === 'custom' ? bot.nativeSubagentRuntime.reasoningEffort.value : '');
   const [nativePolicyTouched, setNativePolicyTouched] = useState(false);
   // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty = use
@@ -2044,9 +2049,9 @@ export function BotAgentSection(props: {
     setCliSelectionTouched(false);
     setModel(typeof bot.model === 'string' ? bot.model : '');
     setReasoningEffort(bot.reasoningEffort ?? '');
-    setNativeModelMode(bot.nativeSubagentRuntime?.model?.mode ?? 'passthrough');
+    setNativeModelMode(nativePolicyModeFrom(bot.nativeSubagentRuntime?.model));
     setNativeModel(bot.nativeSubagentRuntime?.model?.mode === 'custom' ? bot.nativeSubagentRuntime.model.value : '');
-    setNativeEffortMode(bot.nativeSubagentRuntime?.reasoningEffort?.mode ?? 'passthrough');
+    setNativeEffortMode(nativePolicyModeFrom(bot.nativeSubagentRuntime?.reasoningEffort));
     setNativeEffort(bot.nativeSubagentRuntime?.reasoningEffort?.mode === 'custom' ? bot.nativeSubagentRuntime.reasoningEffort.value : '');
     setNativePolicyTouched(false);
     setTurnTimeoutMin(turnTimeoutMinFromMs(bot.turnTimeoutMs));
@@ -2186,16 +2191,12 @@ export function BotAgentSection(props: {
       const nativeSubagentRuntime = nativeModelMode === 'passthrough' && nativeEffortMode === 'passthrough'
         ? null
         : {
-            ...(nativeModelMode === 'inherit'
-              ? { model: { mode: 'inherit' as const } }
-              : nativeModelMode === 'custom'
-                ? { model: { mode: 'custom' as const, value: nativeModel } }
-                : {}),
-            ...(nativeEffortMode === 'inherit'
-              ? { reasoningEffort: { mode: 'inherit' as const } }
-              : nativeEffortMode === 'custom'
-                ? { reasoningEffort: { mode: 'custom' as const, value: nativeEffort } }
-                : {}),
+            ...(nativeModelMode === 'custom'
+              ? { model: { mode: 'custom' as const, value: nativeModel } }
+              : {}),
+            ...(nativeEffortMode === 'custom'
+              ? { reasoningEffort: { mode: 'custom' as const, value: nativeEffort } }
+              : {}),
           };
       const body = {
         cliId: cliKey,
@@ -2268,9 +2269,9 @@ export function BotAgentSection(props: {
         setRuntimeTouched(false);
         setNativePolicyTouched(false);
         const savedNativePolicy = res.body.nativeSubagentRuntime;
-        setNativeModelMode(savedNativePolicy?.model?.mode ?? 'passthrough');
+        setNativeModelMode(nativePolicyModeFrom(savedNativePolicy?.model));
         setNativeModel(savedNativePolicy?.model?.mode === 'custom' ? savedNativePolicy.model.value : '');
-        setNativeEffortMode(savedNativePolicy?.reasoningEffort?.mode ?? 'passthrough');
+        setNativeEffortMode(nativePolicyModeFrom(savedNativePolicy?.reasoningEffort));
         setNativeEffort(savedNativePolicy?.reasoningEffort?.mode === 'custom' ? savedNativePolicy.reasoningEffort.value : '');
         if (cliRuntime) {
           const probe = res.body.runtimeProbe;
@@ -2350,9 +2351,9 @@ export function BotAgentSection(props: {
           agentSelectionKey: res.body.selectionKey ?? 'riff',
         });
         setReasoningEffort(res.body.reasoningEffort ?? '');
-        setNativeModelMode(savedNativePolicy?.model?.mode ?? 'passthrough');
+        setNativeModelMode(nativePolicyModeFrom(savedNativePolicy?.model));
         setNativeModel(savedNativePolicy?.model?.mode === 'custom' ? savedNativePolicy.model.value : '');
-        setNativeEffortMode(savedNativePolicy?.reasoningEffort?.mode ?? 'passthrough');
+        setNativeEffortMode(nativePolicyModeFrom(savedNativePolicy?.reasoningEffort));
         setNativeEffort(savedNativePolicy?.reasoningEffort?.mode === 'custom' ? savedNativePolicy.reasoningEffort.value : '');
         setNativePolicyTouched(false);
         const note = [
@@ -2714,7 +2715,6 @@ export function BotAgentSection(props: {
                 disabled={agentBusy}
                 options={[
                   { value: 'passthrough', label: tr('botDefaults.nativeSubagentPassthrough') },
-                  { value: 'inherit', label: tr('botDefaults.nativeSubagentInherit') },
                   { value: 'custom', label: tr('botDefaults.nativeSubagentCustom') },
                 ]}
                 onChange={next => { setNativeModelMode(next as NativePolicyMode); setNativePolicyTouched(true); }}
@@ -2748,7 +2748,6 @@ export function BotAgentSection(props: {
                 disabled={agentBusy}
                 options={[
                   { value: 'passthrough', label: tr('botDefaults.nativeSubagentPassthrough') },
-                  { value: 'inherit', label: tr('botDefaults.nativeSubagentInherit') },
                   { value: 'custom', label: tr('botDefaults.nativeSubagentCustom') },
                 ]}
                 onChange={next => { setNativeEffortMode(next as NativePolicyMode); setNativePolicyTouched(true); }}
