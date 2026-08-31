@@ -5,7 +5,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, st
 import { request as httpRequest } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { ipcRoute, startIpcServer, setLarkAppId, setIpcAuthSecret, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, setExactChatGrantHandler, armCoreOnlyReadinessGate, setCoreOnlyReady, __testOnly_resetCoreOnlyReadiness, type IpcServerHandle,
+import { ipcRoute, startIpcServer, setLarkAppId, setIpcAuthSecret, setBotRenamer, setBotAvatarChanger, setBotDescriptionManager, setExactChatGrantHandler, armCoreOnlyReadinessGate, setCoreOnlyReady, __testOnly_resetCoreOnlyReadiness, __testOnly_resetManagedOriginRuntimeAuthState, type IpcServerHandle,
   __testOnly_agentSwitchBeforePreCloseVerify,
 } from '../src/core/dashboard-ipc-server.js';
 import { rmwBotEntry } from '../src/services/config-store.js';
@@ -139,6 +139,7 @@ afterEach(async () => {
   setLarkAppId('');
   __testOnly_resetBotRegistry();
   setIpcAuthSecret(null);
+  __testOnly_resetManagedOriginRuntimeAuthState();
   resetAskBrokerForTest();
   setExactChatGrantHandler(null);
   clearMessageListenerRunPreviewStore();
@@ -477,7 +478,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
 
-    const accepted = await post({ originCapability: CAPABILITY });
+    const accepted = await postPolicyCapability(POLICY_CAPABILITY);
     expect(accepted.status).toBe(200);
     const acceptedBody = await accepted.text();
     expect(JSON.parse(acceptedBody)).toEqual({
@@ -485,23 +486,26 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       policy: { reasoningEffort: { mode: 'custom', value: 'high' } },
     });
 
-    const crossSession = await post({ originCapability: CAPABILITY }, {}, OTHER_SESSION_ID);
+    const crossSession = await postPolicyCapability(POLICY_CAPABILITY, { sessionId: OTHER_SESSION_ID });
     expect(crossSession.status).toBe(403);
     expect(await crossSession.json()).toEqual({ ok: false, error: 'origin_unproven' });
 
-    const otherAccepted = await post({ originCapability: OTHER_CAPABILITY }, {}, OTHER_SESSION_ID);
+    const otherAccepted = await postPolicyCapability(OTHER_POLICY_CAPABILITY, { sessionId: OTHER_SESSION_ID });
     expect(otherAccepted.status).toBe(200);
     expect(await otherAccepted.json()).toEqual({
       ok: true,
       policy: { reasoningEffort: { mode: 'custom', value: 'high' } },
     });
 
-    active.managedTurnOrigin = { capability: 'cd'.repeat(32), turnId: 'turn-new' };
-    for (const body of [
-      { originCapability: CAPABILITY },
-      {},
+    active.managedTurnOrigin = {
+      capability: 'cd'.repeat(32),
+      policyCapability: '56'.repeat(32),
+      turnId: 'turn-new',
+    };
+    for (const denied of [
+      await postPolicyCapability(POLICY_CAPABILITY),
+      await post({}),
     ]) {
-      const denied = await post(body);
       expect(denied.status).toBe(403);
       expect(await denied.json()).toEqual({ ok: false, error: 'origin_unproven' });
     }
@@ -513,8 +517,8 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
     const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
     const headers = nativeSubagentRuntimeCapabilityHeaders({
-      capability: CAPABILITY, method: 'POST', path, port: handle.port,
-      sessionId: SESSION_ID, turnId: 'turn-native',
+      capability: POLICY_CAPABILITY, method: 'POST', path, port: handle.port,
+      sessionId: SESSION_ID,
       larkAppId: SESSION_APP, bootInstanceId: workerPool.getDaemonBootId(),
     });
     const request = () => fetch(`http://127.0.0.1:${handle!.port}${path}`, {
@@ -544,14 +548,14 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     expect(await response.json()).toEqual({ ok: false, error: 'origin_unproven' });
   });
 
-  it('signs a capability response with the exact live turn binding', async () => {
+  it('signs a capability response as a session-scoped policy binding', async () => {
     installRuntimeSession({ model: { mode: 'custom', value: 'session-model' } });
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
     const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
     const headers = nativeSubagentRuntimeCapabilityHeaders({
-      capability: CAPABILITY, method: 'POST', path, port: handle.port,
-      sessionId: SESSION_ID, turnId: 'turn-native',
+      capability: POLICY_CAPABILITY, method: 'POST', path, port: handle.port,
+      sessionId: SESSION_ID,
       larkAppId: SESSION_APP, bootInstanceId: workerPool.getDaemonBootId(),
     });
     const response = await fetch(`http://127.0.0.1:${handle.port}${path}`, {
@@ -565,7 +569,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       response: {
         method: 'POST', path, port: handle.port, status: response.status, body,
         sessionId: SESSION_ID, larkAppId: SESSION_APP,
-        bootInstanceId: workerPool.getDaemonBootId(), turnId: 'turn-native',
+        bootInstanceId: workerPool.getDaemonBootId(),
       },
     })).toBe(true);
   });
@@ -731,7 +735,11 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(),
       hasHistory: true,
       managedTurnOrigin: {
-        capability: CAPABILITY, originChannelId: ORIGIN_CHANNEL, turnId, dispatchAttempt,
+        capability: CAPABILITY,
+        policyCapability: POLICY_CAPABILITY,
+        originChannelId: ORIGIN_CHANNEL,
+        turnId,
+        dispatchAttempt,
       },
     } as any;
     try {
@@ -748,9 +756,9 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
 
       for (let i = 0; i < 64; i += 1) {
         const headers = nativeSubagentRuntimeCapabilityHeaders({
-          capability: CAPABILITY, method: 'POST', path, port: handle.port, sessionId,
+          capability: POLICY_CAPABILITY, method: 'POST', path, port: handle.port, sessionId,
           larkAppId: SESSION_APP, bootInstanceId: workerPool.getDaemonBootId(),
-          turnId, dispatchAttempt, nonce: i.toString(16).padStart(64, '0'),
+          nonce: i.toString(16).padStart(64, '0'),
         });
         const response = await fetch(`http://127.0.0.1:${handle.port}${path}`, {
           method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}',
@@ -764,6 +772,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
         managedOriginCapabilityPath(dataDir, sessionId, ORIGIN_CHANNEL),
         JSON.stringify({
           sessionId, channelId: ORIGIN_CHANNEL, capability: CAPABILITY,
+          policyCapability: POLICY_CAPABILITY,
           larkAppId: SESSION_APP, bootInstanceId: workerPool.getDaemonBootId(),
           turnId, dispatchAttempt, ipcPort: handle.port,
         }),
@@ -1145,6 +1154,7 @@ describe('Desktop ask IPC', () => {
 describe('POST /api/session-origin/attest', () => {
   const CHANNEL = '77'.repeat(32);
   const CAPABILITY = 'ab'.repeat(32);
+  const POLICY_CAPABILITY = '12'.repeat(32);
   const TURN_ID = 'turn-managed-origin';
   const DISPATCH_ATTEMPT = 3;
 
@@ -1167,6 +1177,7 @@ describe('POST /api/session-origin/attest', () => {
     };
     const defaultOrigin = {
       capability: CAPABILITY,
+      policyCapability: POLICY_CAPABILITY,
       originChannelId: CHANNEL,
       turnId: TURN_ID,
       dispatchAttempt: DISPATCH_ATTEMPT,
@@ -1441,10 +1452,9 @@ describe('POST /api/session-origin/attest', () => {
       }
       const path = `/api/sessions/${fixture.sessionId}/native-subagent-runtime`;
       const headers = nativeSubagentRuntimeCapabilityHeaders({
-        capability: CAPABILITY, method: 'POST', path, port: handle.port,
+        capability: POLICY_CAPABILITY, method: 'POST', path, port: handle.port,
         sessionId: fixture.sessionId, larkAppId: 'app-managed-origin',
-        bootInstanceId: workerPool.getDaemonBootId(), turnId: TURN_ID,
-        dispatchAttempt: DISPATCH_ATTEMPT, nonce: 'fe'.repeat(32),
+        bootInstanceId: workerPool.getDaemonBootId(), nonce: 'fe'.repeat(32),
       });
       const response = await fetch(`http://127.0.0.1:${handle.port}${path}`, {
         method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: '{}',
