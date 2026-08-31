@@ -3,19 +3,16 @@ import {
   type CodexReasoningEffort,
 } from './codex-reasoning-effort.js';
 
-export type NativeSubagentModelPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: string };
+export type NativeSubagentModelPolicy = { mode: 'custom'; value: string };
 
-export type NativeSubagentEffortPolicy =
-  | { mode: 'inherit' }
-  | { mode: 'custom'; value: CodexReasoningEffort };
+export type NativeSubagentEffortPolicy = { mode: 'custom'; value: CodexReasoningEffort };
 
 export type NativeSubagentRuntimePolicy = {
   model?: NativeSubagentModelPolicy;
   reasoningEffort?: NativeSubagentEffortPolicy;
 };
 
+/** @deprecated Compatibility-only input for callers being migrated off inheritance. */
 export type NativeSubagentParentRuntime = {
   model?: string;
   reasoningEffort?: CodexReasoningEffort;
@@ -27,8 +24,7 @@ export type NativeSubagentRuntimePolicyNormalization =
 
 export type NativeSubagentSpawnRewrite =
   | { kind: 'unchanged'; input: Record<string, unknown> }
-  | { kind: 'rewritten'; input: Record<string, unknown> }
-  | { kind: 'denied'; reason: string };
+  | { kind: 'rewritten'; input: Record<string, unknown> };
 
 const MAX_MODEL_LENGTH = 256;
 const POLICY_KEYS = new Set(['model', 'reasoningEffort']);
@@ -48,14 +44,8 @@ function normalizeModelPolicy(raw: unknown):
   | { ok: true; value: NativeSubagentModelPolicy }
   | { ok: false; error: string } {
   if (!isRecord(raw)) return { ok: false, error: 'nativeSubagentRuntime.model must be an object' };
-  if (raw.mode === 'inherit') {
-    const extra = unknownKey(raw, ['mode']);
-    return extra
-      ? { ok: false, error: `nativeSubagentRuntime.model.${extra} is unknown` }
-      : { ok: true, value: { mode: 'inherit' } };
-  }
   if (raw.mode !== 'custom') {
-    return { ok: false, error: 'nativeSubagentRuntime.model.mode must be inherit or custom' };
+    return { ok: false, error: 'nativeSubagentRuntime.model.mode must be custom' };
   }
   const extra = unknownKey(raw, ['mode', 'value']);
   if (extra) return { ok: false, error: `nativeSubagentRuntime.model.${extra} is unknown` };
@@ -78,14 +68,8 @@ function normalizeEffortPolicy(raw: unknown):
   if (!isRecord(raw)) {
     return { ok: false, error: 'nativeSubagentRuntime.reasoningEffort must be an object' };
   }
-  if (raw.mode === 'inherit') {
-    const extra = unknownKey(raw, ['mode']);
-    return extra
-      ? { ok: false, error: `nativeSubagentRuntime.reasoningEffort.${extra} is unknown` }
-      : { ok: true, value: { mode: 'inherit' } };
-  }
   if (raw.mode !== 'custom') {
-    return { ok: false, error: 'nativeSubagentRuntime.reasoningEffort.mode must be inherit or custom' };
+    return { ok: false, error: 'nativeSubagentRuntime.reasoningEffort.mode must be custom' };
   }
   const extra = unknownKey(raw, ['mode', 'value']);
   if (extra) return { ok: false, error: `nativeSubagentRuntime.reasoningEffort.${extra} is unknown` };
@@ -132,36 +116,29 @@ export function normalizeNativeSubagentRuntimePolicy(
 export function rewriteNativeSubagentSpawnInput(
   input: Record<string, unknown>,
   policy: NativeSubagentRuntimePolicy | undefined,
+): NativeSubagentSpawnRewrite;
+/** @deprecated The parent runtime argument is ignored; remove it with the legacy hook path. */
+export function rewriteNativeSubagentSpawnInput(
+  input: Record<string, unknown>,
+  policy: NativeSubagentRuntimePolicy | undefined,
   parentRuntime: NativeSubagentParentRuntime,
+): NativeSubagentSpawnRewrite | { kind: 'denied'; reason: string };
+export function rewriteNativeSubagentSpawnInput(
+  input: Record<string, unknown>,
+  policy: NativeSubagentRuntimePolicy | undefined,
+  _parentRuntime?: NativeSubagentParentRuntime,
 ): NativeSubagentSpawnRewrite {
   const rewritten = { ...input };
   if (!policy?.model && !policy?.reasoningEffort) {
     return { kind: 'unchanged', input: rewritten };
   }
 
-  if (policy.model?.mode === 'inherit' && !parentRuntime.model?.trim()) {
-    return {
-      kind: 'denied',
-      reason: 'Cannot inherit native subagent model: immediate parent runtime is unavailable',
-    };
-  }
-  if (policy.reasoningEffort?.mode === 'inherit' && !parentRuntime.reasoningEffort) {
-    return {
-      kind: 'denied',
-      reason: 'Cannot inherit native subagent reasoning effort: immediate parent runtime is unavailable',
-    };
-  }
-
   if (policy.model) {
     rewritten.model_provider = 'trae';
-    rewritten.model = policy.model.mode === 'custom'
-      ? policy.model.value
-      : parentRuntime.model!.trim();
+    rewritten.model = policy.model.value;
   }
   if (policy.reasoningEffort) {
-    rewritten.reasoning_effort = policy.reasoningEffort.mode === 'custom'
-      ? policy.reasoningEffort.value
-      : parentRuntime.reasoningEffort;
+    rewritten.reasoning_effort = policy.reasoningEffort.value;
   }
 
   return { kind: 'rewritten', input: rewritten };
