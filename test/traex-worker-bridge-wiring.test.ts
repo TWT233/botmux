@@ -18,6 +18,19 @@ describe('TRAE worker structured-bridge wiring', () => {
     expect(envSetup).not.toContain('BOTMUX_LARK_APP_SECRET');
   });
 
+  it('gives the Trae app-server the process hook and authenticated session context', () => {
+    const start = workerSource.indexOf('async function engageCodexRpc');
+    const end = workerSource.indexOf('onRequestUserInput:', start);
+    const wiring = workerSource.slice(start, end);
+
+    expect(wiring).toContain("cfg.cliId === 'traex'");
+    expect(wiring).toContain('nativeSubagentRuntimeHookCommand()');
+    expect(wiring).toContain('appServerConfig:');
+    expect(wiring).toContain('engineEnv.BOTMUX_SESSION_ID = cfg.sessionId;');
+    expect(wiring).toContain('engineEnv.BOTMUX_LARK_APP_ID = cfg.larkAppId;');
+    expect(wiring).toContain('applySessionOwnerEnv(engineEnv, cfg.ownerOpenId);');
+  });
+
   it('dispatches TRAE rollouts to the dedicated task_complete reader', () => {
     const start = workerSource.indexOf('function structuredBridgeIngestPath');
     const end = workerSource.indexOf('\n}\n', start);

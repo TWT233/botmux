@@ -72,6 +72,8 @@ export interface CodexRpcEngineOpts {
   /** Feature gates owned by the app-server process (the viewer TUI does not
    *  execute model tools in RPC mode). */
   appServerFeatures?: string[];
+  /** Generic process-scoped app-server config overrides. */
+  appServerConfig?: string[];
   /** Bridge a native request_user_input server request to the host UI. */
   onRequestUserInput?: (params: unknown) => Promise<unknown>;
   /** Override the per-request JSON-RPC timeout (default REQUEST_TIMEOUT_MS).
@@ -268,7 +270,8 @@ export class CodexRpcEngine {
     this.reapStaleAppServer();
     this.port = await findFreePort();
     const featureArgs = (this.opts.appServerFeatures ?? []).flatMap(feature => ['--enable', feature]);
-    this.child = spawn(this.opts.cliBin, ['app-server', ...featureArgs, '--listen', `ws://127.0.0.1:${this.port}`], {
+    const configArgs = (this.opts.appServerConfig ?? []).flatMap(value => ['-c', value]);
+    this.child = spawn(this.opts.cliBin, ['app-server', ...featureArgs, ...configArgs, '--listen', `ws://127.0.0.1:${this.port}`], {
       cwd: this.opts.cwd,
       env: this.opts.env,
       stdio: ['ignore', 'ignore', 'pipe'],
