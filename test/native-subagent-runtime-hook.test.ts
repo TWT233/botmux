@@ -30,8 +30,14 @@ async function listen(policy: unknown, status = 200): Promise<number> {
 
 async function runHook(
   payloadText: string,
-  options: { policy?: unknown; status?: number; startServer?: boolean } = {},
-): Promise<{ status: number | null; stdout: string; stderr: string }> {
+  options: {
+    policy?: unknown;
+    status?: number;
+    startServer?: boolean;
+    endStdin?: boolean;
+    exitTimeoutMs?: number;
+  } = {},
+): Promise<{ status: number | null; stdout: string; stderr: string; timedOut: boolean }> {
   dir = mkdtempSync(join(tmpdir(), 'botmux-native-subagent-hook-'));
   const relay = join(dir, 'relay');
   const transcript = join(dir, 'rollout.jsonl');
@@ -69,13 +75,25 @@ async function runHook(
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  child.stdin!.end(payloadText);
+  child.stdin!.on('error', () => { /* hook may close oversized/slow input early */ });
+  if (options.endStdin === false) child.stdin!.write(payloadText);
+  else child.stdin!.end(payloadText);
   let stdout = '';
   let stderr = '';
   child.stdout!.setEncoding('utf8').on('data', chunk => { stdout += chunk; });
   child.stderr!.setEncoding('utf8').on('data', chunk => { stderr += chunk; });
-  const status = await new Promise<number | null>(resolveExit => child.on('exit', resolveExit));
-  return { status, stdout, stderr };
+  let timedOut = false;
+  const status = await new Promise<number | null>(resolveExit => {
+    const timer = setTimeout(() => {
+      timedOut = true;
+      child.kill('SIGKILL');
+    }, options.exitTimeoutMs ?? 5_000);
+    child.once('exit', code => {
+      clearTimeout(timer);
+      resolveExit(code);
+    });
+  });
+  return { status, stdout, stderr, timedOut };
 }
 
 const spawnPayload = {
@@ -100,17 +118,47 @@ describe('native-subagent-runtime-hook CLI', () => {
     }
   });
 
+  it('stops reading oversized stdin without waiting for EOF', async () => {
+    const result = await runHook('x'.repeat(256 * 1024 + 1), {
+      startServer: false,
+      endStdin: false,
+      exitTimeoutMs: 3_000,
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('stdin exceeded size limit');
+  });
+
+  it('stops reading slow partial stdin at an internal deadline', async () => {
+    const result = await runHook('{"hook_event_name":', {
+      startServer: false,
+      endStdin: false,
+      exitTimeoutMs: 3_000,
+    });
+
+    expect(result.timedOut).toBe(false);
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toContain('stdin read timed out');
+  });
+
   it('fails open for daemon failure, invalid response policy, and pass-through policy', async () => {
     const cases = [
-      { startServer: false },
-      { policy: { model: { mode: 'custom', value: '' } } },
-      { policy: undefined },
+      { options: { startServer: false }, diagnostic: undefined },
+      {
+        options: { policy: { model: { mode: 'custom', value: '' } } },
+        diagnostic: 'daemon returned invalid policy; allowing spawn',
+      },
+      { options: { policy: undefined }, diagnostic: undefined },
     ];
-    for (const options of cases) {
+    for (const { options, diagnostic } of cases) {
       const result = await runHook(JSON.stringify(spawnPayload), options);
       expect(result.status).toBe(0);
       expect(result.stdout).toBe('');
       expect(result.stderr.length).toBeLessThanOrEqual(1024);
+      if (diagnostic) expect(result.stderr).toContain(diagnostic);
     }
   });
 

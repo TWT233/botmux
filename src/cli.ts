@@ -12086,6 +12086,7 @@ async function cmdUserPromptHook(): Promise<void> {
 // ─── botmux native-subagent-runtime-hook ─────────────────────────────────────
 
 const NATIVE_SUBAGENT_HOOK_STDIN_MAX_BYTES = 256 * 1024;
+const NATIVE_SUBAGENT_HOOK_STDIN_TIMEOUT_MS = 750;
 const NATIVE_SUBAGENT_TRANSCRIPT_SCAN_MAX_BYTES = 4 * 1024 * 1024;
 const NATIVE_SUBAGENT_DIAGNOSTIC_MAX_CHARS = 512;
 
@@ -12095,28 +12096,43 @@ function nativeSubagentDiagnostic(message: string): void {
 }
 
 async function readNativeSubagentHookStdin(): Promise<string | undefined> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  let tooLarge = false;
-  try {
-    for await (const raw of process.stdin) {
+  return await new Promise<string | undefined>(resolveRead => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let settled = false;
+    const cleanup = () => {
+      clearTimeout(timer);
+      process.stdin.off('data', onData);
+      process.stdin.off('end', onEnd);
+      process.stdin.off('error', onError);
+    };
+    const finish = (value: string | undefined, diagnostic?: string) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (diagnostic) nativeSubagentDiagnostic(diagnostic);
+      if (value === undefined) process.stdin.destroy();
+      resolveRead(value);
+    };
+    const onData = (raw: Buffer | string) => {
       const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
       size += chunk.length;
       if (size > NATIVE_SUBAGENT_HOOK_STDIN_MAX_BYTES) {
-        tooLarge = true;
-        continue;
+        finish(undefined, 'stdin exceeded size limit; allowing spawn');
+        return;
       }
       chunks.push(chunk);
-    }
-  } catch {
-    nativeSubagentDiagnostic('stdin read failed; allowing spawn');
-    return undefined;
-  }
-  if (tooLarge) {
-    nativeSubagentDiagnostic('stdin exceeded size limit; allowing spawn');
-    return undefined;
-  }
-  return Buffer.concat(chunks).toString('utf8');
+    };
+    const onEnd = () => finish(Buffer.concat(chunks, size).toString('utf8'));
+    const onError = () => finish(undefined, 'stdin read failed; allowing spawn');
+    const timer = setTimeout(
+      () => finish(undefined, 'stdin read timed out; allowing spawn'),
+      NATIVE_SUBAGENT_HOOK_STDIN_TIMEOUT_MS,
+    );
+    process.stdin.on('data', onData);
+    process.stdin.once('end', onEnd);
+    process.stdin.once('error', onError);
+  });
 }
 
 function readImmediateParentRuntime(

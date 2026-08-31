@@ -304,9 +304,11 @@ describe('dashboard IPC server', () => {
 
 describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
   const SESSION_ID = 'native-runtime-session';
+  const OTHER_SESSION_ID = 'native-runtime-other-session';
   const SESSION_APP = 'native-runtime-owner';
   const OTHER_APP = 'native-runtime-attacker';
   const CAPABILITY = 'ab'.repeat(32);
+  const OTHER_CAPABILITY = 'ef'.repeat(32);
 
   function installRuntimeSession(policy?: unknown) {
     registerBot({
@@ -324,12 +326,26 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       spawnedAt: Date.now(), cliVersion: 'test', lastMessageAt: Date.now(),
       hasHistory: true, managedTurnOrigin: { capability: CAPABILITY, turnId: 'turn-native' },
     } as any;
-    workerPool.setActiveSessionsRegistry(new Map([[SESSION_ID, active]]));
+    const otherActive = {
+      ...active,
+      session: { sessionId: OTHER_SESSION_ID, rootMessageId: 'om_native_other' },
+      larkAppId: OTHER_APP,
+      chatId: 'oc_native_other',
+      managedTurnOrigin: { capability: OTHER_CAPABILITY, turnId: 'turn-native-other' },
+    } as any;
+    workerPool.setActiveSessionsRegistry(new Map([
+      [SESSION_ID, active],
+      [OTHER_SESSION_ID, otherActive],
+    ]));
     return active;
   }
 
-  async function post(body: Record<string, unknown>, headers: Record<string, string> = {}) {
-    const path = `/api/sessions/${SESSION_ID}/native-subagent-runtime`;
+  async function post(
+    body: Record<string, unknown>,
+    headers: Record<string, string> = {},
+    sessionId = SESSION_ID,
+  ) {
+    const path = `/api/sessions/${sessionId}/native-subagent-runtime`;
     return fetch(`http://127.0.0.1:${handle!.port}${path}`, {
       method: 'POST',
       headers: { 'content-type': 'application/json', ...headers },
@@ -355,7 +371,7 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
     });
   });
 
-  it('accepts the exact live managed-origin capability and rejects cross-session/stale/missing claims', async () => {
+  it('accepts only the exact live capability bound to the URL session', async () => {
     const active = installRuntimeSession({ reasoningEffort: { mode: 'custom', value: 'high' } });
     setIpcAuthSecret(TEST_IPC_SECRET);
     handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
@@ -367,17 +383,72 @@ describe('POST /api/sessions/:sessionId/native-subagent-runtime', () => {
       policy: { reasoningEffort: { mode: 'custom', value: 'high' } },
     });
 
+    const crossSession = await post({ originCapability: CAPABILITY }, {}, OTHER_SESSION_ID);
+    expect(crossSession.status).toBe(403);
+    expect(await crossSession.json()).toEqual({ ok: false, error: 'origin_unproven' });
+
+    const otherAccepted = await post({ originCapability: OTHER_CAPABILITY }, {}, OTHER_SESSION_ID);
+    expect(otherAccepted.status).toBe(200);
+    expect(await otherAccepted.json()).toEqual({
+      ok: true,
+      policy: { model: { mode: 'custom', value: 'attacker-model' } },
+    });
+
     active.managedTurnOrigin = { capability: 'cd'.repeat(32), turnId: 'turn-new' };
     for (const body of [
       { originCapability: CAPABILITY },
       {},
-      { sessionId: 'some-other-session', originCapability: CAPABILITY },
     ]) {
       const denied = await post(body);
       expect(denied.status).toBe(403);
       expect(await denied.json()).toEqual({ ok: false, error: 'origin_unproven' });
     }
   });
+
+  it('rejects an oversized unauthenticated body before capability lookup', async () => {
+    installRuntimeSession({ model: { mode: 'custom', value: 'session-model' } });
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+
+    const res = await post({ padding: 'x'.repeat(3_000) });
+
+    expect(res.status).toBe(413);
+    expect(res.headers.get('connection')).toBe('close');
+    expect(await res.json()).toEqual({ ok: false, error: 'body_too_large' });
+  });
+
+  it('times out a slow partial unauthenticated body before capability lookup', async () => {
+    installRuntimeSession({ model: { mode: 'custom', value: 'session-model' } });
+    setIpcAuthSecret(TEST_IPC_SECRET);
+    handle = await startIpcServer({ port: 0, host: '127.0.0.1', authRequired: true });
+    const result = await new Promise<{
+      status: number;
+      headers: Record<string, string | string[] | undefined>;
+      body: string;
+    }>((resolve, reject) => {
+      const req = httpRequest({
+        host: '127.0.0.1',
+        port: handle!.port,
+        path: `/api/sessions/${SESSION_ID}/native-subagent-runtime`,
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+      }, res => {
+        const chunks: Buffer[] = [];
+        res.on('data', chunk => chunks.push(Buffer.from(chunk)));
+        res.on('end', () => resolve({
+          status: res.statusCode ?? 0,
+          headers: res.headers,
+          body: Buffer.concat(chunks).toString('utf8'),
+        }));
+      });
+      req.once('error', reject);
+      req.write('{"originCapability":"ab');
+    });
+
+    expect(result.status).toBe(408);
+    expect(result.headers.connection).toBe('close');
+    expect(JSON.parse(result.body)).toEqual({ ok: false, error: 'body_timeout' });
+  }, 5_000);
 
   it('fails open to an absent policy for missing or malformed persisted state', async () => {
     const active = installRuntimeSession();
