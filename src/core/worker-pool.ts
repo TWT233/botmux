@@ -2380,7 +2380,7 @@ export function continuePublishedStreamingCardPinChain(
 
 type ReconcileStreamingCardPinMode =
   | { enabled: true }
-  | { enabled: false; cleanupKnownIds?: boolean; authoritativeCleanupIds?: readonly string[] };
+  | { enabled: false };
 
 /** Reconcile one session after an opt-in setting transition.  Frozen cards are
  * session-wide here (Pins are chat-wide); recallFrozenCards remains topic-aware. */
@@ -2393,14 +2393,7 @@ export async function reconcileStreamingCardPins(
     ? { enabled: enabledOrMode }
     : enabledOrMode;
   const { enabled } = mode;
-  const ids = ownedStreamingCardIds(ds);
-  const cleanupIds = mode.enabled
-    ? ids
-    : mode.authoritativeCleanupIds !== undefined
-      ? [...new Set([...ids, ...mode.authoritativeCleanupIds.filter(isRealStreamingCardId)])]
-    : mode.cleanupKnownIds === true
-      ? [...new Set([...ids, ...snapshotStreamingCardIds(ds)])]
-      : ids;
+  const cleanupIds = ownedStreamingCardIds(ds);
   const currentId = isRealStreamingCardId(ds.streamCardId) ? ds.streamCardId : undefined;
   try {
     if (enabled) {
