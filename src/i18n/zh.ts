@@ -280,6 +280,7 @@ export const messages: Record<string, string> = {
   'cmd.card.on_ok': '🔔 已恢复本群流式卡片。下条状态起重新出实时卡。',
   'cmd.card.pin.off_ok': '📌 已关闭当前群的流式卡片置顶。实时卡仍会发送，但 botmux 不再在这里置顶它们。',
   'cmd.card.pin.on_ok': '📌 已恢复当前群的流式卡片置顶。',
+  'cmd.card.pin.on_master_off': '📌 已移除当前群的置顶关闭，但 bot 级流式卡片置顶总开关仍未开启。需要先执行 `/botconfig set pinStreamingCard on`，当前群才会实际置顶。',
   'cmd.card.pin.status_master_off': '📌 bot 级流式卡片置顶未开启。需要先打开 `pinStreamingCard`，当前群才会置顶。',
   'cmd.card.pin.status_chat_off': '📌 当前群已关闭流式卡片置顶。',
   'cmd.card.pin.status_on': '📌 当前群流式卡片置顶已开启。',

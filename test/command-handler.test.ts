@@ -6847,6 +6847,27 @@ describe('/card — operator / canOperate gate', () => {
     expect(setCardMode).not.toHaveBeenCalled();
   });
 
+  it('operator: /card pin on under master-off removes the chat override but replies with the master-off hint', async () => {
+    const deps = makeDeps();
+
+    vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => ({
+      botName: 'Claude',
+      config: {
+        larkAppId: id,
+        larkAppSecret: 's',
+        cliId: 'claude-code' as const,
+        pinStreamingCard: false,
+        noPinStreamingCardChats: [CHAT_ID],
+      },
+    })) as any);
+
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin on', deps);
+
+    expect(setChatStreamingCardPin).toHaveBeenCalledWith(LARK_APP_ID, CHAT_ID, true);
+    expect(setCardMode).not.toHaveBeenCalled();
+    expect(((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls.at(-1) ?? [])[1] as string).toContain('bot 级');
+  });
+
   it('operator: /card pin status distinguishes master off, chat opt-out, and effective on', async () => {
     const deps = makeDeps();
 

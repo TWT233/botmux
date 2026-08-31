@@ -1253,7 +1253,11 @@ export async function handleCardCommand(
   }
   if (sub === 'pin on') {
     const r = await setChatStreamingCardPin(larkAppId, chatId, true);
-    await reply(r.ok ? t('cmd.card.pin.on_ok', undefined, loc) : t('cmd.card.fail', { reason: r.reason }, loc));
+    await reply(r.ok
+      ? (botConfig.pinStreamingCard === true
+        ? t('cmd.card.pin.on_ok', undefined, loc)
+        : t('cmd.card.pin.on_master_off', undefined, loc))
+      : t('cmd.card.fail', { reason: r.reason }, loc));
     return;
   }
   if (sub === 'pin status') {

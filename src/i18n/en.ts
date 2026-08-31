@@ -279,6 +279,7 @@ export const messages: Record<string, string> = {
   'cmd.card.on_ok': '🔔 Streaming cards restored for this chat. The next status update posts a live card again.',
   'cmd.card.pin.off_ok': '📌 Streaming-card Pin turned off for this chat. Live cards still post, but botmux stops pinning them here.',
   'cmd.card.pin.on_ok': '📌 Streaming-card Pin restored for this chat.',
+  'cmd.card.pin.on_master_off': '📌 Removed this chat\'s Pin opt-out, but the bot-level Pin master switch is still off. Run `/botconfig set pinStreamingCard on` before this chat will pin streaming cards.',
   'cmd.card.pin.status_master_off': '📌 Streaming-card Pin is off at the bot level. Turn on `pinStreamingCard` first if you want this chat pinned.',
   'cmd.card.pin.status_chat_off': '📌 Streaming-card Pin is opted out for the current chat.',
   'cmd.card.pin.status_on': '📌 Streaming-card Pin is enabled for this chat.',

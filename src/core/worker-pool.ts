@@ -2380,7 +2380,7 @@ export function continuePublishedStreamingCardPinChain(
 
 type ReconcileStreamingCardPinMode =
   | { enabled: true }
-  | { enabled: false; cleanupKnownIds?: boolean };
+  | { enabled: false; cleanupKnownIds?: boolean; authoritativeCleanupIds?: readonly string[] };
 
 /** Reconcile one session after an opt-in setting transition.  Frozen cards are
  * session-wide here (Pins are chat-wide); recallFrozenCards remains topic-aware. */
@@ -2396,6 +2396,8 @@ export async function reconcileStreamingCardPins(
   const ids = ownedStreamingCardIds(ds);
   const cleanupIds = mode.enabled
     ? ids
+    : mode.authoritativeCleanupIds !== undefined
+      ? [...new Set([...ids, ...mode.authoritativeCleanupIds.filter(isRealStreamingCardId)])]
     : mode.cleanupKnownIds === true
       ? [...new Set([...ids, ...snapshotStreamingCardIds(ds)])]
       : ids;
@@ -2418,7 +2420,7 @@ export async function reconcileStreamingCardPins(
 type PendingBotStreamingCardReconcileRequest = {
   enabled: boolean;
   chatId?: string;
-  authoritativeCleanupSessionIds: Set<string>;
+  authoritativeCleanupIdsBySession: Map<string, string[]>;
 };
 
 type PendingBotStreamingCardReconcile = {
@@ -2451,7 +2453,7 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
     while (true) {
       const request = state.pending.shift();
       if (!request) break;
-      const { enabled, chatId, authoritativeCleanupSessionIds } = request;
+      const { enabled, chatId, authoritativeCleanupIdsBySession } = request;
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
       const targetSessions = chatId === undefined
         ? sessions
@@ -2462,12 +2464,13 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
           batch.map(async (ds) => {
             try {
               const effectiveEnabled = enabled && pinStreamingCardEnabledFor(ds.larkAppId, ds.chatId);
-              const cleanupKnownIds = !effectiveEnabled
-                && authoritativeCleanupSessionIds.has(ds.session.sessionId);
+              const authoritativeCleanupIds = !effectiveEnabled
+                ? authoritativeCleanupIdsBySession.get(ds.session.sessionId)
+                : undefined;
               await reconcileStreamingCardPins(
                 ds,
-                effectiveEnabled ? { enabled: true } : cleanupKnownIds
-                  ? { enabled: false, cleanupKnownIds: true }
+                effectiveEnabled ? { enabled: true } : authoritativeCleanupIds !== undefined
+                  ? { enabled: false, authoritativeCleanupIds }
                   : { enabled: false },
               );
             } catch {
@@ -2489,30 +2492,30 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
   }
 }
 
-function snapshotAuthoritativeCleanupSessionIdsForChat(
+function snapshotAuthoritativeCleanupIdsForChat(
   larkAppId: string,
   chatId: string,
-): Set<string> {
-  return new Set(
+): Map<string, string[]> {
+  return new Map(
     snapshotBotStreamingCardReconcileSessions(larkAppId)
       .filter(ds => ds.chatId === chatId)
-      .map(ds => ds.session.sessionId),
+      .map(ds => [ds.session.sessionId, snapshotStreamingCardIds(ds)]),
   );
 }
 
-function snapshotAuthoritativeCleanupSessionIdsForBotWideOff(
+function snapshotAuthoritativeCleanupIdsForBotWideOff(
   larkAppId: string,
-): Set<string> {
+): Map<string, string[]> {
   let disabledChats: string[] | undefined;
   try {
     disabledChats = getBot(larkAppId).config.noPinStreamingCardChats;
   } catch {
     disabledChats = undefined;
   }
-  return new Set(
+  return new Map(
     snapshotBotStreamingCardReconcileSessions(larkAppId)
       .filter(ds => !disabledChats?.includes(ds.chatId))
-      .map(ds => ds.session.sessionId),
+      .map(ds => [ds.session.sessionId, snapshotStreamingCardIds(ds)]),
   );
 }
 
@@ -2525,17 +2528,17 @@ export function reconcileBotStreamingCardPins(
   chatEnabled?: boolean,
 ): void {
   const state = pendingBotStreamingCardReconciles.get(larkAppId);
-  const authoritativeCleanupSessionIds = chatId !== undefined
+  const authoritativeCleanupIdsBySession = chatId !== undefined
     ? chatEnabled === false
-      ? snapshotAuthoritativeCleanupSessionIdsForChat(larkAppId, chatId)
-      : new Set<string>()
+      ? snapshotAuthoritativeCleanupIdsForChat(larkAppId, chatId)
+      : new Map<string, string[]>()
     : enabled === false
-      ? snapshotAuthoritativeCleanupSessionIdsForBotWideOff(larkAppId)
-      : new Set<string>();
+      ? snapshotAuthoritativeCleanupIdsForBotWideOff(larkAppId)
+      : new Map<string, string[]>();
   const request: PendingBotStreamingCardReconcileRequest = {
     enabled,
     chatId,
-    authoritativeCleanupSessionIds,
+    authoritativeCleanupIdsBySession,
   };
   if (state) {
     state.pending.push(request);

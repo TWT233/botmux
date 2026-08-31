@@ -742,4 +742,66 @@ describe('streaming-card pin policy', () => {
     ]);
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_chat_new');
   });
+
+  it('chat-off queued cleanup snapshots exact transition-time ids, not a later replacement current card on the same session', async () => {
+    const leading = Array.from({ length: 20 }, (_, index) =>
+      withChat(
+        makeDs(`om_leading_${index}`, undefined, `pin-leading-${index}`, `om_root_leading_${index}`),
+        'oc_target_shared',
+      ));
+    const target = withChat(
+      makeDs(
+        'om_target_old',
+        new Map<string, FrozenCard>([['frozen', { messageId: 'om_target_frozen', content: '', title: '', displayMode: 'hidden' }]]),
+        'pin-target-shared',
+        'om_root_target_shared',
+      ),
+      'oc_target_shared',
+    );
+    setActiveSessionsRegistry(new Map([
+      ...leading.map(ds => [activeSessionKey(ds), ds] as const),
+      [activeSessionKey(target), target] as const,
+    ]));
+
+    let disabledChats: string[] | undefined;
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        noPinStreamingCardChats: disabledChats,
+      },
+    }) as any);
+
+    await expect(pinStreamingCardIfEnabled(leading[0]!, 'om_leading_0')).resolves.toBe(true);
+    await expect(pinStreamingCardIfEnabled(target, 'om_target_old')).resolves.toBe(true);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
+
+    const firstBatchStarted = deferred<void>();
+    const releaseFirstBatch = deferred<boolean>();
+    unpinMessageMock.mockImplementation((appId: string, messageId: string) => {
+      if (appId === 'app-pin' && messageId === 'om_leading_0') {
+        firstBatchStarted.resolve();
+        return releaseFirstBatch.promise;
+      }
+      return Promise.resolve(true);
+    });
+
+    disabledChats = ['oc_target_shared'];
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_target_shared', false);
+    await firstBatchStarted.promise;
+
+    target.streamCardId = 'om_target_new_manual';
+    await drainMicrotasks(1);
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_target_old');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_target_new_manual');
+
+    releaseFirstBatch.resolve(true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_target_old');
+    expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_target_frozen');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_target_new_manual');
+  });
 });
