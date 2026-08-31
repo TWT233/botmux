@@ -309,6 +309,21 @@ describe('Codex-compatible runtime editor', () => {
     expect(trae.root.findAllByProps({ 'data-native-subagent-runtime': '' })).toHaveLength(0);
   });
 
+  it('limits a custom native-subagent DeepSeek model to its supported effort options', () => {
+    const { root } = renderAgent({
+      cliId: 'traex',
+      agentSelectionKey: 'traex',
+      nativeSubagentRuntime: {
+        model: { mode: 'custom', value: 'DeepSeek-V4-Pro' },
+        reasoningEffort: { mode: 'custom', value: 'high' },
+      },
+    });
+    const effort = root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' });
+    expect(effort.props.value).toBe('high');
+    expect(effort.props.options.map((option: { value: string }) => option.value))
+      .toEqual(['low', 'medium', 'high']);
+  });
+
   it('omits untouched native-subagent policy and sends null when both dimensions become pass-through', async () => {
     const previousFetch = globalThis.fetch;
     const requests: any[] = [];
