@@ -25,6 +25,19 @@ const owner = (turnId: string, dispatchAttempt?: number) => ({
 });
 
 describe('CodexRpcEngine — happy-path lifecycle against a fake app-server', () => {
+  it('passes generic process config only to the model-owning app-server', async () => {
+    const engine = makeEngine({
+      appServerConfig: ['hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]'],
+    });
+    await engine.start();
+    const pid = engine.appServerPid;
+    expect(pid).toBeTypeOf('number');
+    const argv = readFileSync(`/proc/${pid}/cmdline`, 'utf8').split('\0').filter(Boolean);
+    engine.stop();
+    expect(argv).toContain('-c');
+    expect(argv).toContain('hooks.PreToolUse=[{matcher="spawn_agent",hooks=[]}]');
+  }, 20_000);
+
   it('start (spawn → /readyz → connect → initialize) then startThread → sendTurn → stop', async () => {
     const engine = makeEngine();
     await engine.start();
