@@ -127,6 +127,33 @@ describe('pin-streaming-card mode store', () => {
     dispose();
   });
 
+  it('persists and syncs per-chat off/on mutations under master-off without notifying reconciliation', async () => {
+    const { registry, store, change } = await loaded([
+      {
+        larkAppId: 'app-one',
+        larkAppSecret: 'secret',
+        cliId: 'claude-code',
+        pinStreamingCard: false,
+      },
+    ]);
+    const calls: Array<[string, boolean, string | undefined, boolean | undefined]> = [];
+    const dispose = change.registerPinStreamingCardChangeHandler((appId, masterEnabled, chatId, enabled) => {
+      calls.push([appId, masterEnabled, chatId, enabled]);
+    });
+
+    await expect(store.setChatStreamingCardPin('app-one', 'oc_chat_a', false)).resolves.toEqual({ ok: true, changed: true });
+    expect(readConfig()[0].noPinStreamingCardChats).toEqual(['oc_chat_a']);
+    expect(registry.getBot('app-one').config.noPinStreamingCardChats).toEqual(['oc_chat_a']);
+    expect(calls).toEqual([]);
+
+    await expect(store.setChatStreamingCardPin('app-one', 'oc_chat_a', true)).resolves.toEqual({ ok: true, changed: true });
+    expect('noPinStreamingCardChats' in readConfig()[0]).toBe(false);
+    expect(registry.getBot('app-one').config.noPinStreamingCardChats).toBeUndefined();
+    expect(calls).toEqual([]);
+
+    dispose();
+  });
+
   it('keeps apps isolated so one bot write does not touch another bot', async () => {
     const { registry, store } = await loaded([
       {

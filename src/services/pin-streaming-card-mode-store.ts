@@ -28,6 +28,8 @@ export async function setChatStreamingCardPin(
   return serializePinStreamingCardConfigChange(larkAppId, async () => {
     const previous = normalizeChatList(bot.config.noPinStreamingCardChats);
     const hadDisabledChat = previous.includes(chatId);
+    const masterEnabled = bot.config.pinStreamingCard === true;
+    const previousEffectiveEnabled = masterEnabled && !hadDisabledChat;
 
     const result = await rmwBotEntry<{ changed: boolean; nextDisabledChats: string[] }>(larkAppId, (entry) => {
       const current = normalizeChatList(entry.noPinStreamingCardChats);
@@ -49,8 +51,9 @@ export async function setChatStreamingCardPin(
       : undefined;
 
     const nextDisabledChat = bot.config.noPinStreamingCardChats?.includes(chatId) === true;
-    if (hadDisabledChat !== nextDisabledChat) {
-      notifyPinStreamingCardChanged(larkAppId, bot.config.pinStreamingCard === true, chatId, !nextDisabledChat);
+    const nextEffectiveEnabled = masterEnabled && !nextDisabledChat;
+    if (previousEffectiveEnabled !== nextEffectiveEnabled) {
+      notifyPinStreamingCardChanged(larkAppId, masterEnabled, chatId, nextEffectiveEnabled);
     }
 
     logger.info(

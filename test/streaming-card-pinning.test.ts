@@ -484,4 +484,101 @@ describe('streaming-card pin policy', () => {
     expect(pinMessageMock.mock.calls.map(c => c[1])).toContain('om_chat_one');
     expect(pinMessageMock.mock.calls.map(c => c[1])).toContain('om_chat_two');
   });
+
+  it('preserves authoritative cleanup for each deferred chat-scope effective on-to-off while coalescing later chat requests', async () => {
+    const first = makeDs('om_chat_one', undefined, 'pin-session-1', 'om_root_1');
+    const second = {
+      ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2'),
+      chatId: 'oc_chat_2',
+      session: { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2').session, chatId: 'oc_chat_2' },
+    } as DaemonSession;
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(first), first],
+      [activeSessionKey(second), second],
+    ]));
+    await expect(pinStreamingCardIfEnabled(first, 'om_chat_one')).resolves.toBe(true);
+    await expect(pinStreamingCardIfEnabled(second, 'om_chat_two')).resolves.toBe(true);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
+
+    let disabledChats: string[] = ['oc_chat'];
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        noPinStreamingCardChats: disabledChats,
+      },
+    }) as any);
+
+    const releaseFirstUnpin = deferred<boolean>();
+    const firstUnpinStarted = deferred<void>();
+    unpinMessageMock.mockImplementation((appId: string, messageId: string) => {
+      if (appId === 'app-pin' && messageId === 'om_chat_one') {
+        firstUnpinStarted.resolve();
+        return releaseFirstUnpin.promise;
+      }
+      return Promise.resolve(true);
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_chat');
+    await firstUnpinStarted.promise;
+
+    disabledChats = ['oc_chat', 'oc_chat_2'];
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_chat_2');
+    await drainMicrotasks(1);
+    expect(unpinMessageMock.mock.calls.map(c => c[1])).toEqual(['om_chat_one']);
+
+    releaseFirstUnpin.resolve(true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
+      ['app-pin', 'om_chat_one'],
+      ['app-pin', 'om_chat_two'],
+    ]);
+    expect(pinMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('does not grant broad cleanup to chats already effectively off across global off/on with existing opt-outs', async () => {
+    const first = makeDs('om_chat_one', undefined, 'pin-session-1', 'om_root_1');
+    const second = {
+      ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2'),
+      chatId: 'oc_chat_2',
+      session: { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2').session, chatId: 'oc_chat_2' },
+    } as DaemonSession;
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(first), first],
+      [activeSessionKey(second), second],
+    ]));
+    await expect(pinStreamingCardIfEnabled(first, 'om_chat_one')).resolves.toBe(true);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
+
+    const desiredStates: Array<{ master: boolean; disabledChats?: string[] }> = [
+      { master: false, disabledChats: ['oc_chat_2'] },
+      { master: true, disabledChats: ['oc_chat_2'] },
+    ];
+    let index = 0;
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: desiredStates[index]?.master === true,
+        noPinStreamingCardChats: desiredStates[index]?.disabledChats,
+      },
+    }) as any);
+
+    reconcileBotStreamingCardPins('app-pin', false);
+    index = 1;
+    reconcileBotStreamingCardPins('app-pin', true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
+      ['app-pin', 'om_chat_one'],
+    ]);
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_chat_two');
+    expect(pinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
+      ['app-pin', 'om_chat_one'],
+    ]);
+  });
 });
