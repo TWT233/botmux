@@ -2212,6 +2212,7 @@ export function registerBot(cfg: BotConfig): BotState {
         : normalizedRuntime.value
           ? { status: 'valid', policy: normalizedRuntime.value }
           : { status: 'absent' };
+  parsedNativeSubagentRuntimeStatus.set(cfg, nativeSubagentRuntimeState.status);
   cfg.nativeSubagentRuntime = nativeSubagentRuntimeState.status === 'valid'
     ? nativeSubagentRuntimeState.policy
     : undefined;
