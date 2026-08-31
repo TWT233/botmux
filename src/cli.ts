@@ -11797,19 +11797,7 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           bootInstanceId: responseBinding.bootInstanceId,
           signature: response.headers.get(NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature),
         })
-      : verifyNativeSubagentRuntimeResponse({
-          key: policyClaim!.policyCapability,
-          requestNonce: responseBinding.requestNonce,
-          method: responseBinding.method,
-          path: responseBinding.path,
-          port: responseBinding.port,
-          status: responseBinding.status,
-          body: responseBinding.raw,
-          sessionId: responseBinding.sessionId,
-          larkAppId: responseBinding.larkAppId,
-          bootInstanceId: responseBinding.bootInstanceId,
-          signature: response.headers.get(NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature),
-        });
+      : false;
     const proofAuthenticated = !hostSecret && policyClaim?.channelId
       ? readNativeSubagentRuntimeResponseProof({
           dataDir: resolveDataDir(),
@@ -11821,7 +11809,7 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
           },
         })
       : false;
-    if (hostSecret ? !responseAuthenticated : (!responseAuthenticated && !proofAuthenticated)) {
+    if (hostSecret ? !responseAuthenticated : !proofAuthenticated) {
       nativeSubagentDiagnostic('daemon response authentication failed; allowing spawn');
       return;
     }
