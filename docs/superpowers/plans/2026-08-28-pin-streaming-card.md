@@ -2,24 +2,33 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an opt-in, per-bot `pinStreamingCard` setting that keeps the current real `streamCardId` pinned and removes known streaming-card Pins when the card is replaced, transferred, or the session closes, without letting Pin failures affect session behavior.
+**Goal:** Add an opt-in, per-bot `pinStreamingCard` setting with a per-chat opt-out that keeps the current real `streamCardId` pinned and removes known streaming-card Pins when the card is replaced, transferred, or the session closes, without letting Pin failures affect session behavior.
 
-**Architecture:** Keep `streamCardId` and the existing durable `frozenCards` sidecar as the only card identities; do not add a Pin journal or inspect arbitrary card JSON. Add small Lark Pin/Unpin primitives, centralize best-effort policy and race checks in `worker-pool.ts`, and reuse the existing per-bot card-preference and `/botconfig` pipelines. A post-config-write callback reconciles already-active sessions without delaying the configuration response.
+**Architecture:** Keep `streamCardId` and the existing durable `frozenCards` sidecar as the only card identities; do not add a Pin journal or inspect arbitrary card JSON. Add small Lark Pin/Unpin primitives, centralize best-effort policy and race checks in `worker-pool.ts`, and reuse the existing per-bot card-preference, `/botconfig`, and `/card` command pipelines. The effective policy is the bot-level master switch AND a per-chat negative override, and post-config-write callbacks reconcile already-active sessions without delaying the configuration response.
 
 **Tech Stack:** TypeScript, Bun 1.4.0-compatible source, `@larksuiteoapi/node-sdk` 1.73.0 API surface, React 19 Dashboard, Vitest.
 
 ## Global Constraints
 
 - `pinStreamingCard` is per bot and default-off; only literal `true` enables it.
+- `noPinStreamingCardChats` is a per-bot list of chat IDs. A listed chat keeps
+  streaming cards but suppresses automatic Pin; it never force-enables a bot
+  whose master switch is off.
 - Only real `streamCardId` values participate. Never Pin `repoCardMessageId`, private `/card` snapshots, final replies, CoT messages, closed cards, or other interactive messages.
 - Pin/Unpin is QoL and fail-open: no Pin API outcome may change card publication, session mutation, transfer, resume, close, or configuration results.
 - Desired steady state is one Pin for the current `streamCardId` of each active session; API failures may temporarily produce zero or multiple Pins.
-- Pin a successor only after its publication ownership fence and durable `streamCardId` commit; Unpin predecessor IDs only after successor Pin success.
+- Start Pin only after the publication fence and durable `streamCardId` commit.
+  Explicit predecessor Unpin remains conditional on successor Pin success, but
+  the primary publication/recall path never waits for Pin; Feishu removes the
+  Pin automatically when a recalled predecessor is deleted.
 - Close refusal/durable-close failure leaves Pins unchanged. Successful close, including `closed_with_residual`, starts best-effort cleanup.
 - Keep destination-sensitive `recallFrozenCards` semantics unchanged; Unpin selection is session-wide because Feishu Pins are chat-wide.
 - No `bun install` in a worktree. Before tests, link this worktree's `node_modules` to the canonical checkout only if dependency manifests match exactly.
 - Every implementation unit ends in focused tests, full unit tests, `bun run build`, an independent commit, and a push to `fork/feat/pin-streaming-card`.
 - The merge request is written in Chinese and explicitly asks whether the setting should become default-on in a future release.
+- The post-review per-chat command ships in this PR. Its Dashboard Group Manage
+  editor is a follow-up because that requires a separate UI/API/aggregation
+  change across the dashboard stack.
 
 ---
 
@@ -556,7 +565,15 @@ screen_update fallback POST
 card-button resume repost
 ```
 
-For each fresh POST, assert `POST → commit/persist → Pin(new) → Unpin(frozen) → existing recall`. Add deferred POST/Pin cases proving a closed, transferred, retired, registry-replaced, or newer-card session deletes the stale result, never Pins it, and never overwrites its successor. Assert Pin false/rejection keeps the new `streamCardId`, preserves the path's success result, and does not suppress existing recall. Default-off must produce zero Pin/Unpin calls. Persisted-card reuse must perform idempotent reconciliation without posting a new card.
+For each fresh POST, assert `POST → commit/persist`, then that the detached
+`Pin(new) → Unpin(frozen)` chain starts without delaying existing recall or
+successor scheduling. Add deferred POST/Pin cases proving a closed, transferred,
+retired, registry-replaced, or newer-card session deletes the stale result,
+never Pins it, and never overwrites its successor. Assert Pin false/rejection
+keeps the new `streamCardId`, preserves the path's success result, and does not
+suppress existing recall. Default-off must produce zero Pin/Unpin calls.
+Persisted-card reuse must perform idempotent reconciliation without posting a
+new card.
 
 - [ ] **Step 2: Run the focused suites and verify RED**
 
@@ -570,17 +587,21 @@ Expected: new ordering/call assertions fail.
 
 - [ ] **Step 3: Wire the existing fully fenced turn-start path**
 
-In `postTurnStartingCard`, after the real message ID is committed and persisted, await `pinStreamingCardIfEnabled(ds, messageId)`. If it returns true, run best-effort session-wide frozen Unpin. Then call the unchanged `recallFrozenCards(ds)` regardless of Pin outcome. Preserve existing pending-generation scheduling.
+In `postTurnStartingCard`, after the real message ID is committed and persisted,
+start `continuePublishedStreamingCardPinChain(ds, messageId, predecessorIds)`
+without awaiting it. Continue the unchanged `recallFrozenCards(ds)` and
+pending-generation scheduling immediately. The helper Pins the successor and
+only then explicitly Unpins captured predecessors.
 
 - [ ] **Step 4: Add missing publication fences before adding Pin side effects**
 
-For `postFreshStreamingCard`, worker-ready fresh POST, and screen-update fresh POST, capture the session object, app ID, anchor/registry key, nonce/generation and prior identity before awaiting. After POST, require the same active route owner, non-transfer/non-retirement state and sentinel/nonce ownership before committing. Delete stale results and restore prior identity only when that invocation still owns the sentinel. Then persist, Pin, conditionally Unpin frozen IDs, and run normal recall.
+For `postFreshStreamingCard`, worker-ready fresh POST, and screen-update fresh POST, capture the session object, app ID, anchor/registry key, nonce/generation and prior identity before awaiting. After POST, require the same active route owner, non-transfer/non-retirement state and sentinel/nonce ownership before committing. Delete stale results and restore prior identity only when that invocation still owns the sentinel. Then persist, start the detached conditional Pin/Unpin chain, and continue normal recall and scheduling without awaiting Pin.
 
 For worker-ready persisted-card reuse, recheck ownership after PATCH, then reconcile the existing ID before recall.
 
 - [ ] **Step 5: Fence and wire the resume-button repost**
 
-In `card-handler.ts`, capture the resumed session object, app ID, route key and current-card identity before POST. After POST, recheck active status, registry ownership, route/transfer state and unchanged prior card identity before assigning the returned ID. Delete stale results with no Pin. For a valid result, persist it, invoke `pinStreamingCardIfEnabled`, then keep the existing best-effort deletion of the clicked closed card and delivery of the resume receipt. Pin failure must not change resume success or suppress deletion/receipt.
+In `card-handler.ts`, capture the resumed session object, app ID, route key and current-card identity before POST. After POST, recheck active status, registry ownership, route/transfer state and unchanged prior card identity before assigning the returned ID. Delete stale results with no Pin. For a valid result, persist it, start `continuePublishedStreamingCardPinChain` without awaiting it, then keep the existing best-effort deletion of the clicked closed card and delivery of the resume receipt. Pin failure or latency must not change resume success or suppress deletion/receipt.
 
 - [ ] **Step 6: Verify the publication and resume matrix**
 
@@ -918,7 +939,150 @@ The Chinese body must include: what changed, why, affected platforms/CLIs/sessio
 
 > 是否应在观察 API 流量与失败率后，将 `pinStreamingCard` 改为默认开启？本 MR 为保持兼容性，刻意采用按 Bot 显式开启、默认关闭。
 
-- [ ] **Step 6: Verify remote state**
+---
+
+### Task 9: Add the per-chat Pin opt-out
+
+**Files:**
+- Modify: `src/bot-registry.ts`
+- Create: `src/services/pin-streaming-card-mode-store.ts`
+- Modify: `src/services/pin-streaming-card-change.ts`
+- Modify: `src/core/worker-pool.ts`
+- Modify: `src/core/command-handler.ts`
+- Modify: `src/i18n/en.ts`
+- Modify: `src/i18n/zh.ts`
+- Modify: `docs-site/docs/en/cards.md`
+- Modify: `docs-site/docs/zh/cards.md`
+- Modify: `docs-site/docs/en/bots-json.md`
+- Modify: `docs-site/docs/zh/bots-json.md`
+- Test: `test/bot-registry-grant.test.ts`
+- Create: `test/pin-streaming-card-mode-store.test.ts`
+- Modify: `test/pin-streaming-card-change.test.ts`
+- Modify: `test/streaming-card-pinning.test.ts`
+- Modify: `test/command-handler.test.ts`
+
+**Interfaces:**
+- Consumes: the bot-level `pinStreamingCard` master, per-bot mutation
+  serialization, active-session registry, and Pin reconciliation helpers
+- Produces: `BotConfig.noPinStreamingCardChats?: string[]`,
+  `setChatStreamingCardPin(larkAppId, chatId, enabled)`, and
+  `/card pin off|on|status`
+
+- [ ] **Step 1: Write and run failing config/store tests**
+
+Cover strict trimmed/deduplicated normalization; absent/all-invalid input;
+off adding a chat ID; on removing it and deleting the empty top-level key;
+idempotent writes; disk/live-memory synchronization; and cross-app isolation.
+
+Run:
+
+```bash
+mise exec bun@1.4.0 -- bun run test -- \
+  test/bot-registry-grant.test.ts test/pin-streaming-card-mode-store.test.ts
+```
+
+Expected: RED because the field and store do not exist.
+
+- [ ] **Step 2: Implement the negative-set store**
+
+Add `noPinStreamingCardChats?: string[]` beside `noCardChats` / `noCotChats`,
+normalize it in `parseBotConfigsFromText`, and implement:
+
+```ts
+export async function setChatStreamingCardPin(
+  larkAppId: string,
+  chatId: string,
+  enabled: boolean,
+): Promise<{ ok: true; changed: boolean } | { ok: false; reason: string }>;
+```
+
+Run the whole disk mutation through
+`serializePinStreamingCardConfigChange(larkAppId, ...)`, use `rmwBotEntry`,
+update the live registry only after success, delete an empty list, and notify
+only when the effective chat policy changes. Verify GREEN.
+
+- [ ] **Step 3: Write and run failing policy/reconciliation tests**
+
+Cover global on + chat off zero Pin, another chat remaining enabled, immediate
+chat opt-out cleanup, opt-in under global on, opt-in under global off, failed
+Unpin provenance retention, no-transport zero-call behavior, and rapid mixed
+bot/chat writes converging in order.
+
+Expected: RED because policy reads only the bot-level flag and the current
+queue carries one bot-wide boolean.
+
+- [ ] **Step 4: Make policy and one per-bot queue chat-aware**
+
+Resolve the effective policy from `(larkAppId, chatId)` at every pre/post Pin
+check and lifecycle cleanup-capture decision. Keep one queue per `larkAppId`;
+enqueue ordered bot-wide or chat-scoped reconcile requests carrying whether the
+specific transition has authoritative cleanup permission. Process active
+sessions in batches of at most 20 and recompute each session's effective state
+from live config. Keep all reconciliation fire-and-forget and fail-open. Verify
+GREEN.
+
+- [ ] **Step 5: Write and run failing command tests**
+
+Cover the existing operator gate plus `/card pin status`, `/card pin off`, and
+`/card pin on`; verify these work without a live session, do not call
+`setCardMode`, and never mutate `streamingCardForced`.
+
+- [ ] **Step 6: Implement the `/card pin` command and bilingual copy**
+
+Parse the nested Pin subcommands before the existing `/card off|on|show` cases.
+Use the shared store and report master-off, chat-opted-out, and effective-on
+states distinctly. Keep the current `/card` command token and routing tables
+unchanged. Verify GREEN.
+
+- [ ] **Step 7: Document, verify, commit, and push**
+
+Document that Pin is chat-wide; each active session remains independently
+pinned; same-chat topics/bots therefore add multiple group-level entries; and
+`/card pin off` is the escape hatch for a noisy chat while retaining live
+cards. Add `noPinStreamingCardChats` to both `bots-json.md` references. Run:
+
+```bash
+mise exec bun@1.4.0 -- bun run test -- \
+  test/bot-registry-grant.test.ts test/pin-streaming-card-mode-store.test.ts \
+  test/pin-streaming-card-change.test.ts test/streaming-card-pinning.test.ts \
+  test/command-handler.test.ts
+mise exec bun@1.4.0 -- bun run build
+git diff --check
+```
+
+Then commit and push as one independently reviewable per-chat unit.
+
+### Follow-up: Dashboard Group Manage control
+
+Do not implement this in PR #1067. Track a follow-up that adds the effective
+Pin state to group-member aggregation, daemon/public Dashboard mutation routes,
+and a localized toggle in the Group Manage dialog. It spans at least
+`dashboard-ipc-server.ts`, `dashboard.ts`, `groups-action-helpers.ts`,
+`groups-api.ts`, `groups-page.tsx`, and Dashboard tests, so it should be
+reviewed independently from the lifecycle feature.
+
+### Follow-up: restart-safe Pin provenance
+
+Add a paginated `GET /im/v1/pins` wrapper and recover only entries whose
+`operator_id_type === 'app_id'` and `operator_id` equals the current bot app ID.
+Never infer ownership from message authorship, because one bot can Pin or Unpin
+another bot's messages.
+
+---
+
+### Task 10: Final verification after post-review changes
+
+- [ ] **Step 1: Run fresh full verification**
+
+Run the focused per-chat matrix from Task 9, then:
+
+```bash
+mise exec bun@1.4.0 -- bun run test
+mise exec bun@1.4.0 -- bun run build
+git diff --check origin/master...HEAD
+```
+
+- [ ] **Step 2: Verify remote state**
 
 Run:
 

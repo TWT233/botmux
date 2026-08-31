@@ -1,4 +1,4 @@
-# Per-Bot Streaming Card Pinning Design
+# Per-Bot Streaming Card Pinning With Per-Chat Opt-Out
 
 ## Context
 
@@ -22,6 +22,9 @@ resuming, or closing a session.
 
 - Add a per-bot setting named `pinStreamingCard`.
 - The setting defaults to `false`; only an explicit `true` enables it.
+- Add a per-chat negative override named `noPinStreamingCardChats`. A chat in
+  this list keeps its live card but suppresses automatic Pin. It cannot force
+  Pin on while the bot-level master switch is off.
 - When enabled, the desired steady state for each active session that has a real
   `streamCardId` is exactly one pinned card: that current `streamCardId`.
 - A session without a real `streamCardId` is outside this feature's scope. In
@@ -73,6 +76,24 @@ boolean actually changes:
 
 The configuration write succeeds even if any reconciliation request fails.
 
+`noPinStreamingCardChats?: string[]` stores chat IDs whose operators disabled
+automatic Pin with `/card pin off`. `/card pin on` removes the current chat
+from the list, and an empty result removes the top-level key. `/card pin status`
+reports the effective state. These commands reuse `/card`'s existing
+`canOperate` gate and work without a live session. They never change
+`noCardChats`, so the live card remains visible. The effective policy is:
+
+```ts
+bot.config.pinStreamingCard === true
+  && !bot.config.noPinStreamingCardChats?.includes(chatId)
+```
+
+A per-chat effective on → off transition immediately starts best-effort cleanup
+for known current/frozen streaming-card IDs in that chat. Off → on immediately
+reconciles active sessions in the chat when the bot-level master switch is on.
+Bot-level and per-chat writes share one per-bot serializer and one ordered
+reconciliation queue, so rapid mixed writes converge in mutation order.
+
 ## Components and interfaces
 
 ### Lark transport
@@ -117,8 +138,10 @@ reconcileStreamingCardPins(
   enabled: boolean,
 ): Promise<void>
 
-reconcileBotStreamingCardPins(
+reconcileBotStreamingCardPins(larkAppId: string, enabled: boolean): void
+reconcileChatStreamingCardPins(
   larkAppId: string,
+  chatId: string,
   enabled: boolean,
 ): void
 ```
@@ -150,10 +173,14 @@ this design's approved no-journal/no-audit caveat; only the explicit on → off
 toggle is authoritative for cleaning known current/frozen IDs after provenance
 loss.
 
-`reconcileBotStreamingCardPins` snapshots active sessions for the target bot and
-launches reconciliation with per-session error isolation. It is deliberately
+`reconcileBotStreamingCardPins` snapshots active sessions for the target bot;
+`reconcileChatStreamingCardPins` limits that snapshot to the target chat. Both
+enqueue ordered reconciliation work with per-session error isolation and a
+maximum of 20 concurrent sessions per batch. They are deliberately
 fire-and-forget from configuration handlers so Feishu latency cannot delay a
-Dashboard or `/botconfig` response.
+Dashboard, `/botconfig`, or `/card pin` response. Each queued change carries
+whether it represents an authoritative effective on → off transition, because
+only such a transition may clean known IDs after process-local provenance loss.
 
 The config stores notify a small registered callback only after the local disk
 and in-memory update succeeds and only when the effective boolean actually
@@ -187,11 +214,12 @@ For a newly posted card, the ordering is:
 2. Re-run the existing ownership, generation, transfer, retirement, and active
    session fences. A stale/orphan result is deleted without any Pin call.
 3. Commit and persist the returned message ID as the current `streamCardId`.
-4. Attempt to Pin that captured message ID.
-5. If Pin succeeds, best-effort Unpin every known prior streaming-card ID in
-   `frozenCards`.
-6. Run the existing destination-sensitive `recallFrozenCards` behavior. Recall
-   is not delayed or failed when Pin or Unpin fails.
+4. Start the best-effort Pin(new) → Unpin(known predecessors) chain without
+   awaiting it from the publication path.
+5. Continue the existing destination-sensitive `recallFrozenCards` and other
+   publication effects immediately. Feishu automatically removes the Pin when
+   a recalled message is deleted, so this ordering cannot leave a permanent Pin
+   solely because recall completed before the detached Pin chain.
 
 All asynchronous completions use captured message IDs and must not reread a
 mutable `streamCardId` before performing an Unpin. This prevents an older turn's
@@ -284,6 +312,25 @@ has already been forgotten, later close/transfer cleanup may still miss that
 stale Pin. This is acceptable for the approved QoL/fail-open scope and must be
 called out in the merge request.
 
+## Post-review per-chat unit
+
+The per-chat override is one additional independently reviewable unit after the
+core feature and maintainer hardening commits:
+
+- Configuration and command: normalize/persist `noPinStreamingCardChats`, add a
+  focused store, and expose `/card pin off|on|status`.
+- Policy and hot reconciliation: make every Pin eligibility check chat-aware and
+  serialize bot-wide and chat-wide policy changes through the same per-bot queue.
+- Documentation and tests: cover effective precedence, immediate cleanup/re-Pin,
+  cross-chat isolation, rapid mixed writes, and the fail-open response boundary.
+
+Dashboard support was evaluated separately. It is a medium-complexity full-stack
+addition spanning Group Manage UI types/state, public Dashboard routes, daemon
+IPC, aggregation, localization, and UI/API tests. The chat command provides a
+complete operator escape hatch in this PR; the Dashboard surface is intentionally
+deferred to a follow-up PR so this already-reviewed lifecycle change does not
+expand into a second UI/API feature.
+
 ## Development units
 
 ### Unit 1: Configuration contract and operator surfaces
@@ -347,6 +394,10 @@ Automated verification must include:
   removed;
 - tests proving Pin/Unpin errors do not alter the primary return value or card
   identity;
+- per-chat tests proving a chat opt-out leaves its live card intact, cleans only
+  that chat's known Pins, and does not affect another chat;
+- mixed bot/chat hot-toggle tests proving the ordered queue converges to the
+  latest effective policy;
 - the full unit suite and `bun run build`.
 
 Live acceptance on a test bot with the setting enabled covers:
@@ -358,6 +409,8 @@ Live acceptance on a test bot with the setting enabled covers:
 4. Turning the setting off removes Pins from existing active sessions.
 5. A bot with the setting absent continues today's behavior with no Pin API
    traffic.
+6. `/card pin off` removes Pins for the current chat without removing its live
+   cards; `/card pin on` restores automatic Pin only when the bot master is on.
 
 The implementation is complete only after each unit has its own verified commit,
 the integration branch passes the full checks, and every commit is pushed.
@@ -368,7 +421,9 @@ the integration branch passes the full checks, and every commit is pushed.
 - Pinning arbitrary cards based on their JSON contents or presence of a close
   button.
 - Pinning private/ephemeral cards, final answers, CoT messages, or closed cards.
-- A global default or per-chat override.
+- A global default shared by all bots.
+- A Dashboard editor for the per-chat override; this is a follow-up after the
+  command/API contract stabilizes.
 - A durable retry journal, periodic retry worker, or full-chat Pin-list audit.
 - Changing the existing destination-sensitive card recall policy.
 - Requiring Pin permissions at daemon startup or failing a session when the
