@@ -52,7 +52,7 @@ async function listen(options: {
     const nonce = req.headers[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.nonce];
     const port = (server!.address() as { port: number }).port;
     const responseHeaders: Record<string, string> = { 'content-type': 'application/json' };
-    if ((options.authKind ?? 'capability') === 'host' && options.signResponse !== false && typeof nonce === 'string') {
+    if (options.signResponse !== false && typeof nonce === 'string') {
       responseHeaders[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature] =
         signNativeSubagentRuntimeResponse({
           key: options.responseKey ?? ((options.authKind ?? 'capability') === 'host' ? HOST_SECRET : CAPABILITY),
@@ -366,7 +366,8 @@ describe('native-subagent-runtime-hook CLI', () => {
   it('rejects a forged response even when the stale listener knows the capability', async () => {
     const forged = await runHook(JSON.stringify(spawnPayload), {
       policy: { model: { mode: 'custom', value: 'forged-model' } },
-      responseKey: CAPABILITY,
+      responseKey: POLICY_CAPABILITY,
+      signResponse: true,
       writeHostProof: false,
     });
     expect(forged.stdout).toBe('');
@@ -396,6 +397,21 @@ describe('native-subagent-runtime-hook CLI', () => {
     const overloaded = await runHook(JSON.stringify(spawnPayload), {
       status: 429,
       response: { ok: false, error: 'native_runtime_overloaded' },
+      signResponse: false,
+      writeHostProof: false,
+    });
+
+    expect(overloaded.status).toBe(0);
+    expect(overloaded.stdout).toBe('');
+    expect(overloaded.stderr).toContain('response authentication failed');
+  });
+
+  it('fails open for a forged 429 signed with the child-readable policy capability', async () => {
+    const overloaded = await runHook(JSON.stringify(spawnPayload), {
+      status: 429,
+      response: { ok: false, error: 'native_runtime_overloaded' },
+      responseKey: POLICY_CAPABILITY,
+      signResponse: true,
       writeHostProof: false,
     });
 
