@@ -88,6 +88,24 @@ describe('streaming-card pin policy', () => {
     expect(pinMessageMock).not.toHaveBeenCalled();
   });
 
+  it('does not pin when the chat is opted out even if the bot-level master switch is on', async () => {
+    const ds = makeDs();
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        noPinStreamingCardChats: ['oc_chat'],
+      },
+    } as any);
+
+    await expect(pinStreamingCardIfEnabled(ds, 'om_current')).resolves.toBe(false);
+
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
   it('fails closed when the active session registry is unavailable', async () => {
     const ds = makeDs();
     setActiveSessionsRegistry(undefined as any);
@@ -402,5 +420,68 @@ describe('streaming-card pin policy', () => {
       ['app-pin', 'om_current'],
       ['app-pin', 'om_frozen'],
     ]);
+  });
+
+  it('chat-scoped opt-out reconciles only matching chat sessions while another chat remains enabled', async () => {
+    const first = makeDs('om_chat_one', undefined, 'pin-session-1', 'om_root_1');
+    const second = { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2'), chatId: 'oc_chat_2', session: { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2').session, chatId: 'oc_chat_2' } } as DaemonSession;
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(first), first],
+      [activeSessionKey(second), second],
+    ]));
+    await expect(pinStreamingCardIfEnabled(first, 'om_chat_one')).resolves.toBe(true);
+    await expect(pinStreamingCardIfEnabled(second, 'om_chat_two')).resolves.toBe(true);
+    pinMessageMock.mockClear();
+    unpinMessageMock.mockClear();
+
+    getBotMock.mockImplementation(((larkAppId: string) => ({
+      config: {
+        larkAppId,
+        cliId: 'claude-code',
+        pinStreamingCard: true,
+        noPinStreamingCardChats: ['oc_chat'],
+      },
+    })) as any);
+
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_chat');
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(unpinMessageMock.mock.calls.map(c => [c[0], c[1]])).toEqual([
+      ['app-pin', 'om_chat_one'],
+    ]);
+    expect(pinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_chat_two');
+  });
+
+  it('rapid mixed bot/chat writes converge in serialized order to the live effective policy', async () => {
+    const first = makeDs('om_chat_one', undefined, 'pin-session-1', 'om_root_1');
+    const second = { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2'), chatId: 'oc_chat_2', session: { ...makeDs('om_chat_two', undefined, 'pin-session-2', 'om_root_2').session, chatId: 'oc_chat_2' } } as DaemonSession;
+    setActiveSessionsRegistry(new Map([
+      [activeSessionKey(first), first],
+      [activeSessionKey(second), second],
+    ]));
+    const desiredStates: Array<{ master: boolean; disabledChats?: string[] }> = [
+      { master: false },
+      { master: true, disabledChats: ['oc_chat'] },
+      { master: true },
+    ];
+    let index = 0;
+    getBotMock.mockImplementation(() => ({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: desiredStates[index]?.master === true,
+        noPinStreamingCardChats: desiredStates[index]?.disabledChats,
+      },
+    }) as any);
+
+    reconcileBotStreamingCardPins('app-pin', false);
+    index = 1;
+    reconcileBotStreamingCardPins('app-pin', true, 'oc_chat');
+    index = 2;
+    reconcileBotStreamingCardPins('app-pin', true);
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock.mock.calls.map(c => c[1])).toContain('om_chat_one');
+    expect(pinMessageMock.mock.calls.map(c => c[1])).toContain('om_chat_two');
   });
 });

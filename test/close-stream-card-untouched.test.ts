@@ -5,14 +5,15 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 // Mock the Lark client so we can observe deleteMessage without real API calls.
-const { deleteMessage, unpinMessage } = vi.hoisted(() => ({
+const { deleteMessage, pinMessage, unpinMessage } = vi.hoisted(() => ({
   deleteMessage: vi.fn(async () => undefined),
+  pinMessage: vi.fn(async () => true),
   unpinMessage: vi.fn(async () => true),
 }));
 const getBotMock = vi.hoisted(() => vi.fn());
 vi.mock('../src/im/lark/client.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/im/lark/client.js')>();
-  return { ...actual, deleteMessage, unpinMessage };
+  return { ...actual, deleteMessage, pinMessage, unpinMessage };
 });
 vi.mock('../src/bot-registry.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/bot-registry.js')>();
@@ -60,6 +61,7 @@ function deferred<T>() {
 describe('closeSession leaves the streaming card alone', () => {
   beforeEach(() => {
     deleteMessage.mockClear();
+    pinMessage.mockClear();
     unpinMessage.mockClear();
     getBotMock.mockReturnValue({ config: { pinStreamingCard: false } });
   });
@@ -220,6 +222,71 @@ describe('closeSession leaves the streaming card alone', () => {
       s.streamCardId = 'om_stream_card';
       sessionStore.updateSession(s);
       getBotMock.mockReturnValue({ config: { pinStreamingCard: true, apiOnly: true } });
+
+      await workerPool.closeSession(s.sessionId);
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(unpinMessage).not.toHaveBeenCalled();
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('explicit per-chat on-to-off close cleanup remains authoritative for previously owned Pins', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-chat-optout-cleanup-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      sessionStore.updateSession(s);
+      const ds = makeDs(s.sessionId, 'app-close-card', 'om_stream_card');
+      workerPool.setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
+
+      await expect(workerPool.pinStreamingCardIfEnabled(ds, 'om_stream_card')).resolves.toBe(true);
+      expect(pinMessage).toHaveBeenCalledWith('app-close-card', 'om_stream_card');
+      expect(unpinMessage).not.toHaveBeenCalled();
+      unpinMessage.mockClear();
+      getBotMock.mockReturnValue({
+        config: {
+          pinStreamingCard: true,
+          noPinStreamingCardChats: ['oc_closecard'],
+        },
+      });
+
+      await workerPool.closeSession(s.sessionId, { awaitWorkerExit: false });
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(unpinMessage).toHaveBeenCalledWith('app-close-card', 'om_stream_card');
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('an always-opted-out chat close is not authority to unpin manual Pins', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-chat-optout-manual-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      s.streamCardId = 'om_stored_current';
+      sessionStore.updateSession(s);
+      saveFrozenCards(s.sessionId, new Map([
+        ['old', { messageId: 'om_stored_frozen', content: '', title: '', displayMode: 'hidden' }],
+      ]));
+      workerPool.setActiveSessionsRegistry(new Map());
+      getBotMock.mockReturnValue({
+        config: {
+          pinStreamingCard: true,
+          noPinStreamingCardChats: ['oc_closecard'],
+        },
+      });
 
       await workerPool.closeSession(s.sessionId);
       await workerPool.__testOnly_waitForPinStreamingCardIdle();

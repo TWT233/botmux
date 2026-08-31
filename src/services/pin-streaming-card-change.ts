@@ -1,7 +1,12 @@
 import { logger } from '../utils/logger.js';
 
 export type PinStreamingCardChangeHandler =
-  (larkAppId: string, enabled: boolean) => void | PromiseLike<void>;
+  (
+    larkAppId: string,
+    enabled: boolean,
+    chatId?: string,
+    chatEnabled?: boolean,
+  ) => void | PromiseLike<void>;
 
 let currentHandler: PinStreamingCardChangeHandler | null = null;
 const configChangeQueues = new Map<string, Promise<void>>();
@@ -47,20 +52,27 @@ export async function serializePinStreamingCardConfigChange<T>(
 export function notifyPinStreamingCardChanged(
   larkAppId: string,
   enabled: boolean,
+  chatId?: string,
+  chatEnabled?: boolean,
 ): void {
   if (!currentHandler) return;
+  const invoke = () => (
+    chatId === undefined && chatEnabled === undefined
+      ? currentHandler!(larkAppId, enabled)
+      : currentHandler!(larkAppId, enabled, chatId, chatEnabled)
+  );
   try {
-    Promise.resolve(currentHandler(larkAppId, enabled)).catch((error) => {
+    Promise.resolve(invoke()).catch((error) => {
       logger.warn(
         `[pin-streaming-card] pinStreamingCard change handler failed `
-        + `app=${larkAppId} enabled=${enabled}: `
+        + `app=${larkAppId} enabled=${enabled} chat=${chatId ?? '-'} chatEnabled=${chatEnabled ?? '-'}: `
         + `${error instanceof Error ? error.message : String(error)}`,
       );
     });
   } catch (error) {
     logger.warn(
       `[pin-streaming-card] pinStreamingCard change handler failed `
-      + `app=${larkAppId} enabled=${enabled}: `
+      + `app=${larkAppId} enabled=${enabled} chat=${chatId ?? '-'} chatEnabled=${chatEnabled ?? '-'}: `
       + `${error instanceof Error ? error.message : String(error)}`,
     );
   }

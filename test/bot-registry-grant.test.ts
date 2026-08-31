@@ -126,6 +126,29 @@ describe('bot-registry grant additions', () => {
     }
   });
 
+  it('parses noPinStreamingCardChats as a trimmed, deduplicated string list', () => {
+    const [cfg] = parseBotConfigsFromText(JSON.stringify([{
+      larkAppId: 'pin_chat_1',
+      larkAppSecret: 's',
+      noPinStreamingCardChats: [' oc_chat_a ', 'oc_chat_b', '', '   ', 'oc_chat_a', 1, null],
+    }]));
+    expect(cfg.noPinStreamingCardChats).toEqual(['oc_chat_a', 'oc_chat_b']);
+  });
+
+  it('leaves noPinStreamingCardChats undefined when absent, non-array, or all invalid', () => {
+    expect(parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'pin_chat_2', larkAppSecret: 's' },
+    ]))[0].noPinStreamingCardChats).toBeUndefined();
+
+    expect(parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'pin_chat_3', larkAppSecret: 's', noPinStreamingCardChats: 'oc_chat_a' },
+    ]))[0].noPinStreamingCardChats).toBeUndefined();
+
+    expect(parseBotConfigsFromText(JSON.stringify([
+      { larkAppId: 'pin_chat_4', larkAppSecret: 's', noPinStreamingCardChats: ['', '  ', 1, null] },
+    ]))[0].noPinStreamingCardChats).toBeUndefined();
+  });
+
   it('getOwnerOpenId returns first ou_ in resolvedAllowedUsers', () => {
     registerBot({ larkAppId: 'a2', larkAppSecret: 's', cliId: 'claude-code', allowedUsers: ['x@y.com', 'ou_owner', 'ou_2'] });
     expect(getOwnerOpenId('a2')).toBe('ou_owner');

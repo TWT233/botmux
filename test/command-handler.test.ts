@@ -493,6 +493,10 @@ vi.mock('../src/services/card-mode-store.js', () => ({
   setCardMode: vi.fn(async () => ({ ok: true })),
 }));
 
+vi.mock('../src/services/pin-streaming-card-mode-store.js', () => ({
+  setChatStreamingCardPin: vi.fn(async () => ({ ok: true, changed: true })),
+}));
+
 vi.mock('../src/services/cot-mode-store.js', () => ({
   setCotMode: vi.fn(async () => ({ ok: true })),
 }));
@@ -505,6 +509,7 @@ vi.mock('../src/im/lark/cot-message.js', () => ({
 
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, PASSTHROUGH_COMMANDS, cliHasNoRawPassthroughSurface, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleCotCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation, startAdoptSession, startResumeImportSession, startCodexAppThreadSession, startForkSubtopicSession } from '../src/core/command-handler.js';
 import { setCardMode } from '../src/services/card-mode-store.js';
+import { setChatStreamingCardPin } from '../src/services/pin-streaming-card-mode-store.js';
 import { setCotMode } from '../src/services/cot-mode-store.js';
 import { handleCotThinkingUpdate } from '../src/im/lark/cot-message.js';
 import { writeRoleFile, deleteRoleFile, writeTeamRoleFile, deleteTeamRoleFile, resolveRole, resolveRoleFile } from '../src/core/role-resolver.js';
@@ -6772,6 +6777,7 @@ describe('/card — operator / canOperate gate', () => {
     vi.clearAllMocks();
     vi.mocked(canOperate).mockReturnValue(true);
     vi.mocked(setCardMode).mockResolvedValue({ ok: true } as any);
+    vi.mocked(setChatStreamingCardPin).mockResolvedValue({ ok: true, changed: true } as any);
   });
 
   it('rejects a non-operator (canOperate=false): operator_only notice, no mode change', async () => {
@@ -6816,6 +6822,54 @@ describe('/card — operator / canOperate gate', () => {
     const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
     expect(reply).toContain('终端尚未就绪');
     expect(reply).not.toContain('会议接收会话');
+  });
+
+  it('operator: /card pin off updates the per-chat Pin opt-out without touching streamingCardForced or setCardMode', async () => {
+    const ds = makeDaemonSession();
+    ds.streamingCardForced = true;
+    const deps = makeDeps(ds);
+
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin off', deps);
+
+    expect(setChatStreamingCardPin).toHaveBeenCalledWith(LARK_APP_ID, CHAT_ID, false);
+    expect(setCardMode).not.toHaveBeenCalled();
+    expect(ds.streamingCardForced).toBe(true);
+    const reply = (deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls[0][1] as string;
+    expect(reply).toContain('置顶');
+  });
+
+  it('operator: /card pin on works without a live session and does not touch setCardMode', async () => {
+    const deps = makeDeps();
+
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin on', deps);
+
+    expect(setChatStreamingCardPin).toHaveBeenCalledWith(LARK_APP_ID, CHAT_ID, true);
+    expect(setCardMode).not.toHaveBeenCalled();
+  });
+
+  it('operator: /card pin status distinguishes master off, chat opt-out, and effective on', async () => {
+    const deps = makeDeps();
+
+    vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => ({
+      botName: 'Claude',
+      config: { larkAppId: id, larkAppSecret: 's', cliId: 'claude-code' as const, pinStreamingCard: false },
+    })) as any);
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin status', deps);
+    expect(((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls.at(-1) ?? [])[1] as string).toContain('bot 级');
+
+    vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => ({
+      botName: 'Claude',
+      config: { larkAppId: id, larkAppSecret: 's', cliId: 'claude-code' as const, pinStreamingCard: true, noPinStreamingCardChats: [CHAT_ID] },
+    })) as any);
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin status', deps);
+    expect(((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls.at(-1) ?? [])[1] as string).toContain('当前群');
+
+    vi.mocked(getBot).mockImplementation(((id: string = 'app-1') => ({
+      botName: 'Claude',
+      config: { larkAppId: id, larkAppSecret: 's', cliId: 'claude-code' as const, pinStreamingCard: true },
+    })) as any);
+    await handleCardCommand(ROOT_ID, LARK_APP_ID, CHAT_ID, 'ou_owner', '/card pin status', deps);
+    expect(((deps.sessionReply as ReturnType<typeof vi.fn>).mock.calls.at(-1) ?? [])[1] as string).toContain('已开启');
   });
 });
 

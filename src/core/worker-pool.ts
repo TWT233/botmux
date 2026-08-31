@@ -2252,11 +2252,18 @@ function ownsCurrentStreamingCard(ds: DaemonSession, messageId: string): boolean
 }
 
 function pinStreamingCardEnabled(ds: DaemonSession): boolean {
-  return pinStreamingCardEnabledFor(ds.larkAppId);
+  return pinStreamingCardEnabledFor(ds.larkAppId, ds.chatId);
 }
 
-function pinStreamingCardEnabledFor(larkAppId: string): boolean {
-  try { return getBot(larkAppId).config.pinStreamingCard === true; } catch { return false; }
+function pinStreamingCardEnabledFor(larkAppId: string, chatId?: string): boolean {
+  try {
+    const config = getBot(larkAppId).config;
+    if (config.pinStreamingCard !== true) return false;
+    if (chatId && config.noPinStreamingCardChats?.includes(chatId)) return false;
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -2274,7 +2281,7 @@ function captureLifecycleStreamingCardCleanupIds(
 ): string[] {
   if (!retainsLarkStreamingCardTransportFor(larkAppId, chatId)) return [];
   const ids = new Set(ownedStreamingCardIds(owner));
-  if (pinStreamingCardEnabledFor(larkAppId)) {
+  if (pinStreamingCardEnabledFor(larkAppId, chatId)) {
     for (const id of knownIds) {
       if (isRealStreamingCardId(id)) ids.add(id);
     }
@@ -2411,6 +2418,7 @@ export async function reconcileStreamingCardPins(
 type PendingBotStreamingCardReconcile = {
   desiredVersion: number;
   desiredEnabled: boolean;
+  chatId?: string;
   running: boolean;
 };
 
@@ -2439,15 +2447,22 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
   try {
     while (true) {
       const enabled = state.desiredEnabled;
+      const chatId = state.chatId;
       const desiredVersion = state.desiredVersion;
       settledVersion = desiredVersion;
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
       for (let offset = 0; offset < sessions.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
-        const batch = sessions.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
+        const batch = sessions
+          .filter(ds => chatId === undefined || ds.chatId === chatId)
+          .slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
         await Promise.allSettled(
           batch.map(async (ds) => {
             try {
-              await reconcileStreamingCardPins(ds, enabled ? { enabled: true } : { enabled: false, cleanupKnownIds: true });
+              const effectiveEnabled = enabled && pinStreamingCardEnabledFor(ds.larkAppId, ds.chatId);
+              await reconcileStreamingCardPins(
+                ds,
+                effectiveEnabled ? { enabled: true } : { enabled: false, cleanupKnownIds: true },
+              );
             } catch {
               /* per-session reconciliation remains fail-open */
             }
@@ -2474,15 +2489,16 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
 
 /** Fire-and-forget bot-wide reconciliation so configuration mutation remains
  * responsive even when Lark Pin APIs are slow or unavailable. */
-export function reconcileBotStreamingCardPins(larkAppId: string, enabled: boolean): void {
+export function reconcileBotStreamingCardPins(larkAppId: string, enabled: boolean, chatId?: string): void {
   const state = pendingBotStreamingCardReconciles.get(larkAppId);
   if (state) {
     state.desiredEnabled = enabled;
+    state.chatId = chatId;
     state.desiredVersion += 1;
     if (!state.running) trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
     return;
   }
-  pendingBotStreamingCardReconciles.set(larkAppId, { desiredEnabled: enabled, desiredVersion: 1, running: false });
+  pendingBotStreamingCardReconciles.set(larkAppId, { desiredEnabled: enabled, chatId, desiredVersion: 1, running: false });
   trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
 }
 

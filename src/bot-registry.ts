@@ -1775,6 +1775,10 @@ export interface BotConfig {
    * Pin the current public streaming card. Default false; best-effort only.
    */
   pinStreamingCard?: boolean;
+  /** chat_id list: chats where streaming-card Pin is disabled even when the
+   *  bot-level {@link pinStreamingCard} master switch is on. Written by
+   *  `/card pin off|on`. */
+  noPinStreamingCardChats?: string[];
   /**
    * Stream the model's thinking process (CoT) into a native Feishu CoT
    * message per turn: a fixed-height scrolling bubble showing thinking
@@ -3300,6 +3304,15 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
       // Default ON, same convention as thinkingCard: an absent key means the
       // <sender> tag is injected, so existing prompts are unchanged.
       senderTag: entry.senderTag === false ? false : undefined,
+      noPinStreamingCardChats: Array.isArray(entry.noPinStreamingCardChats)
+        ? (() => {
+          const filtered = entry.noPinStreamingCardChats
+            .filter((x: any): x is string => typeof x === 'string' && x.trim().length > 0)
+            .map((x: string) => x.trim());
+          const normalized = Array.from(new Set<string>(filtered));
+          return normalized.length > 0 ? normalized : undefined;
+        })()
+        : undefined,
       noCotChats: Array.isArray(entry.noCotChats)
         ? entry.noCotChats.filter((x: any): x is string => typeof x === 'string' && x.trim().length > 0).map((x: string) => x.trim())
         : undefined,
