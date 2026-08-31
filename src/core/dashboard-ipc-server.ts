@@ -226,7 +226,7 @@ import {
   getBotName,
   type SessionRow,
 } from './dashboard-rows.js';
-import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, MAX_TURN_TIMEOUT_MS, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
+import { getBotBrand, getBot, getBotOpenId, getOwnerOpenId, loadBotConfigs, readBotSkillPolicy, getBotTuiSlashAllow, MAX_TURN_TIMEOUT_MS, type BotConfig, type UsageDisplayMode, type MessageListenerConfig } from '../bot-registry.js';
 import { generateAuthUrl, tryHandleCallbackUrl, getFeedGroupAuthStatus, FEED_GROUP_OAUTH_SCOPES } from '../utils/user-token.js';
 import { clampSessionTagName, defaultSessionTagName } from '../services/feed-group-tagger.js';
 import { normalizeBrand } from '../im/lark/lark-hosts.js';
@@ -3965,6 +3965,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
   let wrapperCli: string | null = null;
   let model: string | null = null;
   let reasoningEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra' | null = null;
+  let nativeSubagentRuntime: BotConfig['nativeSubagentRuntime'] | null = null;
   // dsh runner turn timeout (ms). Only meaningful for the dsh adapter; exposed
   // so the dashboard can render the dsh-only field with its current value.
   let turnTimeoutMs: number | null = null;
@@ -3986,6 +3987,10 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     wrapperCli = typeof cfg.wrapperCli === 'string' && cfg.wrapperCli.trim() ? cfg.wrapperCli : null;
     model = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
     reasoningEffort = cfg.reasoningEffort ?? null;
+    const normalizedNativeSubagentRuntime = normalizeNativeSubagentRuntimePolicy(cfg.nativeSubagentRuntime);
+    nativeSubagentRuntime = normalizedNativeSubagentRuntime.ok
+      ? normalizedNativeSubagentRuntime.value ?? null
+      : null;
     turnTimeoutMs = typeof cfg.turnTimeoutMs === 'number'
       && Number.isInteger(cfg.turnTimeoutMs) && cfg.turnTimeoutMs > 0
       ? cfg.turnTimeoutMs
@@ -4069,6 +4074,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
     wrapperCli,
     model,
     reasoningEffort,
+    nativeSubagentRuntime,
     turnTimeoutMs,
     dshRuntime,
     agentSelectionKey,
@@ -4506,8 +4512,8 @@ ipcRoute('PUT', '/api/bot-description', async (req, res) => {
 ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   const larkAppId = cachedLarkAppId;
-  let body: { cliId?: unknown; model?: unknown; reasoningEffort?: unknown; turnTimeoutMs?: unknown; cliRuntime?: unknown; dshRuntime?: unknown };
-  try { body = await readJsonBody<{ cliId?: unknown; model?: unknown; reasoningEffort?: unknown; turnTimeoutMs?: unknown; cliRuntime?: unknown; dshRuntime?: unknown }>(req); }
+  let body: { cliId?: unknown; model?: unknown; reasoningEffort?: unknown; nativeSubagentRuntime?: unknown; turnTimeoutMs?: unknown; cliRuntime?: unknown; dshRuntime?: unknown };
+  try { body = await readJsonBody<typeof body>(req); }
   catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
 
   const key = typeof body.cliId === 'string' && body.cliId.trim() ? body.cliId.trim() : '';
@@ -4526,6 +4532,33 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   }
   const currentBotConfig = getBot(larkAppId).config;
   const supportsReasoningEffort = isConfigurableReasoningCliId(selected.cliId);
+  const nativeSubagentRuntimeFieldPresent = Object.prototype.hasOwnProperty.call(body, 'nativeSubagentRuntime');
+  let requestedNativeSubagentRuntime: BotConfig['nativeSubagentRuntime'];
+  if (nativeSubagentRuntimeFieldPresent && body.nativeSubagentRuntime !== null) {
+    const normalized = normalizeNativeSubagentRuntimePolicy(body.nativeSubagentRuntime);
+    if (!normalized.ok) {
+      return jsonRes(res, 400, {
+        ok: false,
+        error: 'invalid_native_subagent_runtime',
+        message: normalized.error,
+      });
+    }
+    requestedNativeSubagentRuntime = normalized.value;
+    const customModel = requestedNativeSubagentRuntime?.model?.mode === 'custom'
+      ? requestedNativeSubagentRuntime.model.value
+      : undefined;
+    const customEffort = requestedNativeSubagentRuntime?.reasoningEffort?.mode === 'custom'
+      ? requestedNativeSubagentRuntime.reasoningEffort.value
+      : undefined;
+    if (customModel && customEffort
+        && !cliModelSupportsReasoningEffort('traex', customModel, customEffort)) {
+      return jsonRes(res, 400, {
+        ok: false,
+        error: 'invalid_native_subagent_runtime',
+        message: `模型 ${customModel} 不支持子代理思考强度 ${customEffort}`,
+      });
+    }
+  }
   // Per-bot dsh runner turn timeout. Only the dsh adapter forwards it
   // (`--turn-timeout-ms`); the dashboard exposes the field for dsh only. The
   // field is optional in the body, so distinguish absent (preserve) from
@@ -4660,6 +4693,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     const r = await rmwBotEntry<{
       error?: 'reasoning_effort_not_supported_by_model';
       nextReasoningEffort?: typeof reasoningEffort;
+      nextNativeSubagentRuntime?: BotConfig['nativeSubagentRuntime'];
     }>(larkAppId, (entry) => {
     const nextReasoningEffort = supportsReasoningEffort
       ? (reasoningEffortFieldPresent ? reasoningEffort ?? undefined : entry.reasoningEffort)
@@ -4688,6 +4722,17 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     else if (reasoningEffortFieldPresent) {
       if (reasoningEffort) entry.reasoningEffort = reasoningEffort;
       else delete entry.reasoningEffort;
+    }
+    let nextNativeSubagentRuntime: BotConfig['nativeSubagentRuntime'];
+    if (selected.cliId !== 'traex') {
+      delete entry.nativeSubagentRuntime;
+    } else if (nativeSubagentRuntimeFieldPresent) {
+      if (requestedNativeSubagentRuntime) entry.nativeSubagentRuntime = requestedNativeSubagentRuntime;
+      else delete entry.nativeSubagentRuntime;
+      nextNativeSubagentRuntime = requestedNativeSubagentRuntime;
+    } else {
+      const normalized = normalizeNativeSubagentRuntimePolicy(entry.nativeSubagentRuntime);
+      nextNativeSubagentRuntime = normalized.ok ? normalized.value : undefined;
     }
     // dsh-only turn timeout: non-dsh always drops it; on dsh, an explicit
     // field value writes/clears it, absence preserves the current value.
@@ -4718,7 +4763,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       // turn）。手动的 pty/tmux/herdr/zellij override 不受影响（它们不是远端后端）。
       delete entry.backendType;
     }
-    return { write: true, result: { nextReasoningEffort } };
+    return { write: true, result: { nextReasoningEffort, nextNativeSubagentRuntime } };
     });
     if (!r.ok) return jsonRes(res, 400, { ok: false, error: r.reason });
     if (r.result.error) {
@@ -4738,6 +4783,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     bot.config.model = model || undefined;
     if (!supportsReasoningEffort) bot.config.reasoningEffort = undefined;
     else bot.config.reasoningEffort = r.result.nextReasoningEffort ?? undefined;
+    bot.config.nativeSubagentRuntime = r.result.nextNativeSubagentRuntime;
     // Mirror the entry write: non-dsh clears it, dsh with an explicit field
     // takes the parsed value, dsh without the field preserves the existing one.
     if (!supportsTurnTimeout) bot.config.turnTimeoutMs = undefined;
@@ -4765,6 +4811,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
       wrapperCli: selected.wrapperCli ?? null,
       model: model || null,
       reasoningEffort: supportsReasoningEffort ? bot.config.reasoningEffort ?? null : null,
+      nativeSubagentRuntime: bot.config.nativeSubagentRuntime ?? null,
       turnTimeoutMs: supportsTurnTimeout ? bot.config.turnTimeoutMs ?? null : null,
       dshRuntime: supportsDshRuntime ? bot.config.dshRuntime ?? null : null,
       selectionKey,

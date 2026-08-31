@@ -288,6 +288,94 @@ describe('Codex-compatible runtime editor', () => {
     }
   });
 
+  it('shows independent native-subagent model and effort modes only for TraeX and rehydrates them', () => {
+    const trae = renderAgent({
+      cliId: 'traex',
+      agentSelectionKey: 'traex',
+      nativeSubagentRuntime: {
+        model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+        reasoningEffort: { mode: 'inherit' },
+      },
+    });
+    expect(trae.root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.value).toBe('custom');
+    expect(trae.root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.value).toBe('GPT-5.6-Sol');
+    expect(trae.root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('inherit');
+    expect(trae.root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
+
+    const codex = renderAgent({ cliId: 'codex' });
+    expect(codex.root.findAllByProps({ 'data-native-subagent-runtime': '' })).toHaveLength(0);
+
+    act(() => trae.root.findByProps({ dataInput: 'agentCliId' }).props.onChange('codex'));
+    expect(trae.root.findAllByProps({ 'data-native-subagent-runtime': '' })).toHaveLength(0);
+  });
+
+  it('omits untouched native-subagent policy and sends null when both dimensions become pass-through', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      if (String(_url).includes('/api/cli-options/models')) return { ok: true, status: 200, json: async () => ({ models: [], source: 'static' }) } as any;
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true, status: 200,
+        json: async () => ({ ...body, ok: true, selectionKey: body.cliId, nativeSubagentRuntime: null }),
+      } as any;
+    });
+    try {
+      const patchBot = vi.fn();
+      const { root } = renderAgent({
+        cliId: 'traex', agentSelectionKey: 'traex',
+        nativeSubagentRuntime: { model: { mode: 'inherit' } },
+      }, patchBot);
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+      });
+      expect(requests[0]).not.toHaveProperty('nativeSubagentRuntime');
+
+      act(() => root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.onChange('passthrough'));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+      });
+      expect(requests[1]).toMatchObject({ nativeSubagentRuntime: null });
+      expect(patchBot).toHaveBeenLastCalledWith('cli_runtime', expect.objectContaining({ nativeSubagentRuntime: undefined }));
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('builds independent custom native-subagent fields and patches the authoritative response', async () => {
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    const authoritative = {
+      model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+      reasoningEffort: { mode: 'custom', value: 'ultra' },
+    };
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      if (String(_url).includes('/api/cli-options/models')) return { ok: true, status: 200, json: async () => ({ models: ['GPT-5.6-Sol'], source: 'live' }) } as any;
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return { ok: true, status: 200, json: async () => ({ ...body, ok: true, selectionKey: 'traex', nativeSubagentRuntime: authoritative }) } as any;
+    });
+    try {
+      const patchBot = vi.fn();
+      const { root } = renderAgent({ cliId: 'traex', agentSelectionKey: 'traex' }, patchBot);
+      act(() => root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.onChange('custom'));
+      act(() => root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.onChange({ currentTarget: { value: 'GPT-5.6-Sol' } }));
+      act(() => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.onChange('custom'));
+      act(() => root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.onChange('ultra'));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+      });
+      expect(requests[0]).toMatchObject({ nativeSubagentRuntime: authoritative });
+      expect(patchBot).toHaveBeenLastCalledWith('cli_runtime', expect.objectContaining({ nativeSubagentRuntime: authoritative }));
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
   const dshCliState = {
     options: [
       { id: 'codex', label: 'Codex' },
