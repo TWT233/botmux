@@ -79,6 +79,50 @@ describe('registerBot', () => {
     const cfg = makeCfg();
     const state = mod.registerBot(cfg);
     expect(state.config).toBe(cfg);
+    expect(state.nativeSubagentRuntimeState).toEqual({ status: 'absent' });
+  });
+
+  it('normalizes direct registrations into one authoritative native-subagent snapshot', () => {
+    const valid = mod.registerBot(makeCfg({
+      larkAppId: 'direct-valid',
+      cliId: 'traex',
+      nativeSubagentRuntime: { model: { mode: 'custom', value: '  GPT-5.6-Sol  ' } },
+    }) as any);
+    expect(valid.config.nativeSubagentRuntime).toEqual({
+      model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+    });
+    expect(valid.nativeSubagentRuntimeState).toEqual({
+      status: 'valid',
+      policy: { model: { mode: 'custom', value: 'GPT-5.6-Sol' } },
+    });
+
+    const invalid = mod.registerBot(makeCfg({
+      larkAppId: 'direct-invalid',
+      cliId: 'traex',
+      nativeSubagentRuntime: { reasoningEffort: { mode: 'custom', value: 'impossible' } },
+    }) as any);
+    expect(invalid.config.nativeSubagentRuntime).toBeUndefined();
+    expect(invalid.nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
+  });
+
+  it('publishes live policy and metadata together through the narrow registry updater', () => {
+    const state = mod.registerBot(makeCfg({ larkAppId: 'live-policy', cliId: 'traex' }) as any);
+
+    mod.updateBotNativeSubagentRuntime('live-policy', {
+      status: 'valid',
+      policy: { model: { mode: 'custom', value: '  GPT-5.5  ' } },
+    });
+    expect(state.config.nativeSubagentRuntime).toEqual({
+      model: { mode: 'custom', value: 'GPT-5.5' },
+    });
+    expect(state.nativeSubagentRuntimeState).toEqual({
+      status: 'valid',
+      policy: { model: { mode: 'custom', value: 'GPT-5.5' } },
+    });
+
+    mod.updateBotNativeSubagentRuntime('live-policy', { status: 'absent' });
+    expect(state.config.nativeSubagentRuntime).toBeUndefined();
+    expect(state.nativeSubagentRuntimeState).toEqual({ status: 'absent' });
   });
 
   it('should create a Lark Client with appId and appSecret', () => {
@@ -1088,6 +1132,14 @@ describe('parseBotConfigsFromText — native subagent runtime policy', () => {
       reasoningEffort: { mode: 'custom', value: 'xhigh' },
     });
     expect(empty.nativeSubagentRuntime).toBeUndefined();
+    expect(mod.registerBot(configured).nativeSubagentRuntimeState).toEqual({
+      status: 'valid',
+      policy: {
+        model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+        reasoningEffort: { mode: 'inherit' },
+      },
+    });
+    expect(mod.registerBot(empty).nativeSubagentRuntimeState).toEqual({ status: 'absent' });
   });
 
   it('drops legacy inherit policies and emits a bounded diagnostic for each invalid dimension', () => {
@@ -1153,6 +1205,7 @@ describe('parseBotConfigsFromText — native subagent runtime policy', () => {
 
     expect(cfg.nativeSubagentRuntime).toBeUndefined();
     expect(cfg.model).toBe('GPT-5.4');
+    expect(mod.registerBot(cfg).nativeSubagentRuntimeState).toEqual({ status: 'invalid' });
   });
 });
 
