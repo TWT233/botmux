@@ -6,6 +6,7 @@
  * platform-sensitive bits (PATH delimiter, Windows `.cmd` wrapper) live in one
  * pure, unit-tested place instead of being duplicated as inline string concat.
  */
+import { realpathSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { homedir } from 'node:os';
 
@@ -31,6 +32,23 @@ export function resolveBotmuxWrapperBinDir(env: NodeJS.ProcessEnv = process.env)
     return join(env.SESSION_DATA_DIR, 'bin');
   }
   return join(env.HOME ?? env.USERPROFILE ?? homedir(), '.botmux', 'bin');
+}
+
+/**
+ * Stable daemon-updated wrapper path. Derive it from the same single source of
+ * truth used by daemon.writePidFile(), including the dedicated core-only bin.
+ * Canonicalize the directory so a symlinked lexical HOME still lands on the path
+ * that a full bwrap session actually binds. BOTMUX_BIN_PATH is an MCP gateway
+ * override, not a wrapper-write location, and therefore is intentionally ignored.
+ */
+export function resolveStableBotmuxWrapperPath(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const lexicalDir = resolveBotmuxWrapperBinDir(env);
+  let canonicalDir = lexicalDir;
+  try { canonicalDir = realpathSync(lexicalDir); } catch { /* wrapper dir not materialized yet */ }
+  return join(canonicalDir, platform === 'win32' ? 'botmux.cmd' : 'botmux');
 }
 
 /**

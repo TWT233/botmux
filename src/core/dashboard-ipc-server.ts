@@ -98,7 +98,7 @@ import { readGlobalConfig } from '../global-config.js';
 import { normalizeChatReplyMode, setChatReplyMode, type ChatReplyMode } from '../services/chat-reply-mode-store.js';
 import * as chatFirstSeenStore from '../services/chat-first-seen-store.js';
 import * as scheduler from './scheduler.js';
-import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, latestPerBotEnvForRestart, latestModelForRespawn, getDaemonReplyCardUsageSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, isSessionTransferring, mojoCloseResidualForRow } from './worker-pool.js';
+import { listActiveSessions, findActiveBySessionId, closeSession, getActiveSessionsRegistry, transferSession, deliverWriteLinkCardToOwners, forkWorker, suspendWorker, killWorker, latestPerBotEnvForRestart, latestModelForRespawn, getDaemonReplyCardUsageSnapshot, sessionSupportsWebTerminal, sendWorkerSessionInput, isSessionTransferring, mojoCloseResidualForRow, getDaemonBootId } from './worker-pool.js';
 import { listOnlineDaemons } from '../utils/daemon-discovery.js';
 import { isSessionStopped } from './session-liveness.js';
 import { isRemoteBackendType, isRemoteCliId, isSuspendableBackendType } from './persistent-backend.js';
@@ -235,6 +235,15 @@ import { validateSlashInjection } from './slash-inject.js';
 import { validateRoleLibraryPath } from './role-library.js';
 import { repinSessionWorkingDir } from './session-cwd.js';
 import { authorizeSessionScopedIpc } from './daemon-ipc-session-auth.js';
+import {
+  NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS,
+  NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS,
+  createNativeSubagentRuntimeNonceStore,
+  nativeSubagentRuntimeHostRequestNonce,
+  signNativeSubagentRuntimeResponse,
+  verifyNativeSubagentRuntimeCapabilityRequest,
+  writeNativeSubagentRuntimeResponseProof,
+} from './native-subagent-runtime-ipc-auth.js';
 import { normalizeNativeSubagentRuntimePolicy } from '../services/native-subagent-runtime-policy.js';
 import { normalizeSessionTitleSource, updateSessionTitle } from './session-title.js';
 import { requestAgentSessionRename } from './session-rename.js';
@@ -294,6 +303,7 @@ const routes: Route[] = [];
  * write-link handlers consult this marker so they do not verify (and consume)
  * the same one-shot nonce twice. */
 const trustedHostRequests = new WeakSet<IncomingMessage>();
+const trustedHostRequestSecrets = new WeakMap<IncomingMessage, string>();
 export function isTrustedHostIpcRequest(req: IncomingMessage): boolean {
   return trustedHostRequests.has(req);
 }
@@ -1230,8 +1240,87 @@ ipcRoute('POST', '/api/sessions/:sessionId/prompt-ctx/claim', async (req, res, p
  * are deliberately ignored so callers cannot read another bot's config. */
 const NATIVE_SUBAGENT_RUNTIME_BODY_MAX_BYTES = 2 * 1024;
 const NATIVE_SUBAGENT_RUNTIME_BODY_TIMEOUT_MS = 1_000;
+const NATIVE_SUBAGENT_RUNTIME_MAX_PREAUTH_IN_FLIGHT = 128;
+const nativeSubagentRuntimeNonceStore = createNativeSubagentRuntimeNonceStore();
+let nativeSubagentRuntimePreauthInFlight = 0;
+
+function nativeSubagentRuntimeJsonRes(input: {
+  req: IncomingMessage;
+  res: ServerResponse;
+  sessionId: string;
+  status: number;
+  body: unknown;
+  authKind: 'host' | 'capability';
+  key: string;
+  requestNonce: string;
+  turnId?: string;
+  dispatchAttempt?: number;
+}): void {
+  const raw = JSON.stringify(input.body);
+  const path = new URL(input.req.url ?? '/', 'http://localhost').pathname;
+  const port = input.req.socket.localPort;
+  if (!port) return jsonRes(input.res, 503, { ok: false, error: 'policy_unavailable' });
+  const responseBinding = {
+    requestNonce: input.requestNonce,
+    method: input.req.method ?? 'POST',
+    path,
+    port,
+    status: input.status,
+    body: raw,
+    sessionId: input.sessionId,
+    larkAppId: cachedLarkAppId,
+    bootInstanceId: getDaemonBootId(),
+    ...(input.turnId ? { turnId: input.turnId } : {}),
+    ...(input.dispatchAttempt !== undefined
+      ? { dispatchAttempt: input.dispatchAttempt }
+      : {}),
+  } as const;
+  const responseHeaders: Record<string, string> = { 'content-type': 'application/json' };
+  if (input.authKind === 'host') {
+    responseHeaders[NATIVE_SUBAGENT_RUNTIME_IPC_HEADERS.responseSignature] =
+      signNativeSubagentRuntimeResponse({ ...responseBinding, key: input.key });
+  } else {
+    const ds = findActiveBySessionId(input.sessionId);
+    const channelId = ds?.managedTurnOrigin?.originChannelId;
+    if (!channelId) return jsonRes(input.res, 409, { ok: false, error: 'proof_unavailable' });
+    const outstanding = managedOriginOutstandingProofs.get(input.sessionId) ?? 0;
+    if (outstanding >= MANAGED_ORIGIN_ATTEST_MAX_OUTSTANDING_PER_SESSION) {
+      return jsonRes(input.res, 429, { ok: false, error: 'too_many_attestations' });
+    }
+    let proofPath: string;
+    try {
+      proofPath = writeNativeSubagentRuntimeResponseProof({
+        dataDir: config.session.dataDir, channelId, nonce: input.requestNonce,
+        response: responseBinding,
+      });
+    } catch (error) {
+      logger.warn(`[native-subagent-runtime] could not write response proof: ${error}`);
+      return jsonRes(input.res, 409, { ok: false, error: 'proof_unavailable' });
+    }
+    managedOriginOutstandingProofs.set(input.sessionId, outstanding + 1);
+    const cleanupTimer = setTimeout(() => {
+      try { unlinkSync(proofPath); } catch { /* expired/already gone */ }
+      const remaining = (managedOriginOutstandingProofs.get(input.sessionId) ?? 1) - 1;
+      if (remaining > 0) managedOriginOutstandingProofs.set(input.sessionId, remaining);
+      else managedOriginOutstandingProofs.delete(input.sessionId);
+    }, NATIVE_SUBAGENT_RUNTIME_RESPONSE_PROOF_TTL_MS + 1_000);
+    cleanupTimer.unref?.();
+  }
+  input.res.writeHead(input.status, responseHeaders);
+  input.res.end(raw);
+}
 
 ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req, res, params) => {
+  // Trusted-host requests were authenticated by the server-wide gate before
+  // dispatch. Capability requests are still anonymous until their bounded body
+  // and signature have been verified, so cap that slow-body phase globally.
+  const preauthLimited = !trustedHostRequestSecrets.has(req);
+  if (preauthLimited
+    && nativeSubagentRuntimePreauthInFlight >= NATIVE_SUBAGENT_RUNTIME_MAX_PREAUTH_IN_FLIGHT) {
+    closeUntrustedRequestAfterResponse(req, res);
+    return jsonRes(res, 429, { ok: false, error: 'too_many_native_runtime_requests' });
+  }
+  if (preauthLimited) nativeSubagentRuntimePreauthInFlight += 1;
   let body: Record<string, unknown>;
   try {
     body = await readBoundedJsonBody<Record<string, unknown>>(
@@ -1259,21 +1348,81 @@ ipcRoute('POST', '/api/sessions/:sessionId/native-subagent-runtime', async (req,
             : 'bad_json',
       },
     );
+  } finally {
+    if (preauthLimited) nativeSubagentRuntimePreauthInFlight -= 1;
   }
   const ds = findActiveBySessionId(params.sessionId);
-  const auth = sessionCliIpcAuth(req, ds, params.sessionId, body, { allowReceiver: true });
-  if (!auth.ok) return jsonRes(res, 403, { ok: false, error: auth.error });
+  const path = new URL(req.url ?? '/', 'http://localhost').pathname;
+  const port = req.socket.localPort;
+  if (!port) return jsonRes(res, 503, { ok: false, error: 'policy_unavailable' });
+  const hostSecret = trustedHostRequestSecrets.get(req);
+  const daemonIdentity = { larkAppId: cachedLarkAppId, bootInstanceId: getDaemonBootId() };
+  const hostNonce = hostSecret
+    ? nativeSubagentRuntimeHostRequestNonce(req.headers, daemonIdentity)
+    : undefined;
+  let responseAuth: {
+    authKind: 'host' | 'capability';
+    key: string;
+    requestNonce: string;
+    turnId?: string;
+    dispatchAttempt?: number;
+  };
+  if (hostSecret) {
+    if (!hostNonce) return jsonRes(res, 403, { ok: false, error: 'response_challenge_required' });
+    responseAuth = { authKind: 'host', key: hostSecret, requestNonce: hostNonce };
+  } else {
+    const liveOrigin = ds?.managedTurnOrigin;
+    if (!ds || !liveOrigin?.capability) {
+      return jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
+    }
+    const verified = verifyNativeSubagentRuntimeCapabilityRequest({
+      capability: liveOrigin.capability,
+      headers: req.headers,
+      remoteAddress: req.socket.remoteAddress,
+      nonceStore: nativeSubagentRuntimeNonceStore,
+      method: req.method ?? 'POST',
+      path,
+      port,
+      sessionId: params.sessionId,
+      ...daemonIdentity,
+      ...(liveOrigin.turnId ? { turnId: liveOrigin.turnId } : {}),
+      ...(liveOrigin.dispatchAttempt !== undefined
+        ? { dispatchAttempt: liveOrigin.dispatchAttempt }
+        : {}),
+    });
+    if (!verified.ok) {
+      return verified.reason === 'capacity_exceeded'
+        ? jsonRes(res, 429, { ok: false, error: 'native_runtime_overloaded' })
+        : jsonRes(res, 403, { ok: false, error: 'origin_unproven' });
+    }
+    responseAuth = {
+      authKind: 'capability',
+      key: liveOrigin.capability,
+      requestNonce: verified.nonce,
+      ...(liveOrigin.turnId ? { turnId: liveOrigin.turnId } : {}),
+      ...(liveOrigin.dispatchAttempt !== undefined
+        ? { dispatchAttempt: liveOrigin.dispatchAttempt }
+        : {}),
+    };
+  }
   if (!ds) return jsonRes(res, 404, { ok: false, error: 'session_not_found' });
 
   let runtimeState;
   try { runtimeState = getBot(ds.larkAppId).nativeSubagentRuntimeState; }
   catch { return jsonRes(res, 404, { ok: false, error: 'bot_not_found' }); }
   if (runtimeState.status === 'invalid') {
-    return jsonRes(res, 200, { ok: true, invalidPolicy: true });
+    return nativeSubagentRuntimeJsonRes({
+      req, res, sessionId: params.sessionId, status: 200,
+      body: { ok: true, invalidPolicy: true }, ...responseAuth,
+    });
   }
-  jsonRes(res, 200, {
-    ok: true,
-    ...(runtimeState.status === 'valid' ? { policy: runtimeState.policy } : {}),
+  nativeSubagentRuntimeJsonRes({
+    req, res, sessionId: params.sessionId, status: 200,
+    body: {
+      ok: true,
+      ...(runtimeState.status === 'valid' ? { policy: runtimeState.policy } : {}),
+    },
+    ...responseAuth,
   });
 });
 
@@ -5892,6 +6041,7 @@ export function startIpcServer(opts: {
           : { ok: false as const, reason: 'secret_unavailable' };
         if (auth.ok) {
           trustedHostRequests.add(req);
+          trustedHostRequestSecrets.set(req, secret!);
         } else if (!capabilityRoute) {
           return jsonRes(res, 401, { ok: false, error: 'unauthorized', reason: auth.reason });
         }

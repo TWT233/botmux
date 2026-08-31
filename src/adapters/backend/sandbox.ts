@@ -31,6 +31,7 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../../core/plugins/mcp/environment.js';
+import { resolveStableBotmuxWrapperPath } from '../../core/botmux-wrapper.js';
 
 /** Verify (and best-effort auto-install) bubblewrap so the user needn't
  *  pre-install. Installs via the system package manager when the daemon can
@@ -94,6 +95,7 @@ export function buildCredentialOnlySandboxArgs(input: {
     '--bind', '/', '/',
     '--proc', '/proc',
   ];
+  const privateReadonlyByParent = new Map<string, string[]>();
   for (const entry of input.privateReadonlyDirectories ?? []) {
     const parent = assertCredentialIsolationPath(entry.parent, 'private readonly parent');
     const directory = assertCredentialIsolationPath(
@@ -103,10 +105,18 @@ export function buildCredentialOnlySandboxArgs(input: {
     if (!directory.startsWith(`${parent}/`)) {
       throw new Error(`private readonly directory must be below its parent: ${directory}`);
     }
-    // Hide every sibling channel first, then expose only the owning directory.
+    const existing = privateReadonlyByParent.get(parent) ?? [];
+    if (!existing.includes(directory)) existing.push(directory);
+    privateReadonlyByParent.set(parent, existing);
+  }
+  for (const parent of [...privateReadonlyByParent.keys()].sort()) {
+    // Hide every sibling channel first, then expose only the owning directories.
     // A directory bind (rather than a file bind) observes the worker's atomic
     // rename-based capability rotations without pinning the old inode.
-    args.push('--tmpfs', parent, '--ro-bind', directory, directory);
+    args.push('--tmpfs', parent);
+    for (const directory of privateReadonlyByParent.get(parent)!.sort()) {
+      args.push('--ro-bind', directory, directory);
+    }
   }
   for (const path of [...new Set(input.readonlyPaths ?? [])].sort()) {
     const normalized = assertCredentialIsolationPath(path, 'readonly path');
@@ -655,8 +665,12 @@ export function prepareDirectSandbox(opts: {
   cliArgs: string[];
   /** Absolute Botmux command paths already persisted in CLI MCP configs.
    * Bind the worker-generated relay shim at those exact paths so a stale or
-   * tampered host wrapper cannot replace the trusted gateway entry. */
+   * tampered host wrapper cannot replace the trusted gateway entry. The stable
+   * daemon-written wrapper is excluded because native hooks must execute it. */
   trustedBotmuxCommandPaths?: readonly string[];
+  /** Test seam for the stable wrapper exclusion; production resolves it from
+   * the same environment used by the daemon writer. */
+  stableBotmuxWrapperPath?: string;
   /** Worker-owned Unix socket for the credential-bearing MCP Gateway. */
   mcpGatewaySocketPath?: string;
   /** CANONICAL lark-cli data root (the parent of the frozen keystore dir, i.e.
@@ -774,13 +788,19 @@ export function prepareDirectSandbox(opts: {
   // different files — still gets the overlay.
   let selfExec: string | undefined;
   try { selfExec = realpathSync(process.execPath); } catch { selfExec = undefined; }
+  const stableWrapperTarget = canonical(
+    opts.stableBotmuxWrapperPath
+      ?? resolveStableBotmuxWrapperPath(process.env, process.platform),
+  );
   for (const rawTarget of [...new Set(opts.trustedBotmuxCommandPaths ?? [])]) {
     if (typeof rawTarget !== 'string' || !isAbsolute(rawTarget)) continue;
     const target = resolve(rawTarget);
     try {
       if (!lstatSync(target).isFile()) continue;
+      const resolvedTarget = realpathSync(target);
       // Compare resolved paths: either side may be reached through a symlink.
-      if (selfExec !== undefined && realpathSync(target) === selfExec) continue;
+      if (resolvedTarget === stableWrapperTarget) continue;
+      if (selfExec !== undefined && resolvedTarget === selfExec) continue;
       args.push('--ro-bind', shim, target);
     } catch { /* missing/stale config target — PATH shim remains available */ }
   }
