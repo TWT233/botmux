@@ -11,6 +11,7 @@ import {
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
+import { probeTmuxFunctional } from '../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
 import { spawnTsScript } from './helpers/ts-runner.js';
 
@@ -39,9 +40,7 @@ const tempDirs = new Set<string>();
 const tmuxSessions = new Set<string>();
 let sequence = 0;
 
-const tmuxAvailable = (() => {
-  try { execFileSync('tmux', ['-V'], { stdio: 'ignore' }); return true; } catch { return false; }
-})();
+const tmuxAvailable = probeTmuxFunctional().ok;
 
 function hookOverrides(argv: string[]): string[] {
   return argv.flatMap((arg, index) =>
