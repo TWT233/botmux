@@ -78,6 +78,8 @@ export interface BotCardPrefs {
   autoStartOnGroupJoin: boolean;
   /** 主动开工 — 场景① optional pre-configured first-turn prompt ('' = none). */
   autoStartOnGroupJoinPrompt: string;
+  /** 主动开工 — 场景① custom join seed message ('' = built-in i18n text). */
+  autoStartOnGroupJoinSeed: string;
   /** 主动开工 — 场景②: auto-start on every new topic in a topic group. */
   autoStartOnNewTopic: boolean;
   /** Per-bot DEFAULT regular-group session mode (chat | chat-topic | new-topic | shared). */
@@ -111,6 +113,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       botToBotSameDir: c.botToBotSameDir !== false,
       autoStartOnGroupJoin: c.autoStartOnGroupJoin === true,
       autoStartOnGroupJoinPrompt: typeof c.autoStartOnGroupJoinPrompt === 'string' ? c.autoStartOnGroupJoinPrompt : '',
+      autoStartOnGroupJoinSeed: typeof c.autoStartOnGroupJoinSeed === 'string' ? c.autoStartOnGroupJoinSeed : '',
       autoStartOnNewTopic: c.autoStartOnNewTopic === true,
       regularGroupReplyMode: c.regularGroupReplyMode ?? 'chat-topic',
       regularGroupMentionMode: c.regularGroupMentionMode === 'topic' || c.regularGroupMentionMode === 'never' || c.regularGroupMentionMode === 'ambient'
@@ -134,6 +137,7 @@ export function getBotCardPrefs(larkAppId: string): BotCardPrefs {
       botToBotSameDir: true,
       autoStartOnGroupJoin: false,
       autoStartOnGroupJoinPrompt: '',
+      autoStartOnGroupJoinSeed: '',
       autoStartOnNewTopic: false,
       regularGroupReplyMode: 'chat-topic',
       regularGroupMentionMode: 'always',
@@ -231,6 +235,7 @@ async function updateBotCardPrefsInternal(
     applyDefaultTrue(entry, 'botToBotSameDir', patch.botToBotSameDir);
     apply(entry, 'autoStartOnGroupJoin', patch.autoStartOnGroupJoin);
     applyStr(entry, 'autoStartOnGroupJoinPrompt', patch.autoStartOnGroupJoinPrompt);
+    applyStr(entry, 'autoStartOnGroupJoinSeed', patch.autoStartOnGroupJoinSeed);
     apply(entry, 'autoStartOnNewTopic', patch.autoStartOnNewTopic);
     applyMode(entry, 'regularGroupReplyMode', patch.regularGroupReplyMode);
     applyMention(entry, 'regularGroupMentionMode', patch.regularGroupMentionMode);
@@ -253,6 +258,7 @@ async function updateBotCardPrefsInternal(
         botToBotSameDir: entry.botToBotSameDir !== false,
         autoStartOnGroupJoin: entry.autoStartOnGroupJoin === true,
         autoStartOnGroupJoinPrompt: typeof entry.autoStartOnGroupJoinPrompt === 'string' ? entry.autoStartOnGroupJoinPrompt : '',
+        autoStartOnGroupJoinSeed: typeof entry.autoStartOnGroupJoinSeed === 'string' ? entry.autoStartOnGroupJoinSeed : '',
         autoStartOnNewTopic: entry.autoStartOnNewTopic === true,
         regularGroupReplyMode: (entry.regularGroupReplyMode === 'chat' || entry.regularGroupReplyMode === 'new-topic' || entry.regularGroupReplyMode === 'shared')
           ? entry.regularGroupReplyMode
@@ -314,6 +320,9 @@ async function updateBotCardPrefsInternal(
   if (patch.autoStartOnGroupJoinPrompt !== undefined) {
     bot.config.autoStartOnGroupJoinPrompt = patch.autoStartOnGroupJoinPrompt.trim() ? patch.autoStartOnGroupJoinPrompt : undefined;
   }
+  if (patch.autoStartOnGroupJoinSeed !== undefined) {
+    bot.config.autoStartOnGroupJoinSeed = patch.autoStartOnGroupJoinSeed.trim() ? patch.autoStartOnGroupJoinSeed : undefined;
+  }
   if (patch.autoStartOnNewTopic !== undefined) {
     bot.config.autoStartOnNewTopic = patch.autoStartOnNewTopic || undefined;
   }
@@ -354,7 +363,8 @@ async function updateBotCardPrefsInternal(
     `regularGroupReplyMode=${r.result.regularGroupReplyMode} regularGroupMentionMode=${r.result.regularGroupMentionMode} ` +
     `botToBotSameDir=${r.result.botToBotSameDir} docSubscribeDefaultMode=${r.result.docSubscribeDefaultMode} ` +
     `summaryMemory=${r.result.summaryMemory} summaryMemoryPath=${r.result.summaryMemoryPath} ` +
-    `autoStartOnGroupJoinPrompt.len=${r.result.autoStartOnGroupJoinPrompt.length}`,
+    `autoStartOnGroupJoinPrompt.len=${r.result.autoStartOnGroupJoinPrompt.length} ` +
+    `autoStartOnGroupJoinSeed.len=${r.result.autoStartOnGroupJoinSeed.length}`,
   );
   return { ok: true, prefs: r.result };
 }

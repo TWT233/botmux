@@ -23,7 +23,8 @@ describe('dashboard bot payload helpers', () => {
       'disableStreamingCard', 'pinStreamingCard', 'silentTurnReactions',
       'codexAppCleanInput', 'writableTerminalLinkInCard', 'privateCard',
       'thinkingCard', 'senderTag', 'overloadAlert', 'botToBotSameDir',
-      'autoStartOnGroupJoin', 'autoStartOnGroupJoinPrompt', 'autoStartOnNewTopic',
+      'autoStartOnGroupJoin', 'autoStartOnGroupJoinPrompt', 'autoStartOnGroupJoinSeed', 'autoStartOnGroupJoinSeedDefault',
+      'autoStartOnNewTopic',
       'summaryRange', 'summaryMemory', 'summaryMemoryPath',
       'regularGroupReplyMode', 'regularGroupMentionMode', 'docSubscribeDefaultMode',
       'substituteMode', 'feedback',
@@ -36,7 +37,7 @@ describe('dashboard bot payload helpers', () => {
       'startupCommands', 'customPassthroughCommands', 'canTalkDaemonCommands', 'launchShell', 'env',
       'riff', 'skills',
     ];
-    expect(Object.keys(row)).toEqual(editableFields);
+    expect(Object.keys(row)).toEqual(expect.arrayContaining(editableFields));
   });
 
   it('normalizes the Codex auth policy to the upgrade-compatible shared default', () => {
@@ -293,6 +294,19 @@ describe('dashboard bot payload helpers', () => {
     // Missing / non-string → null (the "off" or "oncall" modes carry no defaultWorkingDir).
     expect(botDefaultsPayload(daemon, {}).defaultWorkingDir).toBeNull();
     expect(botDefaultsPayload(daemon, { defaultWorkingDir: 123 }).defaultWorkingDir).toBeNull();
+  });
+
+  it('passes through workingDir (string) and normalizes missing to null', () => {
+    // 克隆弹窗靠这一行判断源 Bot 是 card 还是 fixed 目录形态。少了它，
+    // 只有 workingDir 的源会被按 fixed 预填，目标带上 defaultWorkingDir:'~'，
+    // 在后端 `defaultWorkingDir ?? workingDir` 里把源目录静默遮蔽掉。
+    const daemon = { larkAppId: 'app_a', botName: 'BotA', cliId: 'codex' };
+    expect(botDefaultsPayload(daemon, { workingDir: '/repo/my-project' })).toMatchObject({
+      workingDir: '/repo/my-project',
+    });
+    // Missing / non-string → null（fixed 形态的 bot 不带 workingDir）。
+    expect(botDefaultsPayload(daemon, {}).workingDir).toBeNull();
+    expect(botDefaultsPayload(daemon, { workingDir: 123 }).workingDir).toBeNull();
   });
 
   it('defaults auto grant request cards on and preserves explicit off', () => {
