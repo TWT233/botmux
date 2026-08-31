@@ -11747,7 +11747,6 @@ async function cmdNativeSubagentRuntimeHook(): Promise<void> {
     const rewritten = rewriteNativeSubagentSpawnInput(
       payload.tool_input as Record<string, unknown>,
       normalized.value,
-      {},
     );
     if (rewritten.kind !== 'rewritten') return;
     await writeNativeSubagentHookDirective({

@@ -3759,7 +3759,7 @@ describe('PUT /api/bot-agent', () => {
     const appId = 'test-native-subagent-agent-app';
     const prevBotsConfig = process.env.BOTS_CONFIG;
     const initialPolicy = {
-      model: { mode: 'inherit' },
+      model: { mode: 'custom', value: 'GPT-5.4' },
       reasoningEffort: { mode: 'custom', value: 'high' },
     };
     try {

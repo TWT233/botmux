@@ -12,12 +12,6 @@ export type NativeSubagentRuntimePolicy = {
   reasoningEffort?: NativeSubagentEffortPolicy;
 };
 
-/** @deprecated Compatibility-only input for callers being migrated off inheritance. */
-export type NativeSubagentParentRuntime = {
-  model?: string;
-  reasoningEffort?: CodexReasoningEffort;
-};
-
 export type NativeSubagentRuntimePolicyNormalization =
   | { ok: true; value?: NativeSubagentRuntimePolicy }
   | { ok: false; error: string };
@@ -116,17 +110,6 @@ export function normalizeNativeSubagentRuntimePolicy(
 export function rewriteNativeSubagentSpawnInput(
   input: Record<string, unknown>,
   policy: NativeSubagentRuntimePolicy | undefined,
-): NativeSubagentSpawnRewrite;
-/** @deprecated The parent runtime argument is ignored; remove it with the legacy hook path. */
-export function rewriteNativeSubagentSpawnInput(
-  input: Record<string, unknown>,
-  policy: NativeSubagentRuntimePolicy | undefined,
-  parentRuntime: NativeSubagentParentRuntime,
-): NativeSubagentSpawnRewrite | { kind: 'denied'; reason: string };
-export function rewriteNativeSubagentSpawnInput(
-  input: Record<string, unknown>,
-  policy: NativeSubagentRuntimePolicy | undefined,
-  _parentRuntime?: NativeSubagentParentRuntime,
 ): NativeSubagentSpawnRewrite {
   const rewritten = { ...input };
   if (!policy?.model && !policy?.reasoningEffort) {
