@@ -1175,7 +1175,7 @@ describe('parseBotConfigsFromText — native subagent runtime policy', () => {
       status: 'valid',
       policy: {
         model: { mode: 'custom', value: 'GPT-5.6-Sol' },
-        reasoningEffort: { mode: 'inherit' },
+        reasoningEffort: { mode: 'custom', value: 'xhigh' },
       },
     });
     expect(mod.registerBot(empty).nativeSubagentRuntimeState).toEqual({ status: 'absent' });
