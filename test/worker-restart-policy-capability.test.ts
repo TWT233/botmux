@@ -5,7 +5,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { probeTmuxFunctional } from '../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
-import { spawnTsScript } from './helpers/ts-runner.js';
+import { isBunRuntime, spawnTsScript } from './helpers/ts-runner.js';
 
 type Origin = Extract<WorkerToDaemon, { type: 'managed_turn_origin' }>;
 type OriginRevoke = Extract<WorkerToDaemon, { type: 'managed_turn_origin_revoked' }>;
@@ -26,6 +26,7 @@ const tempDirs = new Set<string>();
 const tmuxSessions = new Set<string>();
 let sequence = 0;
 const tmuxAvailable = probeTmuxFunctional().ok;
+const directPtyUnavailableInBun = isBunRuntime();
 
 async function waitFor(
   harness: Harness,
@@ -176,7 +177,9 @@ afterEach(async () => {
 });
 
 describe('worker restart policy capability lifecycle', () => {
-  it('keeps worker-generation policy authority across natural crash recovery', async () => {
+  it.skipIf(directPtyUnavailableInBun)(
+    'keeps worker-generation policy authority across natural crash recovery',
+    async () => {
     const harness = startWorker('pty', { initialAtMostOnce: true });
     const before = await waitForInitialOrigin(harness);
     const crashMessageIndex = harness.messages.length;
@@ -221,7 +224,9 @@ describe('worker restart policy capability lifecycle', () => {
     const crashRevokes = revokesSince(harness, crashMessageIndex);
     expect(crashRevokes.some(message => message.capability === before.capability)).toBe(true);
     expect(crashRevokes.every(message => message.policyCapability === undefined)).toBe(true);
-  }, 45_000);
+    },
+    45_000,
+  );
 
   it('revokes policy authority when the worker generation tears down', async () => {
     const harness = startWorker('pty');
