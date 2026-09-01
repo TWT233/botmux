@@ -21,7 +21,8 @@ vi.mock('../src/bot-registry.js', () => ({
 }));
 vi.mock('../src/services/frozen-card-store.js', () => ({ loadFrozenCards: vi.fn(() => new Map()), saveFrozenCards: vi.fn() }));
 vi.mock('../src/core/session-manager.js', () => ({ persistStreamCardState: vi.fn() }));
-vi.mock('../src/utils/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), debug: vi.fn(), error: vi.fn() } }));
+const loggerDebugMock = vi.fn();
+vi.mock('../src/utils/logger.js', () => ({ logger: { info: vi.fn(), warn: vi.fn(), debug: (...args: any[]) => loggerDebugMock(...args), error: vi.fn() } }));
 vi.mock('../src/config.js', () => ({ config: { web: { externalHost: 'localhost' }, session: { dataDir: '/tmp' } } }));
 vi.mock('../src/global-config.js', () => ({ isRemoteAccessEnabled: vi.fn(() => false) }));
 vi.mock('../src/platform/binding.js', () => ({ platformMachineBaseUrl: vi.fn(() => null), publicReverseProxyBaseUrl: vi.fn(() => null) }));
@@ -86,6 +87,7 @@ describe('streaming-card pin policy', () => {
     pinMessageMock.mockResolvedValue(true);
     unpinMessageMock.mockResolvedValue(true);
     listChatPinsMock.mockResolvedValue([]);
+    loggerDebugMock.mockReset();
     getBotMock.mockReturnValue({ config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true } } as any);
   });
   it('does nothing when disabled, sentinel, inactive, displaced, or changed', async () => {
@@ -993,6 +995,58 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_blank_type');
   });
 
+  it('enabled startup recovery still pins the local current card when only a frozen predecessor has same-app remote proof', async () => {
+    const ds = makeDs(
+      'om_current',
+      new Map<string, FrozenCard>([
+        ['proven', { messageId: 'om_frozen_proven', content: '', title: '', displayMode: 'hidden' }],
+        ['human', { messageId: 'om_frozen_human', content: '', title: '', displayMode: 'hidden' }],
+        ['other-app', { messageId: 'om_frozen_other_app', content: '', title: '', displayMode: 'hidden' }],
+      ]),
+    );
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true },
+    } as any);
+    listChatPinsMock.mockResolvedValue([
+      { messageId: 'om_frozen_proven', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
+      { messageId: 'om_frozen_human', chatId: 'oc_chat', operatorId: 'ou_human', operatorIdType: 'open_id' },
+      { messageId: 'om_frozen_other_app', chatId: 'oc_chat', operatorId: 'app-other', operatorIdType: 'app_id' },
+    ]);
+
+    reconcileRestoredStreamingCardPins('app-pin');
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
+    expect(unpinMessageMock).toHaveBeenCalledWith('app-pin', 'om_frozen_proven');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_frozen_human');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_frozen_other_app');
+  });
+
+  it('enabled startup recovery still pins the local current card when remote proof has no matching local candidates', async () => {
+    const ds = makeDs(
+      'om_current',
+      new Map<string, FrozenCard>([
+        ['human', { messageId: 'om_frozen_human', content: '', title: '', displayMode: 'hidden' }],
+      ]),
+    );
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true },
+    } as any);
+    listChatPinsMock.mockResolvedValue([
+      { messageId: 'om_remote_manual', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
+      { messageId: 'om_frozen_human', chatId: 'oc_chat', operatorId: 'ou_human', operatorIdType: 'open_id' },
+    ]);
+
+    reconcileRestoredStreamingCardPins('app-pin');
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_frozen_human');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_remote_manual');
+  });
+
   it('restores bot-wide off cleanup for opted-out chats only when remote proof intersects local candidates', async () => {
     const optedOut = makeDs(
       'om_opted_current',
@@ -1056,6 +1110,7 @@ describe('streaming-card pin policy', () => {
     expect(pinMessageMock.mock.calls.map(call => call[1])).toEqual(['om_other']);
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_first');
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_second');
+    expect(loggerDebugMock).toHaveBeenCalledWith('[app-pin] streaming-card restore pin proof list failed for chat oc_chat: chat list failed');
   });
 
   it('restore is zero-call when every active session has no Lark transport', async () => {

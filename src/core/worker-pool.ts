@@ -2615,6 +2615,7 @@ async function reconcileRestoredStreamingCardPinsForRequest(
     byChat.set(candidate.chatId, entries);
   }
   for (const [chatId, entries] of byChat) {
+    const summary = (err: unknown): string => err instanceof Error ? err.message : String(err);
     try {
       const localCandidateIds = new Set(
         entries.flatMap(entry => [
@@ -2625,29 +2626,28 @@ async function reconcileRestoredStreamingCardPinsForRequest(
       if (localCandidateIds.size === 0) continue;
       const remotePins = await listChatPins(larkAppId, chatId);
       const provenIds = sameAppRemoteAppIdProofIds(larkAppId, localCandidateIds, remotePins);
-      if (provenIds.size === 0) continue;
       await Promise.allSettled(entries.map(async (entry) => {
-        const provenCurrent = entry.currentId && provenIds.has(entry.currentId)
-          ? entry.currentId
-          : undefined;
         const provenFrozen = entry.frozenIds.filter(id => provenIds.has(id));
         if (entry.enabled) {
-          if (!provenCurrent) return;
-          rememberOwnedStreamingCard(entry.owner, provenCurrent);
-          const pinned = await queueStreamingCardMessageMutation(larkAppId, provenCurrent, async () => {
-            try {
-              const ok = await pinMessage(larkAppId, provenCurrent);
-              if (!ok) return false;
-              rememberOwnedStreamingCard(entry.owner, provenCurrent);
-              return true;
-            } catch {
-              return false;
-            }
-          });
+          if (!entry.currentId || !isRealStreamingCardId(entry.currentId)) return;
+          const pinned = await pinStreamingCardIfEnabled(
+            liveSessions.get(entry.owner.sessionId ?? '') ?? ({
+              larkAppId,
+              chatId,
+              streamCardId: entry.currentId,
+              session: { sessionId: entry.owner.sessionId ?? '', status: 'active' },
+            } as DaemonSession),
+            entry.currentId,
+          );
           if (!pinned || provenFrozen.length === 0) return;
+          for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
           await unpinStreamingCardIds(larkAppId, provenFrozen, entry.owner);
           return;
         }
+        if (provenIds.size === 0) return;
+        const provenCurrent = entry.currentId && provenIds.has(entry.currentId)
+          ? entry.currentId
+          : undefined;
         if (provenCurrent) rememberOwnedStreamingCard(entry.owner, provenCurrent);
         for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
         // Maintainer intent: bot-wide OFF still excludes chats that had already
@@ -2664,7 +2664,8 @@ async function reconcileRestoredStreamingCardPinsForRequest(
           entry.owner,
         );
       }));
-    } catch {
+    } catch (err) {
+      logger.debug(`[${larkAppId}] streaming-card restore pin proof list failed for chat ${chatId}: ${summary(err)}`);
       /* one chat's remote proof failure must not block other chats */
     }
   }
