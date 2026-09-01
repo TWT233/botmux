@@ -1,12 +1,12 @@
-import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { Socket, createConnection } from 'node:net';
+import { Socket, createConnection, createServer } from 'node:net';
 import { spawn, type ChildProcess } from 'node:child_process';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { BTW_RUNTIME_PROTOCOL_VERSION, type BtwRuntimeDescriptor, type BtwRuntimeEnvelope, type BtwRuntimeFrame } from '../src/features/btw/runtime-protocol.js';
-import { connectBtwRuntime, ensureBtwRuntime } from '../src/features/btw/runtime-client.js';
+import { BtwRuntimeClientImpl, connectBtwRuntime, ensureBtwRuntime } from '../src/features/btw/runtime-client.js';
 import { readProcessStartIdentity } from '../src/core/session-marker.js';
 import { deriveBtwIdentifiers } from '../src/features/btw/types.js';
 import { makeBtwPrepareInput, makeBtwScope } from './fixtures/btw-fixtures.js';
@@ -25,12 +25,14 @@ function runtimeFiles(dataDir: string): {
   runtimeDir: string;
   descriptorPath: string;
   tokenPath: string;
+  startupPath: string;
 } {
   const runtimeDir = join(dataDir, 'btw');
   return {
     runtimeDir,
     descriptorPath: join(runtimeDir, 'runtime.json'),
     tokenPath: join(runtimeDir, 'runtime.token'),
+    startupPath: join(runtimeDir, 'runtime.starting.json'),
   };
 }
 
@@ -250,9 +252,9 @@ describe('BTW runtime auth and singleton boot', () => {
       socket.write(`${requestFrame(`req-${index}`, descriptor.epoch)}\n`);
     }
 
-    await expect(new Promise<void>((resolve, reject) => {
+    await expect(new Promise<void>((resolve) => {
       socket.once('close', () => resolve());
-      socket.once('error', reject);
+      socket.once('error', () => resolve());
     })).resolves.toBeUndefined();
   });
 
@@ -360,6 +362,115 @@ describe('BTW runtime auth and singleton boot', () => {
     await expect(ensureBtwRuntime({ dataDir })).rejects.toThrow('unavailable or unauthenticated');
     expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
     expect(existsSync(staleSocket)).toBe(true);
+  });
+
+  it('rejects a symlinked runtime directory instead of writing through it', async () => {
+    const dataDir = newDataDir();
+    const redirected = mkdtempSync(join(tmpdir(), 'botmux-btw-runtime-redirect-'));
+    tempDirs.push(redirected);
+    symlinkSync(redirected, join(dataDir, 'btw'));
+
+    await expect(ensureBtwRuntime({ dataDir })).rejects.toThrow('symlink');
+    expect(existsSync(join(redirected, 'runtime.json'))).toBe(false);
+  });
+
+  it('reclaims a dead parent startup reservation before spawning one runtime', async () => {
+    const dataDir = newDataDir();
+    const runtimeDir = join(dataDir, 'btw');
+    mkdirSync(runtimeDir, { mode: 0o700 });
+    writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
+      claim: 'dead-parent-reservation', ownerPid: 999999, ownerStartIdentity: 'never-live', buildId: 'stale',
+    }));
+
+    const descriptor = await ensureTestRuntime(dataDir);
+    expect(descriptor.pid).toBeGreaterThan(1);
+    expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
+  });
+
+
+  it('closes a connection that sends an envelope outside the runtime command union', async () => {
+    const dataDir = newDataDir();
+    const descriptor = await ensureTestRuntime(dataDir);
+    const token = readFileSync(runtimeFiles(dataDir).tokenPath, 'utf8').trim();
+    const socket = await authenticateRaw({ descriptor, token });
+    const closed = new Promise<void>((resolve, reject) => {
+      socket.once('close', () => resolve());
+      socket.once('error', reject);
+    });
+    socket.write(`${JSON.stringify({
+      requestId: 'invalid-command',
+      protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION,
+      runtimeEpoch: descriptor.epoch,
+      command: { type: 'not_a_runtime_command' },
+    })}\n`);
+
+    await expect(closed).resolves.toBeUndefined();
+  });
+
+  it('routes out-of-order concurrent RPC replies through one decoder', async () => {
+    const socketPath = `/tmp/btw-runtime-client-${process.pid}-${Date.now()}.sock`;
+    staleSocketPaths.push(socketPath);
+    const server = createServer(socket => {
+      let buffer = '';
+      const requests: Array<{ requestId: string; commandType: string }> = [];
+      socket.on('data', chunk => {
+        buffer += String(chunk);
+        while (buffer.includes('\n')) {
+          const index = buffer.indexOf('\n');
+          const line = buffer.slice(0, index);
+          buffer = buffer.slice(index + 1);
+          const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
+          if (frame.kind === 'auth') {
+            socket.write('{"kind":"auth_ok"}\n');
+            continue;
+          }
+          requests.push({ requestId: frame.requestId!, commandType: frame.command!.type! });
+          if (requests.length === 2) {
+            for (const request of [...requests].reverse()) {
+              socket.write(`${JSON.stringify({
+                kind: 'reply', ok: true, requestId: request.requestId, commandType: request.commandType,
+                result: { affectedAppIds: [], projectionWatermarks: [] },
+              })}\n`);
+            }
+          }
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(socketPath, () => resolve());
+    });
+    const client = new BtwRuntimeClientImpl({
+      descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' },
+      token: 'test-token',
+    });
+
+    await expect(Promise.all([client.quiesceAll(), client.quiesceAll()])).resolves.toEqual([
+      { affectedAppIds: [], projectionWatermarks: [] },
+      { affectedAppIds: [], projectionWatermarks: [] },
+    ]);
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('rejects a reply whose result does not match its command contract', async () => {
+    const socketPath = `/tmp/btw-runtime-invalid-result-${process.pid}-${Date.now()}.sock`;
+    staleSocketPaths.push(socketPath);
+    const server = createServer(socket => {
+      let count = 0;
+      socket.on('data', chunk => {
+        for (const line of String(chunk).trim().split('\n')) {
+          const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
+          if (frame.kind === 'auth') socket.write('{"kind":"auth_ok"}\n');
+          else if (++count === 1) socket.write(`${JSON.stringify({ kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type, result: { done: true } })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    const client = new BtwRuntimeClientImpl({ descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' }, token: 'token' });
+    await expect(client.quiesceAll()).rejects.toThrow('invalid btw runtime reply result');
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
   it('serves typed replies through connectBtwRuntime after the second authenticated handshake', async () => {

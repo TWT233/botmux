@@ -1,7 +1,7 @@
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
-import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync } from 'node:fs';
 import { createConnection, createServer, type Server, type Socket } from 'node:net';
-import { homedir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -39,6 +39,13 @@ interface RuntimePaths {
 interface RuntimeStartupMarker {
   pid: number;
   startIdentity: string;
+  buildId: string;
+}
+
+interface RuntimeStartupClaim {
+  claim: string;
+  ownerPid: number;
+  ownerStartIdentity: string;
   buildId: string;
 }
 
@@ -82,14 +89,15 @@ interface RuntimeState {
   authenticatedSockets: Set<Socket>;
   projectionWakeQueue: Set<string>;
   projectionWakeScheduled: boolean;
+  executorWakeQueue: Set<string>;
+  executorWakeScheduled: boolean;
 }
 
 const runtimeStates = new Map<string, RuntimeState>();
 
 function runtimePaths(dataDir: string): RuntimePaths {
   const parentDir = join(canonicalDataDir(dataDir), 'btw');
-  mkdirSync(parentDir, { recursive: true, mode: 0o700 });
-  chmodSync(parentDir, 0o700);
+  securePrivateDirectory(parentDir);
   return {
     runtimeDir: parentDir,
     lockPath: join(parentDir, 'runtime.lock'),
@@ -101,7 +109,20 @@ function runtimePaths(dataDir: string): RuntimePaths {
 }
 
 function canonicalDataDir(dataDir: string): string {
-  return resolve(dataDir);
+  return realpathSync(resolve(dataDir));
+}
+
+function securePrivateDirectory(path: string): void {
+  const parent = dirname(path);
+  const parentStats = lstatSync(parent);
+  if (parentStats.isSymbolicLink()) throw new Error(`btw runtime directory parent is a symlink: ${parent}`);
+  if (parentStats.uid !== process.getuid?.()) throw new Error(`btw runtime directory parent is not owned by the current uid: ${parent}`);
+  if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
+  const stats = lstatSync(path);
+  if (stats.isSymbolicLink()) throw new Error(`btw runtime directory is a symlink: ${path}`);
+  if (!stats.isDirectory() || stats.uid !== process.getuid?.()) throw new Error(`btw runtime directory is not a current-uid directory: ${path}`);
+  chmodSync(path, 0o700);
+  if ((statSync(path).mode & 0o777) !== 0o700) throw new Error(`btw runtime directory mode is not 0700: ${path}`);
 }
 
 function stableSocketSlug(dataDir: string): string {
@@ -112,10 +133,13 @@ function stableSocketSlug(dataDir: string): string {
 }
 
 function btwRuntimeSocketPath(dataDir: string): string {
-  mkdirSync(join(homedir(), '.botmux'), { recursive: true, mode: 0o700 });
-  const base = join(homedir(), '.botmux', `btwrt-${stableSocketSlug(dataDir)}-${process.getuid?.() ?? 'nouid'}.sock`);
+  // A real home path can exceed Unix socket limits on managed hosts.  Keep the
+  // socket directory short, but make it private and UID-owned before use.
+  const socketDir = join(realpathSync(tmpdir()), `botmux-btw-${process.getuid?.() ?? 'nouid'}`);
+  securePrivateDirectory(socketDir);
+  const base = join(socketDir, `btwrt-${stableSocketSlug(dataDir)}-${process.getuid?.() ?? 'nouid'}.sock`);
   if (Buffer.byteLength(base) <= SOCKET_PATH_MAX_BYTES) return base;
-  const fallback = join(homedir(), '.botmux', `btwrt-${randomBytes(6).toString('hex')}.sock`);
+  const fallback = join(socketDir, `btwrt-${randomBytes(6).toString('hex')}.sock`);
   if (Buffer.byteLength(fallback) > SOCKET_PATH_MAX_BYTES) {
     throw new Error('btw runtime socket path exceeds platform limit');
   }
@@ -164,7 +188,7 @@ function readToken(paths: RuntimePaths): string {
   return readFileSync(paths.tokenPath, 'utf8').trim();
 }
 
-function writeStartupMarker(paths: RuntimePaths, marker: RuntimeStartupMarker): void {
+function writeStartupMarker(paths: RuntimePaths, marker: RuntimeStartupMarker | RuntimeStartupClaim): void {
   atomicWriteFileSync(paths.startupPath, `${JSON.stringify(marker)}\n`, {
     mode: 0o600,
     durable: true,
@@ -172,9 +196,13 @@ function writeStartupMarker(paths: RuntimePaths, marker: RuntimeStartupMarker): 
   });
 }
 
-function readStartupMarker(paths: RuntimePaths): RuntimeStartupMarker | undefined {
+function readStartupMarker(paths: RuntimePaths): RuntimeStartupMarker | RuntimeStartupClaim | undefined {
   try {
     const value = JSON.parse(readFileSync(paths.startupPath, 'utf8')) as Partial<RuntimeStartupMarker>;
+    if (typeof (value as Partial<RuntimeStartupClaim>).claim === 'string'
+      && typeof (value as Partial<RuntimeStartupClaim>).ownerPid === 'number'
+      && typeof (value as Partial<RuntimeStartupClaim>).ownerStartIdentity === 'string'
+      && typeof value.buildId === 'string') return value as RuntimeStartupClaim;
     if (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0
       || typeof value.startIdentity !== 'string' || !value.startIdentity
       || typeof value.buildId !== 'string' || !value.buildId) return undefined;
@@ -182,6 +210,10 @@ function readStartupMarker(paths: RuntimePaths): RuntimeStartupMarker | undefine
   } catch {
     return undefined;
   }
+}
+
+function isStartupClaim(marker: RuntimeStartupMarker | RuntimeStartupClaim): marker is RuntimeStartupClaim {
+  return 'claim' in marker;
 }
 
 function removeStartupMarker(paths: RuntimePaths): void {
@@ -322,8 +354,8 @@ async function authenticatePublishedRuntime(paths: RuntimePaths, descriptor: Btw
   }
 }
 
-function writeFrame(socket: Socket, frame: AuthOkFrame | AuthErrorFrame | BtwRuntimeFrame): void {
-  socket.write(`${JSON.stringify(frame)}\n`);
+function writeFrame(socket: Socket, frame: AuthOkFrame | AuthErrorFrame | BtwRuntimeFrame, callback?: () => void): void {
+  socket.write(`${JSON.stringify(frame)}\n`, callback);
 }
 
 function publishProjectionWake(state: RuntimeState, larkAppId: string): void {
@@ -344,6 +376,18 @@ function publishProjectionWake(state: RuntimeState, larkAppId: string): void {
         });
       }
     }
+  });
+}
+
+function scheduleExecutorWake(state: RuntimeState, btwOpId: string): void {
+  state.executorWakeQueue.add(btwOpId);
+  if (state.executorWakeScheduled) return;
+  state.executorWakeScheduled = true;
+  queueMicrotask(() => {
+    state.executorWakeScheduled = false;
+    // Task 6 retains only a local, coalesced executor signal.  Task 9 installs
+    // its consumer and native adapter resolver; nothing is dispatched here.
+    state.executorWakeQueue.clear();
   });
 }
 
@@ -368,6 +412,7 @@ async function handleRuntimeCommand(
       const operation = state.store.getBtwOperation(command.scope, command.btwOpId);
       if (!operation) throw new Error(`btw operation not found: ${command.btwOpId}`);
       publishProjectionWake(state, command.scope.larkAppId);
+      scheduleExecutorWake(state, command.btwOpId);
       return operation;
     }
     case 'list_pending_initial_cards':
@@ -389,11 +434,6 @@ async function handleRuntimeCommand(
     case 'quiesce_all':
       return { affectedAppIds: [], projectionWatermarks: [] };
     case 'shutdown_runtime':
-      setImmediate(() => {
-        void shutdownRuntime({ dataDir: state.dataDir }).finally(() => {
-          process.exit(0);
-        });
-      });
       return { done: true };
     default:
       throw new Error(`unsupported btw runtime command: ${command.type}`);
@@ -468,7 +508,11 @@ async function handleAuthedSocket(state: RuntimeState, socket: Socket): Promise<
           requestId: envelope.requestId,
           commandType: envelope.command.type,
           result: result as never,
-        });
+        }, envelope.command.type === 'shutdown_runtime' ? () => {
+          setImmediate(() => {
+            void shutdownRuntime({ dataDir: state.dataDir }).finally(() => process.exit(0));
+          });
+        } : undefined);
       } catch (error) {
         writeFrame(socket, {
           kind: 'reply',
@@ -498,11 +542,42 @@ async function handleAuthedSocket(state: RuntimeState, socket: Socket): Promise<
       const line = buffer.subarray(0, newline).toString('utf8').replace(/\r$/, '');
       buffer = buffer.subarray(newline + 1);
       let envelope: BtwRuntimeEnvelope;
-      try { envelope = JSON.parse(line) as BtwRuntimeEnvelope; } catch { socket.destroy(); return; }
+      try { envelope = parseRuntimeEnvelope(JSON.parse(line)); } catch { socket.destroy(); return; }
       dispatch(envelope);
     }
   });
   socket.once('error', () => socket.destroy());
+}
+
+function parseRuntimeEnvelope(value: unknown): BtwRuntimeEnvelope {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('invalid runtime envelope');
+  const envelope = value as Record<string, unknown>;
+  if (typeof envelope.requestId !== 'string' || !envelope.requestId
+    || envelope.protocolVersion !== BTW_RUNTIME_PROTOCOL_VERSION
+    || typeof envelope.runtimeEpoch !== 'string' || !envelope.runtimeEpoch
+    || !isSupportedRuntimeCommand(envelope.command)) throw new Error('invalid runtime envelope');
+  return envelope as unknown as BtwRuntimeEnvelope;
+}
+
+function isSupportedRuntimeCommand(value: unknown): value is BtwRuntimeCommand {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const command = value as Record<string, unknown>;
+  const type = command.type;
+  if (typeof type !== 'string') return false;
+  switch (type) {
+    case 'prepare_btw': return !!command.input && typeof command.input === 'object';
+    case 'record_initial_card_attempt': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && !!command.outcome && typeof command.outcome === 'object';
+    case 'record_card': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && typeof command.messageId === 'string';
+    case 'submit_btw': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string';
+    case 'list_pending_initial_cards':
+    case 'list_pending_projections':
+    case 'watch_projection_wakes': return typeof command.larkAppId === 'string';
+    case 'record_projection_failure':
+    case 'ack_projection': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && !!command.expected && typeof command.expected === 'object';
+    case 'quiesce_all':
+    case 'shutdown_runtime': return Object.keys(command).length === 1;
+    default: return false;
+  }
 }
 
 function childSpawn(): { command: string; args: string[] } {
@@ -566,11 +641,22 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
       }
     }
     const starting = readStartupMarker(paths);
-    if (starting && starting.buildId === buildId
-      && readProcessStartIdentity(starting.pid) === starting.startIdentity) return;
+    if (starting && starting.buildId === buildId) {
+      if (isStartupClaim(starting)
+        && readProcessStartIdentity(starting.ownerPid) === starting.ownerStartIdentity) return;
+      if (!isStartupClaim(starting)
+        && readProcessStartIdentity(starting.pid) === starting.startIdentity) return;
+    }
     removeStartupMarker(paths);
 
     cleanupSocketFile(paths.socketPath);
+    const ownerStartIdentity = readProcessStartIdentity(process.pid);
+    if (!ownerStartIdentity) throw new Error('cannot determine btw runtime startup claimant identity');
+    const claim = randomToken();
+    // Reserve before spawn. If this process dies at any later point, a future
+    // ensure can prove the owner dead and reclaim it; it never mistakes a
+    // reservation for a live child.
+    writeStartupMarker(paths, { claim, ownerPid: process.pid, ownerStartIdentity, buildId });
     const { spawn } = await import('node:child_process');
     const childRuntime = childSpawn();
     const child = spawn(childRuntime.command, childRuntime.args, {
@@ -579,14 +665,17 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
         ...process.env,
         SESSION_DATA_DIR: dataDir,
         BOTMUX_BTW_RUNTIME_CHILD: '1',
+        BOTMUX_BTW_RUNTIME_STARTUP_CLAIM: claim,
       },
       detached: true,
       stdio: 'ignore',
     });
     child.unref();
     const startIdentity = child.pid === undefined ? undefined : readProcessStartIdentity(child.pid);
-    if (!child.pid || !startIdentity) throw new Error('cannot determine spawned btw runtime identity');
-    writeStartupMarker(paths, { pid: child.pid, startIdentity, buildId });
+    if (!child.pid || !startIdentity) {
+      removeStartupMarker(paths);
+      throw new Error('cannot determine spawned btw runtime identity');
+    }
   });
 
   // Publication is intentionally outside the singleton lock.  The marker above
@@ -660,6 +749,13 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
   const pid = process.pid;
   const startIdentity = readProcessStartIdentity(pid);
   if (!startIdentity) throw new Error('cannot determine btw runtime process identity');
+  const startupClaim = process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
+  const startup = readStartupMarker(paths);
+  if (!startupClaim || !startup || !isStartupClaim(startup) || startup.claim !== startupClaim || startup.buildId !== buildId) {
+    throw new Error('btw runtime startup claim is missing or invalid');
+  }
+  // Child identity becomes visible before it touches socket/store state.
+  writeStartupMarker(paths, { pid, startIdentity, buildId });
   const descriptor = {
     pid,
     startIdentity,
@@ -701,5 +797,7 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
     authenticatedSockets: new Set(),
     projectionWakeQueue: new Set(),
     projectionWakeScheduled: false,
+    executorWakeQueue: new Set(),
+    executorWakeScheduled: false,
   });
 }
