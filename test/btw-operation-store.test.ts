@@ -251,7 +251,74 @@ describe('btw operation store', () => {
     expect(readFileSync(poisonPath, 'utf8')).toContain('"reason": "corrupt_exact_duplicate"');
   });
 
-  it('rejects symlink targets instead of following or replacing them', () => {
+  it('rejects malicious btwOpIds without escaping the partition or touching outside files', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+    const escaped = '../../escape';
+    const outsideDir = join(dataDir, 'btw');
+    const outsidePath = join(outsideDir, 'escape.json');
+    mkdirSync(outsideDir, { recursive: true });
+    writeFileSync(outsidePath, '{broken}\n');
+
+    expect(() => store.pathFor(scope, escaped)).toThrow(/invalid/i);
+    expect(() => store.getBtwOperation(scope, escaped)).toThrow(/invalid/i);
+    expect(readFileSync(outsidePath, 'utf8')).toBe('{broken}\n');
+    expect(readdirSync(outsideDir).sort()).toEqual(['escape.json']);
+    expect(store.getBtwOperation(scope, deriveBtwIdentifiers(scope, 'om_request_1').btwOpId)).toBeUndefined();
+  });
+
+  it('waits on the exact record lock before concluding an operation is absent', async () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+    const missingOpId = deriveBtwIdentifiers(scope, 'om_absent_locked').btwOpId;
+    const recordPath = store.pathFor(scope, missingOpId);
+    const source = `
+      import { mkdirSync } from 'node:fs';
+      import { dirname } from 'node:path';
+      import { withFileLockSync } from './src/utils/file-lock.js';
+
+      const recordPath = process.env.BTW_LOCK_PATH;
+      mkdirSync(dirname(recordPath), { recursive: true });
+      withFileLockSync(recordPath, () => {
+        process.stdout.write('READY\\n');
+        const start = Date.now();
+        while (Date.now() - start < 200) { /* hold lock synchronously */ }
+      });
+    `;
+
+    const child = spawnTsEvalWithRepoImports(source, {
+      cwd: process.cwd(),
+      env: {
+        ...process.env,
+        BTW_LOCK_PATH: recordPath,
+      },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await new Promise<void>((resolve, reject) => {
+      let stdout = '';
+      child.stdout?.on('data', (chunk) => {
+        stdout += String(chunk);
+        if (stdout.includes('READY\n')) resolve();
+      });
+      child.stderr?.on('data', (chunk) => {
+        reject(new Error(String(chunk)));
+      });
+      child.on('exit', (code) => {
+        if (!stdout.includes('READY\n')) reject(new Error(`lock child exited before ready: ${code}`));
+      });
+    });
+
+    const startedAt = Date.now();
+    expect(store.getBtwOperation(scope, missingOpId)).toBeUndefined();
+    const elapsedMs = Date.now() - startedAt;
+
+    await new Promise<void>((resolve) => child.on('close', () => resolve()));
+    expect(elapsedMs).toBeGreaterThanOrEqual(120);
+  });
+
+  it('rejects live and dangling symlink targets instead of following or replacing them', () => {
     const dataDir = newDataDir();
     const store = createStore(dataDir);
     const path = operationPathForRequest(dataDir, 'om_symlink');
@@ -267,6 +334,18 @@ describe('btw operation store', () => {
     })).toThrow(/symlink/i);
     expect(lstatSync(path).isSymbolicLink()).toBe(true);
     expect(readFileSync(outside, 'utf8')).toBe('{"outside":true}\n');
+
+    const danglingPath = operationPathForRequest(dataDir, 'om_symlink_dangling');
+    const missingTarget = join(dataDir, 'missing-target.json');
+    symlinkSync(missingTarget, danglingPath);
+
+    expect(lstatSync(danglingPath).isSymbolicLink()).toBe(true);
+    expect(() => store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_symlink_dangling',
+    })).toThrow(/symlink/i);
+    expect(lstatSync(danglingPath).isSymbolicLink()).toBe(true);
+    expect(existsSync(missingTarget)).toBe(false);
   });
 });
 

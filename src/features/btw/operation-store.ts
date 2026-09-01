@@ -1,6 +1,5 @@
 import { createHash } from 'node:crypto';
 import {
-  existsSync,
   lstatSync,
   mkdirSync,
   readFileSync,
@@ -90,6 +89,7 @@ export function btwOperationPath(
   scope: BtwOperationScope,
   btwOpId: string,
 ): string {
+  assertValidBtwOpId(btwOpId);
   return join(
     dataDir,
     'btw',
@@ -117,7 +117,7 @@ export function createBtwOperationStore(options: {
       assertNotPoisoned(recordPath, scope, ids.btwOpId);
       scanAndHandleSiblingCorruption(recordPath, ids.btwOpId, scope);
       assertNotPoisoned(recordPath, scope, ids.btwOpId);
-      if (!existsSync(recordPath)) {
+      if (!pathExistsNoFollow(recordPath)) {
         const operation = freezeDeep(createPreparedOperation(input, scope, now().toISOString()));
         writeOperation(recordPath, operation);
         return { kind: 'created', operation };
@@ -141,12 +141,12 @@ export function createBtwOperationStore(options: {
     scope: BtwOperationScope,
     btwOpId: string,
   ): BtwOperation | undefined => {
+    assertValidBtwOpId(btwOpId);
     const recordPath = pathFor(scope, btwOpId);
-    if (!existsSync(recordPath) && !existsSync(poisonPathFor(recordPath))) return undefined;
     ensureParentDir(recordPath);
     return withFileLockSync(recordPath, () => {
       assertNotPoisoned(recordPath, scope, btwOpId);
-      if (!existsSync(recordPath)) return undefined;
+      if (!pathExistsNoFollow(recordPath)) return undefined;
       try {
         return readOperationRecord(recordPath, {
           expectedScope: scope,
@@ -221,7 +221,7 @@ function scopeHash(scope: BtwOperationScope): string {
 
 function ensureParentDir(filePath: string): void {
   const dir = dirname(filePath);
-  if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+  mkdirSync(dir, { recursive: true });
 }
 
 function poisonPathFor(recordPath: string): string {
@@ -260,7 +260,7 @@ function scanAndHandleSiblingCorruption(
   scope: BtwOperationScope,
 ): void {
   const dir = dirname(recordPath);
-  if (!existsSync(dir)) return;
+  if (!pathExistsNoFollow(dir)) return;
   const expectedFile = basename(recordPath);
   for (const name of readdirSync(dir)) {
     if (!isPrimaryRecordFile(name)) continue;
@@ -288,7 +288,7 @@ function isPrimaryRecordFile(name: string): boolean {
 }
 
 function assertNotPoisoned(recordPath: string, scope: BtwOperationScope, btwOpId: string): void {
-  if (!existsSync(poisonPathFor(recordPath))) return;
+  if (!pathExistsNoFollow(poisonPathFor(recordPath))) return;
   throw new BtwOperationPoisonedError(scope, btwOpId);
 }
 
@@ -298,7 +298,7 @@ function poisonExactRecord(
   btwOpId: string,
   error: BtwRecordParseError,
 ): never {
-  if (existsSync(recordPath)) {
+  if (pathExistsNoFollow(recordPath)) {
     const quarantinePath = quarantinePathFor(recordPath, error.digest);
     try {
       renameSync(recordPath, quarantinePath);
@@ -320,7 +320,7 @@ function poisonExactRecord(
 
 function quarantineCorruptSibling(filePath: string, error: BtwRecordParseError): void {
   const quarantinePath = quarantinePathFor(filePath, error.digest);
-  if (!existsSync(filePath)) return;
+  if (!pathExistsNoFollow(filePath)) return;
   try {
     renameSync(filePath, quarantinePath);
   } catch (renameError) {
@@ -739,9 +739,27 @@ function stringEnum<T extends string>(
 }
 
 function assertLeafIsNotSymlink(filePath: string): void {
-  if (!existsSync(filePath)) return;
-  if (lstatSync(filePath).isSymbolicLink()) {
-    throw new BtwSymlinkRejectedError();
+  try {
+    if (lstatSync(filePath).isSymbolicLink()) throw new BtwSymlinkRejectedError();
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw error;
+  }
+}
+
+function pathExistsNoFollow(filePath: string): boolean {
+  try {
+    lstatSync(filePath);
+    return true;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
+    throw error;
+  }
+}
+
+function assertValidBtwOpId(btwOpId: string): void {
+  if (!/^[a-z][a-z0-9-]*_[0-9a-f]+$/.test(btwOpId)) {
+    throw new Error(`invalid btwOpId: ${btwOpId}`);
   }
 }
 
