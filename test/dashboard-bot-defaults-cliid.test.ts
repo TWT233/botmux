@@ -567,7 +567,6 @@ describe('Codex-compatible runtime editor', () => {
           patchBot,
         }));
       });
-      await flushEffects(2);
 
       act(() => {
         renderer.update(React.createElement(BotAgentSection, {
@@ -578,7 +577,9 @@ describe('Codex-compatible runtime editor', () => {
             model: '',
             nativeSubagentRuntime: {
               model: { mode: 'custom', value: 'DeepSeek-V4-Pro' },
-              reasoningEffort: { mode: 'custom', value: 'high' },
+              // Persisted payload can be temporarily incompatible with the
+              // hydrated model, but must survive untouched initial hydration.
+              reasoningEffort: { mode: 'custom', value: 'ultra' },
             },
           },
           sessionFallback: 'codex',
@@ -594,11 +595,11 @@ describe('Codex-compatible runtime editor', () => {
       );
       const effortValue = await waitForObserved(
         () => root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.value,
-        value => value === 'high',
+        value => value === 'ultra',
       );
 
       expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('custom');
-      expect(effortValue).toBe('high');
+      expect(effortValue).toBe('ultra');
     } finally {
       (globalThis as any).fetch = previousFetch;
     }
@@ -645,8 +646,8 @@ describe('Codex-compatible runtime editor', () => {
 
       await act(async () => {
         root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
-        await flushEffects(2);
       });
+      await waitForObserved(() => requests.length, value => value === 1);
 
       expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
       expect(root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
@@ -684,15 +685,18 @@ describe('Codex-compatible runtime editor', () => {
 
       await act(async () => {
         root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
-        await flushEffects(2);
       });
 
+      await waitForObserved(
+        () => requests.length,
+        value => value === 1,
+      );
+
+      expect(requests).toEqual([{ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: null }]);
       await waitForObserved(
         () => root.findByProps({ 'data-agent-status': '' }).children.join(''),
         text => text.includes('已保存'),
       );
-
-      expect(requests).toEqual([{ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: null }]);
       expect(root.findByProps({ 'data-agent-status': '' }).children.join('')).toContain('已保存');
       expect(root.findAll(node => node.props?.['data-native-subagent-error'] === '')).toHaveLength(0);
     } finally {
