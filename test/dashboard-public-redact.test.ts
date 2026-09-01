@@ -27,6 +27,9 @@ function sampleChats() {
           botName: 'Claude',
           inChat: true,
           hasRole: true,
+          pinStreamingCardMasterEnabled: true,
+          pinStreamingCardChatEnabled: false,
+          pinStreamingCardEffectiveEnabled: false,
           oncallChat: { chatId: 'oc_chat1', workingDir: '/root/iserver/customer-secret' },
         },
         {
@@ -34,6 +37,9 @@ function sampleChats() {
           botName: 'Codex',
           inChat: false,
           hasRole: false,
+          pinStreamingCardMasterEnabled: false,
+          pinStreamingCardChatEnabled: true,
+          pinStreamingCardEffectiveEnabled: false,
           oncallChat: null,
         },
       ],
@@ -82,11 +88,41 @@ describe('redactGroupsForPublic', () => {
         chatMode: 'group',
         avatar: 'https://avatar.example/chat1.png',
         memberBots: [
-          { larkAppId: 'cli_a', botName: 'Claude', inChat: true },
-          { larkAppId: 'cli_b', botName: 'Codex', inChat: false },
+          {
+            larkAppId: 'cli_a',
+            botName: 'Claude',
+            inChat: true,
+            pinStreamingCardMasterEnabled: true,
+            pinStreamingCardChatEnabled: false,
+            pinStreamingCardEffectiveEnabled: false,
+          },
+          {
+            larkAppId: 'cli_b',
+            botName: 'Codex',
+            inChat: false,
+            pinStreamingCardMasterEnabled: false,
+            pinStreamingCardChatEnabled: true,
+            pinStreamingCardEffectiveEnabled: false,
+          },
         ],
       },
     ]);
+  });
+
+  it('keeps per-chat pin-streaming booleans for anonymous visitors while still stripping private config fields', () => {
+    const [out] = redactGroupsForPublic(sampleChats()) as any[];
+    expect(out.memberBots[0]).toMatchObject({
+      pinStreamingCardMasterEnabled: true,
+      pinStreamingCardChatEnabled: false,
+      pinStreamingCardEffectiveEnabled: false,
+    });
+    expect(out.memberBots[1]).toMatchObject({
+      pinStreamingCardMasterEnabled: false,
+      pinStreamingCardChatEnabled: true,
+      pinStreamingCardEffectiveEnabled: false,
+    });
+    expect(out.memberBots[0]).not.toHaveProperty('oncallChat');
+    expect(out.memberBots[0]).not.toHaveProperty('hasRole');
   });
 
   it('never leaks per-bot permission config even if a roster row starts carrying it', () => {
