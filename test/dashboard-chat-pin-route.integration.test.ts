@@ -86,6 +86,7 @@ async function stopChild(child: ChildProcess | undefined): Promise<void> {
 describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-card/:appId', () => {
   let rootDir = '';
   let fakeDaemon: Server | undefined;
+  let absentBotDaemon: Server | undefined;
   let dashboardChild: ChildProcess | undefined;
 
   afterEach(async () => {
@@ -93,6 +94,8 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
     dashboardChild = undefined;
     await closeServer(fakeDaemon);
     fakeDaemon = undefined;
+    await closeServer(absentBotDaemon);
+    absentBotDaemon = undefined;
     if (rootDir) rmSync(rootDir, { recursive: true, force: true });
     rootDir = '';
   });
@@ -108,12 +111,20 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
     mkdirSync(registryDir, { recursive: true });
     writeFileSync(join(botmuxDir, '.dashboard-secret'), 'dashboard-secret-for-route-test', { mode: 0o600 });
     writeFileSync(join(botmuxDir, '.data-dir'), `${dataDir}\n`, { mode: 0o600 });
-    writeFileSync(botsConfigPath, JSON.stringify([{
-      larkAppId: 'cli test-app',
-      larkAppSecret: 'secret',
-      botName: 'bot A',
-      cliId: 'codex',
-    }], null, 2));
+    writeFileSync(botsConfigPath, JSON.stringify([
+      {
+        larkAppId: 'cli test-app',
+        larkAppSecret: 'secret',
+        botName: 'bot A',
+        cliId: 'codex',
+      },
+      {
+        larkAppId: 'cli absent-app',
+        larkAppSecret: 'secret',
+        botName: 'bot B',
+        cliId: 'claude-code',
+      },
+    ], null, 2));
 
     const fakeGroupReads: string[] = [];
     const fakePinWrites: CapturedRequest[] = [];
@@ -154,12 +165,31 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
       res.end(JSON.stringify({ ok: false, error: 'unexpected_route', method: req.method, url }));
     });
     const fakeDaemonPort = await listen(fakeDaemon);
+    absentBotDaemon = createServer((req: IncomingMessage, res: ServerResponse) => {
+      if (req.method === 'GET' && req.url === '/api/groups') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ chats: [] }));
+        return;
+      }
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: false, error: 'unexpected_route', method: req.method, url: req.url }));
+    });
+    const absentBotDaemonPort = await listen(absentBotDaemon);
 
     writeFileSync(join(registryDir, 'cli test-app.json'), JSON.stringify({
       larkAppId: 'cli test-app',
       botName: 'bot A',
       botIndex: 0,
       ipcPort: fakeDaemonPort,
+      pid: process.pid,
+      startedAt: Date.now(),
+      lastHeartbeat: Date.now(),
+    }));
+    writeFileSync(join(registryDir, 'cli absent-app.json'), JSON.stringify({
+      larkAppId: 'cli absent-app',
+      botName: 'bot B',
+      botIndex: 1,
+      ipcPort: absentBotDaemonPort,
       pid: process.pid,
       startedAt: Date.now(),
       lastHeartbeat: Date.now(),
@@ -194,18 +224,31 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
       headers: { cookie: `botmux_dashboard_token=${dashboardToken}` },
     });
     expect(firstGroups.status, stderr).toBe(200);
-    expect(await firstGroups.json()).toMatchObject({
+    const firstGroupsPayload = await firstGroups.json() as {
+      chats: Array<{
+        chatId: string;
+        name: string;
+        memberBots: Array<Record<string, unknown>>;
+      }>;
+    };
+    expect(firstGroupsPayload).toMatchObject({
       chats: [{
         chatId: 'oc topic/with slash',
         name: 'group read 1',
-        memberBots: [{
-          larkAppId: 'cli test-app',
-          pinStreamingCardMasterEnabled: true,
-          pinStreamingCardChatEnabled: true,
-          pinStreamingCardEffectiveEnabled: true,
-        }],
       }],
     });
+    const presentBot = firstGroupsPayload.chats[0].memberBots.find(bot => bot.larkAppId === 'cli test-app');
+    expect(presentBot).toMatchObject({
+      inChat: true,
+      pinStreamingCardMasterEnabled: true,
+      pinStreamingCardChatEnabled: true,
+      pinStreamingCardEffectiveEnabled: true,
+    });
+    const absentBot = firstGroupsPayload.chats[0].memberBots.find(bot => bot.larkAppId === 'cli absent-app');
+    expect(absentBot).toMatchObject({ inChat: false });
+    expect(absentBot).not.toHaveProperty('pinStreamingCardMasterEnabled');
+    expect(absentBot).not.toHaveProperty('pinStreamingCardChatEnabled');
+    expect(absentBot).not.toHaveProperty('pinStreamingCardEffectiveEnabled');
 
     const writeResponse = await fetch(
       `${base}/api/groups/${encodeURIComponent('oc topic/with slash')}/pin-streaming-card/${encodeURIComponent('cli test-app')}`,
@@ -233,17 +276,24 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
       headers: { cookie: `botmux_dashboard_token=${dashboardToken}` },
     });
     expect(secondGroups.status, stderr).toBe(200);
-    expect(await secondGroups.json()).toMatchObject({
+    const secondGroupsPayload = await secondGroups.json() as {
+      chats: Array<{
+        chatId: string;
+        name: string;
+        memberBots: Array<Record<string, unknown>>;
+      }>;
+    };
+    expect(secondGroupsPayload).toMatchObject({
       chats: [{
         chatId: 'oc topic/with slash',
         name: 'group read 2',
-        memberBots: [{
-          larkAppId: 'cli test-app',
-          pinStreamingCardMasterEnabled: true,
-          pinStreamingCardChatEnabled: false,
-          pinStreamingCardEffectiveEnabled: false,
-        }],
       }],
+    });
+    expect(secondGroupsPayload.chats[0].memberBots.find(bot => bot.larkAppId === 'cli test-app')).toMatchObject({
+      inChat: true,
+      pinStreamingCardMasterEnabled: true,
+      pinStreamingCardChatEnabled: false,
+      pinStreamingCardEffectiveEnabled: false,
     });
     expect(fakeGroupReads).toHaveLength(2);
   }, 20_000);
