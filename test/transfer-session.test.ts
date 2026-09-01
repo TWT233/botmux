@@ -45,7 +45,9 @@ vi.mock('../src/core/dashboard-events.js', () => ({
 // (replace the live streaming card with an inert "已搬迁" snapshot before
 // clearing streamCardId). Mock it so tests don't try real Lark API calls.
 const updateMessageMock = vi.fn(async () => undefined);
-const pinMessageMock = vi.fn(async () => true);
+const pinMessageMock = vi.fn(async (larkAppId: string, messageId: string) => ({
+  messageId, operatorId: larkAppId, operatorIdType: 'app_id',
+}));
 const unpinMessageMock = vi.fn(async () => true);
 vi.mock('../src/im/lark/client.js', () => ({
   updateMessage: (...a: any[]) => updateMessageMock(...a),
@@ -88,6 +90,7 @@ import {
   suspendWorker,
   transferSession,
   __testOnly_setupWorkerHandlers,
+  __testOnly_resetPinStreamingCardReconcileQueue,
   __testOnly_waitForPinStreamingCardIdle,
   pinStreamingCardIfEnabled,
   setActiveSessionsRegistry,
@@ -181,6 +184,7 @@ describe('transferSession', () => {
       config: { cliId: 'claude-code', larkAppId: 'cli_app_test', pinStreamingCard: false },
       botName: 'TestBot',
     });
+    __testOnly_resetPinStreamingCardReconcileQueue();
     __testOnly_resetBotTurnMutationGates();
     vi.mocked(sessionStore.listSessions).mockReturnValue([]);
     resetDeviceIsolationActivationForTest();
@@ -1523,6 +1527,22 @@ describe('transferSession', () => {
     const r = await callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target');
     expect(r.ok).toBe(true);
     expect(registry.get(sessionKey('oc_target', 'cli_app_test'))).toBe(ds);
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
+  it('does not infer source Pin ownership from enabled config during transfer', async () => {
+    const ds = makeDs({ frozenCards: new Map([
+      ['prior', { messageId: 'om_frozen_card', content: '', title: '', displayMode: 'hidden' }],
+    ]) });
+    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    getBotMock.mockReturnValue({
+      config: { cliId: 'claude-code', larkAppId: 'cli_app_test', pinStreamingCard: true },
+      botName: 'TestBot',
+    });
+
+    await expect(callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target')).resolves.toEqual({ ok: true });
+    await __testOnly_waitForPinStreamingCardIdle();
+
     expect(unpinMessageMock).not.toHaveBeenCalled();
   });
 

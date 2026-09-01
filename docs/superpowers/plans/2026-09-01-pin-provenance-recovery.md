@@ -11,8 +11,10 @@
 ## Global Constraints
 
 - Authorization requires a frozen local candidate and exact same-app operator provenance.
+- Successful create status is insufficient: the returned Pin must repeat the requested message id and exact same-app provenance.
 - Never infer provenance from author, content, or message-id shape.
-- Discovery augments existing transition authority; list failure cannot suppress it.
+- Explicit off cleans process-owned ids plus fresh remote same-app proven candidates; list failure skips ambiguous candidates.
+- Ordinary disable, close, and transfer are process-ownership-only.
 - Startup/configuration remain non-blocking and fail-open.
 - apiOnly/HTTP virtual/no-transport paths make zero Pin API calls.
 - Reuse existing per-bot FIFO, per-message queues, and batch size 20.
@@ -24,11 +26,12 @@
 
 **Files:** src/im/lark/client.ts; test/lark-pin-message.test.ts
 
-**Interfaces:** Produce LarkPinRecord and listChatPins(larkAppId, chatId): Promise<LarkPinRecord[]>.
+**Interfaces:** Produce LarkPinRecord, pinMessage(larkAppId, messageId): Promise<LarkPinRecord | null>, and listChatPins(larkAppId, chatId): Promise<LarkPinRecord[]>.
 
 - [ ] Add failing tests for exact first/next payload and normalized records.
 - [ ] Add failing tests for non-zero/missing code, SDK errors, and missing/repeated token.
 - [ ] Implement strict explicit pagination with page size 50.
+- [ ] Return normalized create-response provenance instead of a success boolean.
 - [ ] Run focused tests, commit feat(card): 封装群内 Pin 来源分页查询, and push.
 
 ### Task 2: Provenance-aware worker reconciliation
@@ -38,9 +41,11 @@
 **Interfaces:** Consume listChatPins. Produce reconcileRestoredStreamingCardPins(larkAppId): void.
 
 - [ ] Add failing restart recovery and operator/candidate filtering tests.
+- [ ] Add failing current-collision, list-to-create race, ordinary disable, close, transfer, and explicit bot/chat off tests.
 - [ ] Add failing tests for one list per chat, partial failure, no-transport, and FIFO ordering.
-- [ ] Extend reconcile requests with frozen candidates and remote-discovery intent while preserving existing cleanup authority.
-- [ ] Implement per-chat discovery, exact intersection, enabled ownership restore, and disabled cleanup.
+- [ ] Extend reconcile requests with frozen candidates, process-owned ids, and remote-discovery intent.
+- [ ] Implement per-chat discovery, exact intersection, enabled ownership restore without duplicate create, provenance-checked create, and disabled cleanup.
+- [ ] Keep restored-worker silent ready from independently re-pinning before the list proof completes.
 - [ ] Add the maintainer-requested comment for opt-out exclusion and remote-proof retry.
 - [ ] Run Pin/close/transfer/worker-ready tests, commit feat(card): 恢复重启后的 Pin 清理来源, and push.
 
