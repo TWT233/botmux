@@ -47,6 +47,7 @@ const REPLACEMENT_STATES = new Set(['none', 'pending', 'created'] as const);
 const FRAME_STATES = new Set(['not_started', 'definitely_unsent', 'may_have_been_sent', 'acknowledged'] as const);
 const DELIVERY_FAILURE_KINDS = new Set(['visible_fallback', 'provider_permanent'] as const);
 const REMINDER_STATES = new Set(['none', 'pending', 'sent', 'unknown'] as const);
+const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled', 'interrupted'] as const);
 
 interface BtwOperationPoisonMarker {
   schemaVersion: typeof POISON_SCHEMA_VERSION;
@@ -55,6 +56,16 @@ interface BtwOperationPoisonMarker {
   scope: BtwOperationScope;
   reason: 'corrupt_exact_duplicate';
   sourceDigest: string;
+}
+
+interface BtwTerminalConflictDiagnostic {
+  schemaVersion: 1;
+  kind: 'btw_terminal_conflict';
+  btwOpId: string;
+  scope: BtwOperationScope;
+  existingExecution: BtwOperation['execution'];
+  incomingTerminal: BtwTerminalOutcome;
+  detectedAt: string;
 }
 
 class BtwRecordParseError extends Error {
@@ -160,6 +171,284 @@ export function createBtwOperationStore(options: {
     });
   };
 
+  const withOperationMutation = <T>(
+    scope: BtwOperationScope,
+    btwOpId: string,
+    mutate: (operation: BtwOperation, isoNow: string, recordPath: string) => {
+      operation: BtwOperation;
+      result: T;
+      changed: boolean;
+    },
+  ): T => {
+    assertValidBtwOpId(btwOpId);
+    const recordPath = pathFor(scope, btwOpId);
+    ensureParentDir(recordPath);
+    return withFileLockSync(recordPath, () => {
+      assertNotPoisoned(recordPath, scope, btwOpId);
+      if (!pathExistsNoFollow(recordPath)) {
+        throw new Error(`btw operation not found: ${btwOpId}`);
+      }
+      const current = readOperationRecord(recordPath, {
+        expectedScope: scope,
+        expectedBtwOpId: btwOpId,
+      });
+      const isoNow = now().toISOString();
+      const next = mutate(current, isoNow, recordPath);
+      if (next.changed) {
+        writeOperation(recordPath, next.operation);
+      }
+      return next.result;
+    });
+  };
+
+  const listExecutableBtwOperations = (runtimeEpoch: string): BtwOperation[] =>
+    listAllOperations(options.dataDir).filter((operation) =>
+      (operation.execution.state === 'accepted'
+        && operation.parent.runtimeEpoch === runtimeEpoch)
+      || (
+        operation.execution.state === 'submit_prepared'
+        && operation.execution.frameState === 'definitely_unsent'
+        && operation.execution.submissionEpoch === runtimeEpoch
+      ));
+
+  const recordBtwCard = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    messageId: string,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    if (operation.execution.state === 'accepted') {
+      if (operation.card.messageId === messageId) {
+        return { operation, result: operation, changed: false };
+      }
+      throw new Error('accepted btw operation already bound to a different message id');
+    }
+    if (operation.execution.state !== 'card_pending') {
+      throw new Error(`recordBtwCard requires card_pending state, got ${operation.execution.state}`);
+    }
+    const next = evolveOperation(operation, isoNow, {
+      card: {
+        ...operation.card,
+        messageId,
+      },
+      execution: {
+        ...operation.execution,
+        state: 'accepted',
+      },
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const prepareBtwSubmission = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    runtimeEpoch: string,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    const current = operation.execution;
+    const canStartFresh = current.state === 'accepted';
+    const canRetrySameEpoch = current.state === 'submit_prepared'
+      && current.frameState === 'definitely_unsent'
+      && current.submissionEpoch === runtimeEpoch;
+    if (canStartFresh && operation.parent.runtimeEpoch !== runtimeEpoch) {
+      throw new Error(`runtime epoch mismatch for accepted btw operation: expected ${operation.parent.runtimeEpoch}, got ${runtimeEpoch}`);
+    }
+    if (!canStartFresh && !canRetrySameEpoch) {
+      if (current.state === 'submit_prepared' && current.submissionEpoch !== runtimeEpoch) {
+        throw new Error(`runtime epoch mismatch for submit_prepared btw operation: expected ${current.submissionEpoch}, got ${runtimeEpoch}`);
+      }
+      throw new Error(`prepareBtwSubmission requires accepted state or same-epoch definitely-unsent retry, got ${current.state}`);
+    }
+    const next = evolveOperation(operation, isoNow, {
+      execution: {
+        ...current,
+        state: 'submit_prepared',
+        attempt: current.attempt + 1,
+        submissionEpoch: runtimeEpoch,
+        frameState: 'may_have_been_sent',
+        message: undefined,
+      },
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const recordBtwDefinitelyUnsent = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    runtimeEpoch: string,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    const current = operation.execution;
+    if (current.state !== 'submit_prepared') {
+      throw new Error(`recordBtwDefinitelyUnsent requires submit_prepared state, got ${current.state}`);
+    }
+    if (current.submissionEpoch !== runtimeEpoch) {
+      throw new Error(`runtime epoch mismatch for submit_prepared btw operation: expected ${current.submissionEpoch}, got ${runtimeEpoch}`);
+    }
+    if (current.frameState === 'definitely_unsent') {
+      return { operation, result: operation, changed: false };
+    }
+    if (current.frameState !== 'may_have_been_sent') {
+      throw new Error(`recordBtwDefinitelyUnsent requires may_have_been_sent frame state, got ${current.frameState}`);
+    }
+    const next = evolveOperation(operation, isoNow, {
+      execution: {
+        ...current,
+        frameState: 'definitely_unsent',
+      },
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const recordBtwSubmissionUnknown = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    message: string,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    const current = operation.execution;
+    if (current.state === 'submission_unknown') {
+      if ((current.message ?? '') === message) {
+        return { operation, result: operation, changed: false };
+      }
+      throw new Error('submission_unknown btw operation is immutable');
+    }
+    if (current.state !== 'submit_prepared' || current.frameState !== 'may_have_been_sent') {
+      throw new Error(`recordBtwSubmissionUnknown requires submit_prepared/may_have_been_sent, got ${current.state}/${current.frameState}`);
+    }
+    const next = evolveVisibleOperation(operation, isoNow, {
+      execution: {
+        ...current,
+        state: 'submission_unknown',
+        message,
+      },
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const recordBtwRunning = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    nativeTurnId: string,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    const current = operation.execution;
+    if (current.nativeTurnId !== nativeTurnId) {
+      throw new Error(`native turn id mismatch: expected ${current.nativeTurnId}, got ${nativeTurnId}`);
+    }
+    if (current.state === 'running') {
+      return { operation, result: operation, changed: false };
+    }
+    if (current.state !== 'submit_prepared' || current.frameState !== 'may_have_been_sent') {
+      throw new Error(`recordBtwRunning invalid state: expected submit_prepared/may_have_been_sent, got ${current.state}/${current.frameState}`);
+    }
+    const next = evolveOperation(operation, isoNow, {
+      execution: {
+        ...current,
+        state: 'running',
+        frameState: 'acknowledged',
+      },
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const recordBtwTerminal = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    terminal: BtwTerminalOutcome,
+  ): { kind: 'advanced' | 'duplicate'; operation: BtwOperation } => withOperationMutation<{ kind: 'advanced' | 'duplicate'; operation: BtwOperation }>(scope, btwOpId, (operation, isoNow, recordPath) => {
+    const current = operation.execution;
+    if (isTerminalExecutionState(current.state)) {
+      if (terminalMatchesExecution(current, terminal)) {
+        return { operation, result: { kind: 'duplicate', operation }, changed: false };
+      }
+      writeTerminalConflict(recordPath, {
+        schemaVersion: 1,
+        kind: 'btw_terminal_conflict',
+        btwOpId,
+        scope,
+        existingExecution: current,
+        incomingTerminal: terminal,
+        detectedAt: isoNow,
+      });
+      return { operation, result: { kind: 'duplicate', operation }, changed: false };
+    }
+    if (!(
+      current.state === 'submit_prepared'
+      || current.state === 'running'
+      || current.state === 'submission_unknown'
+    )) {
+      throw new Error(`recordBtwTerminal requires active or submission_unknown state, got ${current.state}`);
+    }
+    const next = evolveVisibleOperation(operation, isoNow, {
+      execution: terminalToExecution(current, terminal),
+    });
+    return { operation: next, result: { kind: 'advanced', operation: next }, changed: true };
+  });
+
+  const reconcileBtwOperations = (input: {
+    runtimeEpoch: string;
+    liveSessionIds: ReadonlySet<string>;
+  }): BtwOperation[] => {
+    const changed: BtwOperation[] = [];
+    for (const operation of listAllOperations(options.dataDir)) {
+      const currentEpoch = operation.execution.submissionEpoch ?? operation.parent.runtimeEpoch;
+      const sessionLive = input.liveSessionIds.has(operation.parent.botmuxSessionId);
+      const sameEpoch = currentEpoch === input.runtimeEpoch;
+      let nextState: BtwOperation['execution']['state'] | undefined;
+      if (operation.execution.state === 'accepted' && (!sessionLive || operation.parent.runtimeEpoch !== input.runtimeEpoch)) {
+        nextState = 'interrupted';
+      } else if (operation.execution.state === 'running' && (!sessionLive || !sameEpoch)) {
+        nextState = 'interrupted';
+      } else if (operation.execution.state === 'submit_prepared' && (!sessionLive || !sameEpoch)) {
+        nextState = 'submission_unknown';
+      }
+      if (!nextState) continue;
+      const updated = withOperationMutation(
+        {
+          larkAppId: operation.replyTarget.larkAppId,
+          botmuxSessionId: operation.parent.botmuxSessionId,
+        },
+        operation.btwOpId,
+        (fresh, isoNow) => {
+          const freshEpoch = fresh.execution.submissionEpoch ?? fresh.parent.runtimeEpoch;
+          const freshSessionLive = input.liveSessionIds.has(fresh.parent.botmuxSessionId);
+          const freshSameEpoch = freshEpoch === input.runtimeEpoch;
+          if (fresh.execution.state === 'accepted' && (!freshSessionLive || fresh.parent.runtimeEpoch !== input.runtimeEpoch)) {
+            const next = evolveVisibleOperation(fresh, isoNow, {
+              execution: {
+                ...fresh.execution,
+                state: 'interrupted',
+                message: fresh.execution.message ?? 'runtime no longer owns accepted btw operation',
+              },
+            });
+            return { operation: next, result: next, changed: true };
+          }
+          if (fresh.execution.state === 'running' && (!freshSessionLive || !freshSameEpoch)) {
+            const next = evolveVisibleOperation(fresh, isoNow, {
+              execution: {
+                ...fresh.execution,
+                state: 'interrupted',
+                message: fresh.execution.message ?? 'runtime lost before btw terminal persisted',
+              },
+            });
+            return { operation: next, result: next, changed: true };
+          }
+          if (fresh.execution.state === 'submit_prepared' && (!freshSessionLive || !freshSameEpoch)) {
+            const next = evolveVisibleOperation(fresh, isoNow, {
+              execution: {
+                ...fresh.execution,
+                state: 'submission_unknown',
+                message: fresh.execution.message ?? 'runtime lost after btw submission may have been sent',
+              },
+            });
+            return { operation: next, result: next, changed: true };
+          }
+          return { operation: fresh, result: fresh, changed: false };
+        },
+      );
+      if (updated.revision !== operation.revision || updated.updatedAt !== operation.updatedAt) {
+        changed.push(updated);
+      }
+    }
+    return changed;
+  };
+
   const notImplemented = (name: string): never => {
     throw new Error(`${name} is not implemented in Task 2`);
   };
@@ -171,20 +460,13 @@ export function createBtwOperationStore(options: {
     listPendingInitialCards: () => notImplemented('listPendingInitialCards'),
     recordInitialCardAttempt: (_scope: BtwOperationScope, _btwOpId: string, _outcome: BtwInitialCardAttemptOutcome) =>
       notImplemented('recordInitialCardAttempt'),
-    recordBtwCard: (_scope: BtwOperationScope, _btwOpId: string, _messageId: string) =>
-      notImplemented('recordBtwCard'),
-    listExecutableBtwOperations: (_runtimeEpoch: string) =>
-      notImplemented('listExecutableBtwOperations'),
-    prepareBtwSubmission: (_scope: BtwOperationScope, _btwOpId: string, _runtimeEpoch: string) =>
-      notImplemented('prepareBtwSubmission'),
-    recordBtwDefinitelyUnsent: (_scope: BtwOperationScope, _btwOpId: string, _runtimeEpoch: string) =>
-      notImplemented('recordBtwDefinitelyUnsent'),
-    recordBtwSubmissionUnknown: (_scope: BtwOperationScope, _btwOpId: string, _message: string) =>
-      notImplemented('recordBtwSubmissionUnknown'),
-    recordBtwRunning: (_scope: BtwOperationScope, _btwOpId: string, _nativeTurnId: string) =>
-      notImplemented('recordBtwRunning'),
-    recordBtwTerminal: (_scope: BtwOperationScope, _btwOpId: string, _terminal: BtwTerminalOutcome) =>
-      notImplemented('recordBtwTerminal'),
+    recordBtwCard,
+    listExecutableBtwOperations,
+    prepareBtwSubmission,
+    recordBtwDefinitelyUnsent,
+    recordBtwSubmissionUnknown,
+    recordBtwRunning,
+    recordBtwTerminal,
     listPendingBtwProjections: (_larkAppId: string): BtwProjectionItem[] =>
       notImplemented('listPendingBtwProjections'),
     recordBtwProjectionFailure: (
@@ -199,8 +481,7 @@ export function createBtwOperationStore(options: {
       _expected: { operationRevision: number; projectionRevision: number },
       _outcome: BtwProjectionProviderOutcome,
     ) => notImplemented('ackBtwProjection'),
-    reconcileBtwOperations: (_input: { runtimeEpoch: string; liveSessionIds: ReadonlySet<string> }) =>
-      notImplemented('reconcileBtwOperations'),
+    reconcileBtwOperations,
   };
 }
 
@@ -248,6 +529,16 @@ function writePoisonMarker(recordPath: string, marker: BtwOperationPoisonMarker)
   const poisonPath = poisonPathFor(recordPath);
   assertLeafIsNotSymlink(poisonPath);
   atomicWriteFileSync(poisonPath, `${JSON.stringify(marker, null, 2)}\n`, {
+    mode: 0o600,
+    durable: true,
+    followTargetSymlink: false,
+  });
+}
+
+function writeTerminalConflict(recordPath: string, diagnostic: BtwTerminalConflictDiagnostic): void {
+  const conflictPath = `${recordPath.slice(0, -'.json'.length)}.terminal-conflict.${digestOfString(JSON.stringify(diagnostic))}.json`;
+  assertLeafIsNotSymlink(conflictPath);
+  atomicWriteFileSync(conflictPath, `${JSON.stringify(diagnostic, null, 2)}\n`, {
     mode: 0o600,
     durable: true,
     followTargetSymlink: false,
@@ -327,6 +618,43 @@ function quarantineCorruptSibling(filePath: string, error: BtwRecordParseError):
     const code = (renameError as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT' && code !== 'EEXIST') throw renameError;
   }
+}
+
+function listAllOperations(dataDir: string): BtwOperation[] {
+  const root = join(dataDir, 'btw', 'operations');
+  if (!pathExistsNoFollow(root)) return [];
+  const operations: BtwOperation[] = [];
+  for (const partitionName of readdirSync(root)) {
+    const partitionPath = join(root, partitionName);
+    let partitionStat: ReturnType<typeof lstatSync>;
+    try {
+      partitionStat = lstatSync(partitionPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') continue;
+      throw error;
+    }
+    if (!partitionStat.isDirectory() || partitionStat.isSymbolicLink()) continue;
+    for (const name of readdirSync(partitionPath)) {
+      if (!isPrimaryRecordFile(name)) continue;
+      const recordPath = join(partitionPath, name);
+      const operation = withFileLockSync(recordPath, () => {
+        try {
+          return readOperationRecord(recordPath, {
+            expectedPartitionHash: partitionName,
+          });
+        } catch (error) {
+          if (error instanceof BtwSymlinkRejectedError) {
+            quarantineCorruptSibling(recordPath, toParseError(recordPath, error));
+            return undefined;
+          }
+          quarantineCorruptSibling(recordPath, toParseError(recordPath, error));
+          return undefined;
+        }
+      });
+      if (operation) operations.push(operation);
+    }
+  }
+  return operations;
 }
 
 function toParseError(filePath: string, error: unknown): BtwRecordParseError {
@@ -415,6 +743,103 @@ function createPreparedOperation(
     createdAt: isoNow,
     updatedAt: isoNow,
   };
+}
+
+function evolveOperation(
+  operation: BtwOperation,
+  isoNow: string,
+  patch: Partial<Pick<BtwOperation, 'card' | 'execution' | 'projection'>>,
+): BtwOperation {
+  return freezeDeep({
+    ...operation,
+    ...(patch.card ? { card: patch.card } : {}),
+    ...(patch.execution ? { execution: stripUndefinedObjectKeys(patch.execution) } : {}),
+    ...(patch.projection ? { projection: stripUndefinedObjectKeys(patch.projection) } : {}),
+    revision: operation.revision + 1,
+    updatedAt: isoNow,
+  });
+}
+
+function evolveVisibleOperation(
+  operation: BtwOperation,
+  isoNow: string,
+  patch: Partial<Pick<BtwOperation, 'card' | 'execution' | 'projection'>>,
+): BtwOperation {
+  const projection = patch.projection ?? operation.projection;
+  return evolveOperation(operation, isoNow, {
+    ...patch,
+    projection: {
+      ...projection,
+      desiredRevision: operation.projection.desiredRevision + 1,
+    },
+  });
+}
+
+function stripUndefinedObjectKeys<T extends Record<string, unknown>>(value: T): T {
+  return Object.fromEntries(
+    Object.entries(value).filter(([, entry]) => entry !== undefined),
+  ) as T;
+}
+
+function isTerminalExecutionState(state: BtwOperation['execution']['state']): boolean {
+  return TERMINAL_STATES.has(state as (typeof TERMINAL_STATES extends Set<infer T> ? T : never));
+}
+
+function terminalMatchesExecution(
+  execution: BtwOperation['execution'],
+  terminal: BtwTerminalOutcome,
+): boolean {
+  if (execution.state !== terminal.status) return false;
+  switch (terminal.status) {
+    case 'completed':
+      return execution.answer === terminal.answer;
+    case 'failed':
+      return execution.errorCode === terminal.errorCode
+        && execution.message === terminal.message;
+    case 'cancelled':
+    case 'interrupted':
+      return execution.message === terminal.message;
+  }
+}
+
+function terminalToExecution(
+  current: BtwOperation['execution'],
+  terminal: BtwTerminalOutcome,
+): BtwOperation['execution'] {
+  switch (terminal.status) {
+    case 'completed':
+      return stripUndefinedObjectKeys({
+        ...current,
+        state: 'completed',
+        answer: terminal.answer,
+        errorCode: undefined,
+        message: undefined,
+      });
+    case 'failed':
+      return stripUndefinedObjectKeys({
+        ...current,
+        state: 'failed',
+        answer: undefined,
+        errorCode: terminal.errorCode,
+        message: terminal.message,
+      });
+    case 'cancelled':
+      return stripUndefinedObjectKeys({
+        ...current,
+        state: 'cancelled',
+        answer: undefined,
+        errorCode: undefined,
+        message: terminal.message,
+      });
+    case 'interrupted':
+      return stripUndefinedObjectKeys({
+        ...current,
+        state: 'interrupted',
+        answer: undefined,
+        errorCode: undefined,
+        message: terminal.message,
+      });
+  }
 }
 
 function parseBtwOperation(

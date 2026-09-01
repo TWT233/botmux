@@ -347,6 +347,387 @@ describe('btw operation store', () => {
     expect(lstatSync(danglingPath).isSymbolicLink()).toBe(true);
     expect(existsSync(missingTarget)).toBe(false);
   });
+
+  it('enforces accepted-only submission transitions and exact native-id ACKs', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const input = makeBtwPrepareInput();
+    const scope = makeBtwScope();
+    const created = store.prepareBtw(input).operation;
+    const opId = created.btwOpId;
+
+    expect(() => store.prepareBtwSubmission(scope, opId, input.parent.runtimeEpoch)).toThrow(/accepted/i);
+
+    const accepted = store.recordBtwCard(scope, opId, 'om_card_accepted_1');
+    expect(accepted.execution.state).toBe('accepted');
+    expect(accepted.card.messageId).toBe('om_card_accepted_1');
+    expect(store.listExecutableBtwOperations(input.parent.runtimeEpoch).map(op => op.btwOpId)).toEqual([opId]);
+
+    const prepared = store.prepareBtwSubmission(scope, opId, input.parent.runtimeEpoch);
+    expect(prepared.execution).toMatchObject({
+      state: 'submit_prepared',
+      attempt: 1,
+      submissionEpoch: input.parent.runtimeEpoch,
+      frameState: 'may_have_been_sent',
+    });
+    expect(store.listExecutableBtwOperations(input.parent.runtimeEpoch)).toEqual([]);
+
+    const definitelyUnsent = store.recordBtwDefinitelyUnsent(scope, opId, input.parent.runtimeEpoch);
+    expect(definitelyUnsent.execution).toMatchObject({
+      state: 'submit_prepared',
+      attempt: 1,
+      submissionEpoch: input.parent.runtimeEpoch,
+      frameState: 'definitely_unsent',
+    });
+    expect(() => store.recordBtwDefinitelyUnsent(scope, opId, 'runtime_epoch_other')).toThrow(/runtime epoch/i);
+
+    const retried = store.prepareBtwSubmission(scope, opId, input.parent.runtimeEpoch);
+    expect(retried.execution).toMatchObject({
+      state: 'submit_prepared',
+      attempt: 2,
+      submissionEpoch: input.parent.runtimeEpoch,
+      frameState: 'may_have_been_sent',
+    });
+    expect(() => store.prepareBtwSubmission(scope, opId, 'runtime_epoch_other')).toThrow(/runtime epoch/i);
+
+    expect(() => store.recordBtwRunning(scope, opId, 'btwturn_wrong_native')).toThrow(/native/i);
+
+    const running = store.recordBtwRunning(scope, opId, retried.execution.nativeTurnId);
+    expect(running.execution).toMatchObject({
+      state: 'running',
+      attempt: 2,
+      submissionEpoch: input.parent.runtimeEpoch,
+      frameState: 'acknowledged',
+    });
+
+    expect(store.recordBtwRunning(scope, opId, retried.execution.nativeTurnId)).toEqual(running);
+  });
+
+  it('accepts cards only from card_pending and keeps the accepted binding immutable', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+
+    const pending = store.prepareBtw(makeBtwPrepareInput()).operation;
+    const accepted = store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1');
+    expect(accepted.execution.state).toBe('accepted');
+    expect(accepted.card.messageId).toBe('om_card_binding_1');
+    expect(store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1')).toEqual(accepted);
+    expect(() => store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_2')).toThrow(/different message id/i);
+
+    const preSubmitted = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_card_illegal_submit_prepared',
+    }).operation;
+    store.recordBtwCard(scope, preSubmitted.btwOpId, 'om_card_binding_3');
+    store.prepareBtwSubmission(scope, preSubmitted.btwOpId, preSubmitted.parent.runtimeEpoch);
+    expect(() => store.recordBtwCard(scope, preSubmitted.btwOpId, 'om_card_binding_3')).toThrow(/card_pending/i);
+
+    const terminal = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_card_illegal_terminal',
+    }).operation;
+    store.recordBtwCard(scope, terminal.btwOpId, 'om_card_binding_4');
+    store.prepareBtwSubmission(scope, terminal.btwOpId, terminal.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, terminal.btwOpId, { status: 'completed', answer: 'done' });
+    expect(() => store.recordBtwCard(scope, terminal.btwOpId, 'om_card_binding_4')).toThrow(/card_pending/i);
+  });
+
+  it('allows definitely-unsent only for same-epoch submit_prepared may-have-been-sent records', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+
+    const acceptedOnly = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_definitely_unsent_from_accepted',
+    }).operation;
+    store.recordBtwCard(scope, acceptedOnly.btwOpId, 'om_card_du_accepted');
+    expect(() => store.recordBtwDefinitelyUnsent(scope, acceptedOnly.btwOpId, acceptedOnly.parent.runtimeEpoch)).toThrow(/submit_prepared/i);
+
+    const prepared = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_definitely_unsent_same_epoch',
+    }).operation;
+    store.recordBtwCard(scope, prepared.btwOpId, 'om_card_du_prepared');
+    store.prepareBtwSubmission(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
+    const definitelyUnsent = store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
+    expect(definitelyUnsent.execution.frameState).toBe('definitely_unsent');
+    expect(store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch)).toEqual(definitelyUnsent);
+    expect(() => store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, 'runtime_epoch_other')).toThrow(/runtime epoch/i);
+
+    const running = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_definitely_unsent_from_running',
+    }).operation;
+    store.recordBtwCard(scope, running.btwOpId, 'om_card_du_running');
+    const runningPrepared = store.prepareBtwSubmission(scope, running.btwOpId, running.parent.runtimeEpoch);
+    store.recordBtwRunning(scope, running.btwOpId, runningPrepared.execution.nativeTurnId);
+    expect(() => store.recordBtwDefinitelyUnsent(scope, running.btwOpId, running.parent.runtimeEpoch)).toThrow(/submit_prepared/i);
+
+    const unknown = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_definitely_unsent_from_unknown',
+    }).operation;
+    store.recordBtwCard(scope, unknown.btwOpId, 'om_card_du_unknown');
+    store.prepareBtwSubmission(scope, unknown.btwOpId, unknown.parent.runtimeEpoch);
+    store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'timeout');
+    expect(() => store.recordBtwDefinitelyUnsent(scope, unknown.btwOpId, unknown.parent.runtimeEpoch)).toThrow(/submit_prepared/i);
+  });
+
+  it('enforces submission-unknown and terminal legality across submit_prepared, running, and same-live unknown states', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+
+    const preSubmit = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_unknown_reject_pre_submit',
+    }).operation;
+    store.recordBtwCard(scope, preSubmit.btwOpId, 'om_card_unknown_pre_submit');
+    expect(() => store.recordBtwSubmissionUnknown(scope, preSubmit.btwOpId, 'too early')).toThrow(/submit_prepared/i);
+    expect(() => store.recordBtwTerminal(scope, preSubmit.btwOpId, { status: 'completed', answer: 'too early' })).toThrow(/active or submission_unknown/i);
+
+    const submitPrepared = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_terminal_from_submit_prepared',
+    }).operation;
+    store.recordBtwCard(scope, submitPrepared.btwOpId, 'om_card_terminal_submit_prepared');
+    store.prepareBtwSubmission(scope, submitPrepared.btwOpId, submitPrepared.parent.runtimeEpoch);
+
+    const submitPreparedCases = [
+      {
+        requestId: 'om_request_terminal_completed_mapping',
+        terminal: { status: 'completed', answer: 'full answer' } as const,
+        expected: { state: 'completed', answer: 'full answer', errorCode: undefined, message: undefined },
+      },
+      {
+        requestId: 'om_request_terminal_failed_mapping',
+        terminal: { status: 'failed', errorCode: 'BTW_FAIL_MAP', message: 'failed body' } as const,
+        expected: { state: 'failed', answer: undefined, errorCode: 'BTW_FAIL_MAP', message: 'failed body' },
+      },
+      {
+        requestId: 'om_request_terminal_cancelled_mapping',
+        terminal: { status: 'cancelled', message: 'cancelled body' } as const,
+        expected: { state: 'cancelled', answer: undefined, errorCode: undefined, message: 'cancelled body' },
+      },
+    ];
+
+    for (const row of submitPreparedCases) {
+      const op = store.prepareBtw({
+        ...makeBtwPrepareInput(),
+        requestId: row.requestId,
+      }).operation;
+      store.recordBtwCard(scope, op.btwOpId, `om_card_${row.requestId}`);
+      store.prepareBtwSubmission(scope, op.btwOpId, op.parent.runtimeEpoch);
+      const result = store.recordBtwTerminal(scope, op.btwOpId, row.terminal);
+      expect(result.kind).toBe('advanced');
+      expect(result.operation.execution.state).toBe(row.expected.state);
+      expect(result.operation.execution.answer).toBe(row.expected.answer);
+      expect(result.operation.execution.errorCode).toBe(row.expected.errorCode);
+      expect(result.operation.execution.message).toBe(row.expected.message);
+    }
+
+    const running = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_terminal_from_running',
+    }).operation;
+    store.recordBtwCard(scope, running.btwOpId, 'om_card_terminal_running');
+    const runningPrepared = store.prepareBtwSubmission(scope, running.btwOpId, running.parent.runtimeEpoch);
+    store.recordBtwRunning(scope, running.btwOpId, runningPrepared.execution.nativeTurnId);
+    const interrupted = store.recordBtwTerminal(scope, running.btwOpId, {
+      status: 'interrupted',
+      message: 'lost runtime',
+    });
+    expect(interrupted.operation.execution).toMatchObject({
+      state: 'interrupted',
+      message: 'lost runtime',
+    });
+
+    const unknown = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_terminal_from_unknown',
+    }).operation;
+    store.recordBtwCard(scope, unknown.btwOpId, 'om_card_terminal_unknown');
+    store.prepareBtwSubmission(scope, unknown.btwOpId, unknown.parent.runtimeEpoch);
+    const unknownState = store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'send timeout');
+    expect(unknownState.execution.state).toBe('submission_unknown');
+    const settled = store.recordBtwTerminal(scope, unknown.btwOpId, {
+      status: 'failed',
+      errorCode: 'BTW_AFTER_UNKNOWN',
+      message: 'same live connection terminal',
+    });
+    expect(settled.operation.execution).toMatchObject({
+      state: 'failed',
+      errorCode: 'BTW_AFTER_UNKNOWN',
+      message: 'same live connection terminal',
+    });
+  });
+
+  it('preserves conservative ambiguous execution handling and quarantines conflicting terminals', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const input = makeBtwPrepareInput();
+    const scope = makeBtwScope();
+    const accepted = store.recordBtwCard(
+      scope,
+      store.prepareBtw(input).operation.btwOpId,
+      'om_card_terminal_1',
+    );
+    const opId = accepted.btwOpId;
+    const recordPath = store.pathFor(scope, opId);
+
+    const prepared = store.prepareBtwSubmission(scope, opId, input.parent.runtimeEpoch);
+    const terminalBeforeAck = store.recordBtwTerminal(scope, opId, {
+      status: 'completed',
+      answer: 'done before ack',
+    });
+    expect(terminalBeforeAck.kind).toBe('advanced');
+    expect(terminalBeforeAck.operation.execution).toMatchObject({
+      state: 'completed',
+      nativeTurnId: prepared.execution.nativeTurnId,
+      answer: 'done before ack',
+    });
+    expect(() => store.recordBtwRunning(scope, opId, prepared.execution.nativeTurnId)).toThrow(/state/i);
+
+    const duplicateTerminal = store.recordBtwTerminal(scope, opId, {
+      status: 'completed',
+      answer: 'done before ack',
+    });
+    expect(duplicateTerminal.kind).toBe('duplicate');
+    expect(duplicateTerminal.operation.revision).toBe(terminalBeforeAck.operation.revision);
+
+    const conflictingTerminal = store.recordBtwTerminal(scope, opId, {
+      status: 'failed',
+      errorCode: 'BTW_CONFLICT',
+      message: 'should not replace completed',
+    });
+    expect(conflictingTerminal.kind).toBe('duplicate');
+    expect(conflictingTerminal.operation).toEqual(terminalBeforeAck.operation);
+    expect(readdirSync(dirname(recordPath)).some(name =>
+      name.startsWith(`${basenameWithoutJson(recordPath)}.terminal-conflict.`))).toBe(true);
+
+    const secondInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_submission_unknown',
+    };
+    const secondOpId = store.prepareBtw(secondInput).operation.btwOpId;
+    store.recordBtwCard(scope, secondOpId, 'om_card_unknown_1');
+    store.prepareBtwSubmission(scope, secondOpId, input.parent.runtimeEpoch);
+    const unknown = store.recordBtwSubmissionUnknown(scope, secondOpId, 'rpc timeout after send');
+    expect(unknown.execution).toMatchObject({
+      state: 'submission_unknown',
+      submissionEpoch: input.parent.runtimeEpoch,
+      frameState: 'may_have_been_sent',
+      message: 'rpc timeout after send',
+    });
+
+    expect(() => store.recordBtwRunning(scope, secondOpId, unknown.execution.nativeTurnId)).toThrow(/submission_unknown/i);
+    expect(() => store.prepareBtwSubmission(scope, secondOpId, input.parent.runtimeEpoch)).toThrow(/submission_unknown/i);
+
+    const settled = store.recordBtwTerminal(scope, secondOpId, {
+      status: 'cancelled',
+      message: 'cancelled from same live connection',
+    });
+    expect(settled.kind).toBe('advanced');
+    expect(settled.operation.execution).toMatchObject({
+      state: 'cancelled',
+      message: 'cancelled from same live connection',
+    });
+  });
+
+  it('reconciles old epochs and dead sessions without reviving terminal records', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+
+    const acceptedInput = makeBtwPrepareInput();
+    const acceptedScope = makeBtwScope();
+    const acceptedOpId = store.prepareBtw(acceptedInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, acceptedOpId, 'om_card_reconcile_accepted');
+
+    const runningInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_running_old_epoch',
+    };
+    const runningOpId = store.prepareBtw(runningInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, runningOpId, 'om_card_reconcile_running');
+    const runningPrepared = store.prepareBtwSubmission(acceptedScope, runningOpId, runningInput.parent.runtimeEpoch);
+    store.recordBtwRunning(acceptedScope, runningOpId, runningPrepared.execution.nativeTurnId);
+
+    const preparedInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_prepared_old_epoch',
+    };
+    const preparedOpId = store.prepareBtw(preparedInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, preparedOpId, 'om_card_reconcile_prepared');
+    store.prepareBtwSubmission(acceptedScope, preparedOpId, preparedInput.parent.runtimeEpoch);
+
+    const completedInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_completed_terminal',
+    };
+    const completedOpId = store.prepareBtw(completedInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, completedOpId, 'om_card_reconcile_completed');
+    store.prepareBtwSubmission(acceptedScope, completedOpId, completedInput.parent.runtimeEpoch);
+    store.recordBtwTerminal(acceptedScope, completedOpId, { status: 'completed', answer: 'still done' });
+
+    const failedInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_failed_terminal',
+    };
+    const failedOpId = store.prepareBtw(failedInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, failedOpId, 'om_card_reconcile_failed');
+    store.prepareBtwSubmission(acceptedScope, failedOpId, failedInput.parent.runtimeEpoch);
+    store.recordBtwTerminal(acceptedScope, failedOpId, { status: 'failed', errorCode: 'BTW_FAIL', message: 'failed' });
+
+    const cancelledInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_cancelled_terminal',
+    };
+    const cancelledOpId = store.prepareBtw(cancelledInput).operation.btwOpId;
+    store.recordBtwCard(acceptedScope, cancelledOpId, 'om_card_reconcile_cancelled');
+    store.prepareBtwSubmission(acceptedScope, cancelledOpId, cancelledInput.parent.runtimeEpoch);
+    store.recordBtwTerminal(acceptedScope, cancelledOpId, { status: 'cancelled', message: 'cancelled' });
+
+    const liveScope = {
+      larkAppId: 'cli_app',
+      botmuxSessionId: 'btw_session_live',
+    };
+    const liveInput = {
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_live_epoch',
+      parent: {
+        ...makeBtwParent(),
+        botmuxSessionId: liveScope.botmuxSessionId,
+        runtimeEpoch: 'runtime_epoch_live',
+      },
+    };
+    const liveOpId = store.prepareBtw(liveInput).operation.btwOpId;
+    store.recordBtwCard(liveScope, liveOpId, 'om_card_live');
+
+    const reconciled = store.reconcileBtwOperations({
+      runtimeEpoch: 'runtime_epoch_live',
+      liveSessionIds: new Set([liveScope.botmuxSessionId]),
+    });
+
+    expect(reconciled.map(op => [op.btwOpId, op.execution.state])).toEqual(expect.arrayContaining([
+      [acceptedOpId, 'interrupted'],
+      [runningOpId, 'interrupted'],
+      [preparedOpId, 'submission_unknown'],
+    ]));
+    expect(reconciled.some(op => op.btwOpId === completedOpId)).toBe(false);
+    expect(reconciled.some(op => op.btwOpId === failedOpId)).toBe(false);
+    expect(reconciled.some(op => op.btwOpId === cancelledOpId)).toBe(false);
+    expect(reconciled.some(op => op.btwOpId === liveOpId)).toBe(false);
+
+    expect(store.getBtwOperation(acceptedScope, acceptedOpId)?.execution.state).toBe('interrupted');
+    expect(store.getBtwOperation(acceptedScope, runningOpId)?.execution.state).toBe('interrupted');
+    expect(store.getBtwOperation(acceptedScope, preparedOpId)?.execution.state).toBe('submission_unknown');
+    expect(store.getBtwOperation(acceptedScope, completedOpId)?.execution.state).toBe('completed');
+    expect(store.getBtwOperation(acceptedScope, failedOpId)?.execution.state).toBe('failed');
+    expect(store.getBtwOperation(acceptedScope, cancelledOpId)?.execution.state).toBe('cancelled');
+    expect(store.getBtwOperation(liveScope, liveOpId)?.execution.state).toBe('accepted');
+  });
 });
 
 function basenameWithoutJson(filePath: string): string {
