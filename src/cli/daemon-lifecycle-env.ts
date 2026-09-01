@@ -1,25 +1,26 @@
 import { parse } from 'dotenv';
 
-// Keys baked into the PM2 env block (see ecosystemConfig in cli.ts). This list
-// MUST stay mirrored by detachedRestartEnv() in src/core/maintenance.ts: any key
-// added here also has to be stripped there, or a detached restart (dashboard
-// update/restart, maintenance auto-update) reuses the stale baked value instead
-// of reloading it from ~/.botmux/.env. test/maintenance.test.ts pins that
-// mirror by iterating this exported list.
+// Settings pinned into the environment used to launch the fleet supervisor.
+// This list MUST stay mirrored by detachedRestartEnv() in
+// src/core/maintenance.ts: any key added here also has to be stripped there, or
+// a detached restart (dashboard update/restart, maintenance auto-update) reuses
+// the stale runtime value instead of reloading it from ~/.botmux/.env.
+// test/maintenance.test.ts pins that mirror by iterating this exported list.
 //
-// This baked block is SHARED: the same resolved values land in the env of the
-// dashboard AND of every bot daemon, and they persist on disk in
-// ~/.botmux/ecosystem.config.json. Only non-secret settings belong here.
+// This resolved block is SHARED: the same values land in the env of the
+// supervisor, dashboard, and every bot daemon. Only non-secret settings belong
+// here.
 //
 // The Dashboard Feishu H5 login family (BOTMUX_DASHBOARD_FEISHU_H5_*, incl. the
 // APP_SECRET credential) is DELIBERATELY absent: the dashboard receives it via
 // its own entry point — index-dashboard.ts dotenv-loads ~/.botmux/.env, exactly
 // like the bot daemons' index-daemon.ts — so the secret never enters the shared
-// env block and never lands in ecosystem.config.json. Do not re-add those keys;
+// fleet env. Do not re-add those keys;
 // test/daemon-lifecycle-env.test.ts pins the exclusion, and utils/child-env.ts
 // (stripDashboardH5Env / redactChildEnv) keeps the family out of the daemon
 // process and every CLI child.
 export const DAEMON_ENV_KEYS = [
+  'WEB_HOST',
   'WEB_EXTERNAL_HOST',
   'BOTMUX_DASHBOARD_EXTERNAL_HOST',
   'BOTMUX_DASHBOARD_HOST',
@@ -35,9 +36,9 @@ export const DAEMON_ENV_KEYS = [
   // Dashboard-only, non-secret settings: the control-audit destination
   // (dashboard/control-audit.ts defaultControlAuditPath) and the terminal
   // takeover lease TTL (dashboard/terminal-control.ts terminalControlTtlFromEnv).
-  // Documented in .env.example, but without a baked value an operator pointing
+  // Documented in .env.example, but without a resolved value an operator pointing
   // the audit log at /var/lib/botmux kept writing to ~/.botmux/audit instead
-  // ("configured but never took effect"). Baked values also outrank the
+  // ("configured but never took effect"). Resolved values also outrank the
   // dashboard's own dotenv load (dotenv never overrides existing vars), which
   // keeps them on the deterministic resolveDaemonEnv snapshot semantics.
   'BOTMUX_DASHBOARD_CONTROL_AUDIT_PATH',
@@ -53,16 +54,16 @@ export const DAEMON_ENV_KEYS = [
 export type DaemonEnvKey = (typeof DAEMON_ENV_KEYS)[number];
 
 /**
- * Pin both PM2 apps to one deterministic ~/.botmux/.env snapshot. A restart
+ * Pin the supervised fleet to one deterministic ~/.botmux/.env snapshot. A restart
  * launched inside a botmux session inherited its values from the old daemon,
  * so only the persisted file is authoritative in that context.
  *
  * Every key resolves to a string, empty when neither source sets it. Each
  * consumer treats the empty string as "unset" and applies its own default
  * (h5-auth's ENABLED/BRAND/TTL/SECURE_COOKIE parsing, control-audit's path
- * fallback, terminal-control's TTL validation), so a blank baked value is
- * indistinguishable from an absent one — except for the dashboard bind host,
- * whose historical default is applied here.
+ * fallback, terminal-control's TTL validation), so a blank resolved value is
+ * indistinguishable from an absent one — except for the terminal and dashboard
+ * bind hosts, whose historical defaults are applied here.
  */
 export function resolveDaemonEnv(
   inheritedEnv: NodeJS.ProcessEnv,
@@ -80,6 +81,7 @@ export function resolveDaemonEnv(
   const resolved = Object.fromEntries(
     DAEMON_ENV_KEYS.map(key => [key, resolve(key)]),
   ) as Record<DaemonEnvKey, string>;
+  resolved.WEB_HOST ||= '0.0.0.0';
   resolved.BOTMUX_DASHBOARD_HOST ||= '0.0.0.0';
   return resolved;
 }

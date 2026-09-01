@@ -130,7 +130,7 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
     // stubEnv('') sets an empty string; delete it so `??=` sees genuinely-unset.
     delete process.env.SESSION_DATA_DIR;
 
-    const env = resolveFleetDaemonEnv();
+    const env = resolveFleetDaemonEnv(process.env, '');
     // Resolves to the stable user data dir (~/.botmux/data under the stubbed HOME),
     // NOT the package dir — this is exactly what the old ecosystem's DATA_DIR was.
     expect(env.SESSION_DATA_DIR).toBe(join(home, '.botmux', 'data'));
@@ -141,7 +141,17 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
     dirs.push(home);
     vi.stubEnv('HOME', home);
     vi.stubEnv('SESSION_DATA_DIR', '/custom/data/root');
-    const env = resolveFleetDaemonEnv();
+    const env = resolveFleetDaemonEnv(process.env, '');
     expect(env.SESSION_DATA_DIR).toBe('/custom/data/root'); // ambient override wins
+  });
+
+  it('reloads WEB_HOST from .env before a session-origin restart spawns the supervisor', () => {
+    const env = resolveFleetDaemonEnv({
+      BOTMUX_SESSION_ID: 'session-1',
+      WEB_HOST: '127.0.0.1',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, 'WEB_HOST=10.9.9.9');
+
+    expect(env.WEB_HOST).toBe('10.9.9.9');
   });
 });
