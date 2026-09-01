@@ -272,8 +272,11 @@ describe('group manage streaming-card pin rows', () => {
 
     expect(renderer.root.findByProps({ 'data-action': 'toggle-pin-streaming-card-group', 'data-app-id': 'cli_a' }).props.checked)
       .toBe(true);
-    expect(renderer.root.findByProps({ 'data-pin-status': 'cli_a' }).children.join('')).toContain('refresh failed');
-    expect(renderer.root.findByProps({ 'data-pin-status': 'cli_a' }).children.join('')).not.toContain('Save failed');
+    const status = renderer.root.findByProps({ 'data-pin-status': 'cli_a' });
+    expect(status.children.join('')).toContain('refresh failed');
+    expect(status.children.join('')).not.toContain('Save failed');
+    expect(String(status.props.className ?? '')).toContain('hint-warn-inline');
+    expect(String(status.props.className ?? '')).not.toContain('hint-ok');
   });
 
   it('uses a distinct help id per row and points each checkbox aria-describedby at its own help element', () => {

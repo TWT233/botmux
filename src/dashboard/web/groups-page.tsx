@@ -1153,10 +1153,10 @@ function GroupPinStreamingCardRow(props: {
         detailAttrs={{ 'data-pin-master-state': masterEnabled ? 'on' : 'off' }}
         status={status}
         statusTone={
-          status.startsWith(tr('groups.pinStreamingCardSaved'))
-            ? 'ok'
-            : status.startsWith(tr('groups.pinStreamingCardRefreshFailed'))
-              ? 'warn'
+          status.startsWith(tr('groups.pinStreamingCardRefreshFailed'))
+            ? 'warn'
+            : status.startsWith(tr('groups.pinStreamingCardSaved'))
+              ? 'ok'
               : status
                 ? 'warn'
                 : 'muted'
