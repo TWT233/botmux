@@ -13,7 +13,7 @@ import { join, resolve } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { probeTmuxFunctional } from '../src/setup/ensure-tmux.js';
 import type { DaemonToWorker, WorkerToDaemon } from '../src/types.js';
-import { spawnTsScript } from './helpers/ts-runner.js';
+import { isBunRuntime, spawnTsScript } from './helpers/ts-runner.js';
 
 type LaunchRecord = {
   argv: string[];
@@ -41,6 +41,9 @@ const tmuxSessions = new Set<string>();
 let sequence = 0;
 
 const tmuxAvailable = probeTmuxFunctional().ok;
+const directPtyUnavailableInBun = isBunRuntime();
+const DIRECT_PTY_BUN_SKIP_REASON =
+  'Bun 1.4.0 direct node-pty exits the fake CLI immediately with code 0 / signal 1 before the recorder runs; keep tmux/RPC coverage live.';
 
 function hookOverrides(argv: string[]): string[] {
   return argv.flatMap((arg, index) =>
@@ -112,7 +115,6 @@ function makeHarness(options: {
   mkdirSync(dataDir, { recursive: true });
   mkdirSync(join(root, '.trae'), { recursive: true });
   mkdirSync(join(workingDir, '.trae'), { recursive: true });
-
   const globalHooksPath = join(root, '.trae', 'hooks.json');
   const projectHooksPath = join(workingDir, '.trae', 'hooks.json');
   const globalHooksBefore = '{"hooks":{"PreToolUse":[{"matcher":"Read","hooks":[]}]}}\n';
@@ -256,10 +258,19 @@ afterEach(async () => {
 });
 
 describe('TRAE native subagent hook worker launches', () => {
-  it.each([
+  it.skipIf(directPtyUnavailableInBun).each([
     ['fresh', false, undefined],
     ['resume', true, 'trae-native-session'],
-  ] as const)('launches a Trae %s PTY with one hook and authenticated non-secret env', async (_label, resume, cliSessionId) => {
+  ] as const)(
+    // Bun 1.4.0 cannot keep the fake CLI alive under direct node-pty here.
+    // Existing Bun-running evidence stays in test/cli-adapters.test.ts:
+    //  - "adds one process-scoped native subagent hook for resume=%s"
+    //  - "does not attach the native subagent hook to the remote viewer"
+    //  - "does not attach the Trae-only hook argument to another adapter"
+    // This file keeps the real worker coverage on Node/Vitest and still runs
+    // the real tmux/RPC worker paths on Bun.
+    `launches a Trae %s PTY with one hook and authenticated non-secret env (${DIRECT_PTY_BUN_SKIP_REASON})`,
+    async (_label, resume, cliSessionId) => {
     const harness = makeHarness({ cliId: 'traex', backendType: 'pty', resume, cliSessionId });
     await waitFor(harness, () => (
       harness.messages.some(message => message.type === 'ready')
@@ -323,7 +334,7 @@ describe('TRAE native subagent hook worker launches', () => {
     expectHookFilesUnchanged(harness);
   }, 25_000);
 
-  it('keeps a non-Trae worker launch free of the Trae hook', async () => {
+  it.skipIf(directPtyUnavailableInBun)(`keeps a non-Trae worker launch free of the Trae hook (${DIRECT_PTY_BUN_SKIP_REASON})`, async () => {
     const harness = makeHarness({ cliId: 'codex', backendType: 'pty' });
     await waitFor(harness, () => (
       harness.messages.some(message => message.type === 'ready')
