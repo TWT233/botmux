@@ -60,4 +60,20 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('127.0.0.2');
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
+
+  it('keeps restart non-fatal when the persisted .env cannot be read', async () => {
+    const envPath = join(home, '.botmux', '.env');
+    rmSync(envPath);
+    mkdirSync(envPath); // deterministic EISDIR from readFileSync on Linux
+    const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
+
+    expect(startFleetViaSupervisor()).toMatchObject({ action: 'started', supervisorPid: 4321 });
+    expect(io.spawn).toHaveBeenCalledOnce();
+    const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
+    expect(options.env.WEB_HOST).toBe('0.0.0.0');
+    expect(options.env.WEB_EXTERNAL_PORT).toBe('');
+    expect(options.env.BOTMUX_WEB_PROXY_BASE_PORT).toBe('');
+    expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('0.0.0.0');
+    expect(options.env.BOTMUX_WORKER_HOST).toBe('');
+  });
 });

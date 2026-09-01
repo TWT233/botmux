@@ -2,7 +2,13 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { projectFleetStatus, readFleetStatus, waitFleetOnline, resolveFleetDaemonEnv } from '../src/core/fleet-runtime.js';
+import {
+  projectFleetStatus,
+  readFleetStatus,
+  readFleetDaemonEnvFile,
+  waitFleetOnline,
+  resolveFleetDaemonEnv,
+} from '../src/core/fleet-runtime.js';
 import { writeFleetState } from '../src/core/fleet-state-store.js';
 import { freshProc, type FleetState } from '../src/core/fleet-supervisor-policy.js';
 
@@ -153,5 +159,16 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
     }, 'WEB_HOST=10.9.9.9');
 
     expect(env.WEB_HOST).toBe('10.9.9.9');
+  });
+});
+
+describe('readFleetDaemonEnvFile', () => {
+  it.each(['ENOENT', 'EISDIR', 'EACCES'])('treats %s as an absent optional .env', (code) => {
+    const error = Object.assign(new Error(code), { code });
+    const readTextFile = vi.fn(() => { throw error; });
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile)).toBeUndefined();
+    expect(readTextFile).toHaveBeenCalledOnce();
+    expect(readTextFile).toHaveBeenCalledWith('/fake/.env');
   });
 });
