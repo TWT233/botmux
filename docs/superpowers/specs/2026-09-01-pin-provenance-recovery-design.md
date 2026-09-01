@@ -14,6 +14,8 @@ and Feishu reports operator_id_type === 'app_id' plus operator_id equal to the
 current bot app id. Message author, card content, id shape, or later session
 state can never broaden that candidate set. Remote discovery only narrows it.
 An enabled setting and a local streaming-card id are candidates, never proof.
+Every destructive Unpin additionally requires a fresh exact same-app list after
+the affected message mutation queues are ready, immediately before deletion.
 
 ## Lark transport
 
@@ -32,8 +34,9 @@ or mismatched Pin provenance remains unowned.
 ## Reconciliation
 
 A recovery request freezes active session identity, chat/session, and candidate
-ids, groups candidates by chat, and lists each chat once. Exact same-app remote
-matches map back to their frozen owner.
+ids, groups candidates by chat, and lists each chat once for discovery. Exact
+same-app remote matches map back to their frozen owner; destructive cleanup then
+performs its separate immediate pre-Unpin list.
 
 - Effective on classifies the current id from the list before mutating it. An
   exact same-app Pin restores process-local ownership without create; any human,
@@ -43,18 +46,23 @@ matches map back to their frozen owner.
 - Normal enabled reconciliation keeps the current card and retires predecessors.
 - Effective off cleans matching ids through the existing per-message queue.
 - Explicit bot-wide and per-chat off freeze local candidates for FIFO ordering,
-  but clean only process-owned ids plus candidates proven same-app by a fresh
-  list. A list failure preserves process-owned cleanup and skips ambiguous ids.
+  but clean only candidates proven same-app by the fresh pre-Unpin list. A list
+  failure skips every destructive cleanup, including process-owned ids.
 - Bot-wide off may retry an already opted-out chat only when remote provenance
   proves ownership, addressing a previous failed opt-out Unpin safely.
-- Ordinary disable, close, and transfer clean process-owned ids only. They never
-  infer ownership from the enabled setting or the local current/frozen snapshot.
+- Ordinary disable, close, and transfer target process-owned ids only, then
+  revalidate exact same-app ownership immediately before Unpin. They never infer
+  ownership from the enabled setting or the local current/frozen snapshot.
 
 Startup recovery is queued after restoreActiveSessions and is fire-and-forget.
 Startup and explicit disable share the per-bot FIFO. Candidate ids are frozen at
 enqueue; no long-lived Pin-list cache is introduced. A restored worker's silent
 `ready` event never re-pins its persisted card independently; the queued list
 reconciliation is the single startup ownership authority.
+Recovery therefore lists once for discovery and again immediately before any
+destructive cleanup. Feishu exposes no conditional Unpin, so ownership can still
+change after that final list response and before deletion; this residual API race
+cannot be eliminated client-side.
 
 ## Safety and verification
 
@@ -62,5 +70,5 @@ No-transport sessions make zero list/mutation calls. One chat failure does not
 stop other chats. Same-app non-candidates, humans, and other apps are untouched.
 Tests cover pagination/error boundaries, create-response provenance, current-id
 collisions, list-to-create races, subsequent ordinary disable/close/transfer,
-explicit bot/chat off, one query per chat, partial failures, no-transport, and
-FIFO ordering.
+explicit bot/chat off, discovery plus immediate pre-delete revalidation, partial
+failures, no-transport, and FIFO ordering.

@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const reconcileRestoredStreamingCardPinsMock = vi.fn();
 const loggerWarnMock = vi.fn();
@@ -31,6 +31,11 @@ vi.mock('../src/utils/logger.js', () => ({
 }));
 
 const daemonSource = readFileSync(new URL('../src/daemon.ts', import.meta.url), 'utf8');
+let daemon: typeof import('../src/daemon.js');
+
+beforeAll(async () => {
+  daemon = await import('../src/daemon.js');
+}, 30_000);
 
 function region(source: string, startMarker: string, endMarker: string): string {
   const start = source.indexOf(startMarker);
@@ -56,8 +61,6 @@ describe('startup streaming-card Pin recovery helper', () => {
   });
 
   it('schedules restored Pin recovery in a fire-and-forget microtask', async () => {
-    const daemon = await import('../src/daemon.js');
-
     daemon.__testOnly_scheduleRestoredStreamingCardPinRecovery('app-pin');
 
     expect(reconcileRestoredStreamingCardPinsMock).not.toHaveBeenCalled();
@@ -70,7 +73,6 @@ describe('startup streaming-card Pin recovery helper', () => {
     reconcileRestoredStreamingCardPinsMock.mockImplementation(() => {
       throw new Error('pin restore boom');
     });
-    const daemon = await import('../src/daemon.js');
 
     expect(() => daemon.__testOnly_scheduleRestoredStreamingCardPinRecovery('app-pin')).not.toThrow();
 
@@ -88,7 +90,6 @@ describe('startup restore phase wiring for restored streaming-card Pin recovery'
     reconcileRestoredStreamingCardPinsMock.mockImplementation((appId: string) => {
       events.push(`pin:${appId}`);
     });
-    const daemon = await import('../src/daemon.js');
     await Promise.resolve();
     vi.clearAllMocks();
 

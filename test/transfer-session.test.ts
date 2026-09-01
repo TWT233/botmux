@@ -49,10 +49,12 @@ const pinMessageMock = vi.fn(async (larkAppId: string, messageId: string) => ({
   messageId, operatorId: larkAppId, operatorIdType: 'app_id',
 }));
 const unpinMessageMock = vi.fn(async () => true);
+const listChatPinsMock = vi.fn(async () => []);
 vi.mock('../src/im/lark/client.js', () => ({
   updateMessage: (...a: any[]) => updateMessageMock(...a),
   pinMessage: (...a: any[]) => pinMessageMock(...a),
   unpinMessage: (...a: any[]) => unpinMessageMock(...a),
+  listChatPins: (...a: any[]) => listChatPinsMock(...a),
   deleteMessage: vi.fn(),
   MessageWithdrawnError: class extends Error {},
 }));
@@ -93,6 +95,7 @@ import {
   __testOnly_resetPinStreamingCardReconcileQueue,
   __testOnly_waitForPinStreamingCardIdle,
   pinStreamingCardIfEnabled,
+  reconcileRestoredStreamingCardPins,
   setActiveSessionsRegistry,
   setActiveSessionIfActive,
   setActiveSessionSafe,
@@ -185,6 +188,8 @@ describe('transferSession', () => {
       botName: 'TestBot',
     });
     __testOnly_resetPinStreamingCardReconcileQueue();
+    listChatPinsMock.mockReset();
+    listChatPinsMock.mockResolvedValue([]);
     __testOnly_resetBotTurnMutationGates();
     vi.mocked(sessionStore.listSessions).mockReturnValue([]);
     resetDeviceIsolationActivationForTest();
@@ -1573,6 +1578,12 @@ describe('transferSession', () => {
       botName: 'TestBot',
     });
     await expect(pinStreamingCardIfEnabled(ds, 'om_old_card')).resolves.toBe(true);
+    listChatPinsMock.mockResolvedValue([{
+      messageId: 'om_old_card',
+      chatId: 'oc_source',
+      operatorId: 'cli_app_test',
+      operatorIdType: 'app_id',
+    }]);
 
     const unpinStarted = deferred<void>();
     const releaseUnpin = deferred<boolean>();
@@ -1587,6 +1598,38 @@ describe('transferSession', () => {
 
     releaseUnpin.resolve(false);
     await __testOnly_waitForPinStreamingCardIdle();
+  });
+
+  it('revalidates a process-owned Pin and preserves a human replacement on transfer', async () => {
+    const ds = makeDs();
+    registry.set(sessionKey('om_source_root', 'cli_app_test'), ds);
+    getBotMock.mockReturnValue({
+      config: { cliId: 'claude-code', larkAppId: 'cli_app_test', pinStreamingCard: true },
+      botName: 'TestBot',
+    });
+    listChatPinsMock.mockResolvedValue([{
+      messageId: 'om_old_card',
+      chatId: 'oc_source',
+      operatorId: 'cli_app_test',
+      operatorIdType: 'app_id',
+    }]);
+    reconcileRestoredStreamingCardPins('cli_app_test');
+    await __testOnly_waitForPinStreamingCardIdle();
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    pinMessageMock.mockClear();
+    listChatPinsMock.mockClear();
+    listChatPinsMock.mockResolvedValue([{
+      messageId: 'om_old_card',
+      chatId: 'oc_source',
+      operatorId: 'ou_human',
+      operatorIdType: 'open_id',
+    }]);
+
+    await expect(callTransfer(ds.session.sessionId, 'oc_target', 'om_M1_target')).resolves.toEqual({ ok: true });
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(listChatPinsMock).toHaveBeenCalledWith('cli_app_test', 'oc_source');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('cli_app_test', 'om_old_card');
   });
 
   it('does not start source Pin cleanup when an enabled transfer is refused', async () => {

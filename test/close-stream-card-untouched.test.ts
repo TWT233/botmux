@@ -153,6 +153,12 @@ describe('closeSession leaves the streaming card alone', () => {
       getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
       await expect(workerPool.pinStreamingCardIfEnabled(ds, 'om_stream_card')).resolves.toBe(true);
       pinMessage.mockClear();
+      listChatPins.mockResolvedValue([{
+        messageId: 'om_stream_card',
+        chatId: 'oc_closecard',
+        operatorId: 'app-close-card',
+        operatorIdType: 'app_id',
+      }]);
       const unpinStarted = deferred<void>();
       const releaseUnpin = deferred<boolean>();
       unpinMessage.mockImplementationOnce(() => {
@@ -169,6 +175,47 @@ describe('closeSession leaves the streaming card alone', () => {
 
       releaseUnpin.resolve(false);
       await workerPool.__testOnly_waitForPinStreamingCardIdle();
+    } finally {
+      config.session.dataDir = prev;
+    }
+  });
+
+  it('revalidates a process-owned Pin and preserves a human replacement on close', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-close-card-replaced-owner-'));
+    tempDirs.push(dataDir);
+    const prev = config.session.dataDir;
+    config.session.dataDir = dataDir;
+    sessionStore.init('app-close-card');
+    try {
+      const s = sessionStore.createSession('oc_closecard', 'om_closecard', 'closecard', 'group');
+      s.larkAppId = 'app-close-card';
+      sessionStore.updateSession(s);
+      const ds = makeDs(s.sessionId, 'app-close-card', 'om_replaced_current');
+      workerPool.setActiveSessionsRegistry(new Map([[activeSessionKey(ds), ds]]));
+      getBotMock.mockReturnValue({ config: { pinStreamingCard: true } });
+      listChatPins.mockResolvedValue([{
+        messageId: 'om_replaced_current',
+        chatId: 'oc_closecard',
+        operatorId: 'app-close-card',
+        operatorIdType: 'app_id',
+      }]);
+      workerPool.reconcileRestoredStreamingCardPins('app-close-card');
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+      expect(pinMessage).not.toHaveBeenCalled();
+      pinMessage.mockClear();
+      listChatPins.mockClear();
+      listChatPins.mockResolvedValue([{
+        messageId: 'om_replaced_current',
+        chatId: 'oc_closecard',
+        operatorId: 'ou_human',
+        operatorIdType: 'open_id',
+      }]);
+
+      await workerPool.closeSession(s.sessionId, { awaitWorkerExit: false });
+      await workerPool.__testOnly_waitForPinStreamingCardIdle();
+
+      expect(listChatPins).toHaveBeenCalledWith('app-close-card', 'oc_closecard');
+      expect(unpinMessage).not.toHaveBeenCalledWith('app-close-card', 'om_replaced_current');
     } finally {
       config.session.dataDir = prev;
     }
@@ -291,6 +338,12 @@ describe('closeSession leaves the streaming card alone', () => {
       expect(pinMessage).toHaveBeenCalledWith('app-close-card', 'om_stream_card');
       expect(unpinMessage).not.toHaveBeenCalled();
       unpinMessage.mockClear();
+      listChatPins.mockResolvedValue([{
+        messageId: 'om_stream_card',
+        chatId: 'oc_closecard',
+        operatorId: 'app-close-card',
+        operatorIdType: 'app_id',
+      }]);
       getBotMock.mockReturnValue({
         config: {
           pinStreamingCard: true,

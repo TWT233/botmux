@@ -26,11 +26,12 @@ const { getBotMock, cancelMojoMock } = vi.hoisted(() => ({
   getBotMock: vi.fn(),
   cancelMojoMock: vi.fn(async () => ({ kind: 'cancelled' as const })),
 }));
-const { pinMessageMock, unpinMessageMock } = vi.hoisted(() => ({
+const { pinMessageMock, unpinMessageMock, listChatPinsMock } = vi.hoisted(() => ({
   pinMessageMock: vi.fn(async (larkAppId: string, messageId: string) => ({
     messageId, operatorId: larkAppId, operatorIdType: 'app_id',
   })),
   unpinMessageMock: vi.fn(async () => true),
+  listChatPinsMock: vi.fn(async () => []),
 }));
 
 vi.mock('../src/bot-registry.js', () => ({
@@ -62,6 +63,7 @@ vi.mock('../src/im/lark/client.js', () => ({
   getMessageChatId: vi.fn(),
   pinMessage: (...args: any[]) => pinMessageMock(...args),
   unpinMessage: (...args: any[]) => unpinMessageMock(...args),
+  listChatPins: (...args: any[]) => listChatPinsMock(...args),
   MessageWithdrawnError: class extends Error {},
 }));
 
@@ -202,6 +204,7 @@ function createFixture(options: {
 beforeEach(() => {
   vi.clearAllMocks();
   __testOnly_resetPinStreamingCardReconcileQueue();
+  listChatPinsMock.mockResolvedValue([]);
   dataDir = mkdtempSync(join(tmpdir(), 'botmux-mojo-close-'));
   previousDataDir = config.session.dataDir;
   config.session.dataDir = dataDir;
@@ -237,6 +240,12 @@ describe('mojo explicit close', () => {
     });
     await expect(pinStreamingCardIfEnabled(fixture.ds, 'om_mojo_stream')).resolves.toBe(true);
     pinMessageMock.mockClear();
+    listChatPinsMock.mockResolvedValue([{
+      messageId: 'om_mojo_stream',
+      chatId: 'oc_mojo',
+      operatorId: 'app',
+      operatorIdType: 'app_id',
+    }]);
 
     await expect(closeSession(fixture.session.sessionId)).resolves.toMatchObject({
       ok: true, outcome: 'closed_with_residual',

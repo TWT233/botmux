@@ -13,8 +13,9 @@
 - Authorization requires a frozen local candidate and exact same-app operator provenance.
 - Successful create status is insufficient: the returned Pin must repeat the requested message id and exact same-app provenance.
 - Never infer provenance from author, content, or message-id shape.
-- Explicit off cleans process-owned ids plus fresh remote same-app proven candidates; list failure skips ambiguous candidates.
-- Ordinary disable, close, and transfer are process-ownership-only.
+- Every Unpin requires fresh exact same-app proof immediately before deletion; list failure skips all destructive cleanup.
+- Ordinary disable, close, and transfer target process-owned ids only, then revalidate them remotely before Unpin.
+- Recovery discovery and immediate pre-delete validation are separate lists; Feishu's unconditional Unpin leaves a residual post-list API race.
 - Startup/configuration remain non-blocking and fail-open.
 - apiOnly/HTTP virtual/no-transport paths make zero Pin API calls.
 - Reuse existing per-bot FIFO, per-message queues, and batch size 20.
@@ -42,7 +43,7 @@
 
 - [ ] Add failing restart recovery and operator/candidate filtering tests.
 - [ ] Add failing current-collision, list-to-create race, ordinary disable, close, transfer, and explicit bot/chat off tests.
-- [ ] Add failing tests for one list per chat, partial failure, no-transport, and FIFO ordering.
+- [ ] Add failing tests for one discovery list per chat plus fresh pre-delete validation, partial failure, no-transport, and FIFO ordering.
 - [ ] Extend reconcile requests with frozen candidates, process-owned ids, and remote-discovery intent.
 - [ ] Implement per-chat discovery, exact intersection, enabled ownership restore without duplicate create, provenance-checked create, and disabled cleanup.
 - [ ] Keep restored-worker silent ready from independently re-pinning before the list proof completes.

@@ -2307,6 +2307,90 @@ function isExactSameAppPin(
     && pin.operatorId === larkAppId;
 }
 
+type StreamingCardPinCleanupTarget = {
+  chatId: string;
+  messageId: string;
+  owner: StreamingCardOwner;
+};
+
+/**
+ * Revalidate remote ownership immediately before destructive cleanup. Targets
+ * are grouped by chat so one complete Pin list authorizes the whole group; each
+ * message still enters its mutation queue before that list is read. Feishu has
+ * no conditional delete, so a remote ownership change after the list response
+ * and before delete remains an unavoidable API race.
+ */
+async function unpinProvenStreamingCardTargets(
+  larkAppId: string,
+  targets: readonly StreamingCardPinCleanupTarget[],
+  alreadyLockedMessageIds: ReadonlySet<string> = new Set(),
+): Promise<string[]> {
+  const byChat = new Map<string, Map<string, StreamingCardOwner[]>>();
+  for (const target of targets) {
+    if (!isRealStreamingCardId(target.messageId)) continue;
+    const byMessage = byChat.get(target.chatId) ?? new Map<string, StreamingCardOwner[]>();
+    const owners = byMessage.get(target.messageId) ?? [];
+    owners.push(target.owner);
+    byMessage.set(target.messageId, owners);
+    byChat.set(target.chatId, byMessage);
+  }
+
+  const succeeded: string[] = [];
+  for (const [chatId, byMessage] of byChat) {
+    const ownershipEpoch = ownedStreamingCardRegistryEpoch;
+    let resolveProof!: (proof: ReadonlySet<string> | null) => void;
+    const proof = new Promise<ReadonlySet<string> | null>(resolve => { resolveProof = resolve; });
+    const ready: Promise<void>[] = [];
+    const operations: Promise<void>[] = [];
+
+    for (const [messageId, owners] of byMessage) {
+      let markReady!: () => void;
+      ready.push(new Promise<void>(resolve => { markReady = resolve; }));
+      const cleanup = async (): Promise<void> => {
+        markReady();
+        const provenIds = await proof;
+        if (!provenIds || ownershipEpoch !== ownedStreamingCardRegistryEpoch) return;
+        if (!provenIds.has(messageId)) {
+          for (const owner of owners) forgetOwnedStreamingCard(owner, messageId);
+          return;
+        }
+        for (const owner of owners) rememberOwnedStreamingCard(owner, messageId);
+        try {
+          if (await unpinMessage(larkAppId, messageId)) {
+            for (const owner of owners) forgetOwnedStreamingCard(owner, messageId);
+            succeeded.push(messageId);
+          }
+        } catch (err) {
+          logger.debug(`[${larkAppId}] streaming-card Unpin failed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      };
+      const operation = alreadyLockedMessageIds.has(messageId)
+        ? cleanup()
+        : queueStreamingCardMessageMutation(larkAppId, messageId, cleanup);
+      trackPinStreamingCardTask(operation);
+      operations.push(operation);
+    }
+
+    await Promise.all(ready);
+    let provenIds: ReadonlySet<string> | null = null;
+    if (retainsLarkStreamingCardTransportFor(larkAppId, chatId)
+      && ownershipEpoch === ownedStreamingCardRegistryEpoch) {
+      try {
+        provenIds = sameAppRemoteAppIdProofIds(
+          larkAppId,
+          new Set(byMessage.keys()),
+          await listChatPins(larkAppId, chatId),
+        );
+      } catch (err) {
+        logger.debug(`[${larkAppId}] streaming-card pre-Unpin proof list failed for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    resolveProof(provenIds);
+    await Promise.allSettled(operations);
+  }
+  return succeeded;
+}
+
 /** Pin exactly the current public streaming card.  Pin is deliberately outside
  * the publication success boundary: every failure is swallowed and a late
  * success is compensated with an Unpin of the captured id. */
@@ -2316,6 +2400,7 @@ export async function pinStreamingCardIfEnabled(
 ): Promise<boolean> {
   if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return false;
   const appId = ds.larkAppId;
+  const chatId = ds.chatId;
   const operation = queueStreamingCardMessageMutation(appId, messageId, async () => {
     if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return false;
     try {
@@ -2325,15 +2410,11 @@ export async function pinStreamingCardIfEnabled(
         rememberOwnedStreamingCard(ds, messageId);
         return true;
       }
-      try {
-        // Direct call is required: this callback already runs inside this
-        // messageId's mutation queue. Requeueing through
-        // unpinStreamingCardIds() would wait on itself forever.
-        const unpinned = await unpinMessage(appId, messageId);
-        if (unpinned) forgetOwnedStreamingCard(ds, messageId);
-      } catch {
-        /* stale Pin compensation is best-effort */
-      }
+      await unpinProvenStreamingCardTargets(
+        appId,
+        [{ chatId, messageId, owner: ds }],
+        new Set([messageId]),
+      );
     } catch (err) {
       logger.debug(`[${tag(ds)}] streaming-card Pin failed: ${err instanceof Error ? err.message : String(err)}`);
     }
@@ -2341,35 +2422,6 @@ export async function pinStreamingCardIfEnabled(
   });
   trackPinStreamingCardTask(operation.then(() => undefined));
   return operation;
-}
-
-async function unpinStreamingCardIds(
-  larkAppId: string,
-  ids: readonly string[],
-  owner?: StreamingCardOwner,
-): Promise<string[]> {
-  const succeeded: string[] = [];
-  for (const messageId of ids) {
-    const ownershipEpoch = ownedStreamingCardRegistryEpoch;
-    const operation = queueStreamingCardMessageMutation(larkAppId, messageId, async () => {
-      try {
-        const unpinned = await unpinMessage(larkAppId, messageId);
-        if (unpinned) {
-          if (owner && ownershipEpoch === ownedStreamingCardRegistryEpoch) {
-            forgetOwnedStreamingCard(owner, messageId);
-          }
-          return messageId;
-        }
-      } catch (err) {
-        logger.debug(`[${larkAppId}] streaming-card Unpin failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-      return undefined;
-    });
-    trackPinStreamingCardTask(operation.then(() => undefined));
-    const unpinnedId = await operation;
-    if (unpinnedId) succeeded.push(unpinnedId);
-  }
-  return succeeded;
 }
 
 /** Fire-and-forget Pin QoL chain. Primary publication effects (recall,
@@ -2389,7 +2441,12 @@ export function continuePublishedStreamingCardPinChain(
   if (!pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) return;
   trackPinStreamingCardTask((async () => {
     if (await pinStreamingCardIfEnabled(ds, messageId) && ownsCurrentStreamingCard(ds, messageId)) {
-      await unpinStreamingCardIds(ds.larkAppId, predecessorIds, ds);
+      await unpinProvenStreamingCardTargets(
+        ds.larkAppId,
+        predecessorIds.map(predecessorId => ({
+          chatId: ds.chatId, messageId: predecessorId, owner: ds,
+        })),
+      );
     }
   })().catch((err) => {
     logger.debug(`[${tag(ds)}] streaming-card Pin chain failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -2417,12 +2474,18 @@ export async function reconcileStreamingCardPins(
     if (enabled) {
       const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== currentId);
       if (currentId && await pinStreamingCardIfEnabled(ds, currentId)) {
-        await unpinStreamingCardIds(ds.larkAppId, frozenIds, ds);
+        await unpinProvenStreamingCardTargets(
+          ds.larkAppId,
+          frozenIds.map(frozenId => ({ chatId: ds.chatId, messageId: frozenId, owner: ds })),
+        );
       }
       return;
     }
     if (cleanupIds.length === 0) return;
-    await unpinStreamingCardIds(ds.larkAppId, cleanupIds, ds);
+    await unpinProvenStreamingCardTargets(
+      ds.larkAppId,
+      cleanupIds.map(cleanupId => ({ chatId: ds.chatId, messageId: cleanupId, owner: ds })),
+    );
   } catch (err) {
     logger.debug(`[${tag(ds)}] streaming-card Pin reconciliation failed: ${err instanceof Error ? err.message : String(err)}`);
   }
@@ -2538,15 +2601,8 @@ function snapshotCleanupCandidatesForChat(
 function snapshotCleanupCandidatesForBotWideOff(
   larkAppId: string,
 ): Map<string, { chatId: string; candidateIds: string[]; ownedIds: string[] }> {
-  let disabledChats: string[] | undefined;
-  try {
-    disabledChats = getBot(larkAppId).config.noPinStreamingCardChats;
-  } catch {
-    disabledChats = undefined;
-  }
   return snapshotCleanupCandidatesForSessions(
-    snapshotBotStreamingCardReconcileSessions(larkAppId)
-      .filter(ds => !disabledChats?.includes(ds.chatId)),
+    snapshotBotStreamingCardReconcileSessions(larkAppId),
   );
 }
 
@@ -2598,55 +2654,16 @@ async function reconcileExplicitStreamingCardPinCleanup(
     ownedIds: string[];
   }>,
 ): Promise<void> {
-  const byChat = new Map<string, Array<{
-    owner: StreamingCardOwner;
-    candidateIds: string[];
-    ownedIds: string[];
-  }>>();
+  const targets: StreamingCardPinCleanupTarget[] = [];
   for (const [sessionId, snapshot] of cleanupCandidatesBySession) {
     if (!retainsLarkStreamingCardTransportFor(larkAppId, snapshot.chatId)) continue;
-    const entries = byChat.get(snapshot.chatId) ?? [];
-    entries.push({
-      owner: { larkAppId, sessionId },
-      candidateIds: [...new Set(snapshot.candidateIds.filter(isRealStreamingCardId))],
-      ownedIds: [...new Set(snapshot.ownedIds.filter(isRealStreamingCardId))],
-    });
-    byChat.set(snapshot.chatId, entries);
-  }
-
-  for (const [chatId, entries] of byChat) {
-    const candidatesNeedingProof = new Set(entries.flatMap(entry =>
-      entry.candidateIds.filter(id => !entry.ownedIds.includes(id))));
-    let provenIds = new Set<string>();
-    if (candidatesNeedingProof.size > 0) {
-      try {
-        provenIds = sameAppRemoteAppIdProofIds(
-          larkAppId,
-          candidatesNeedingProof,
-          await listChatPins(larkAppId, chatId),
-        );
-      } catch (err) {
-        logger.debug(`[${larkAppId}] streaming-card explicit-off Pin proof list failed for chat ${chatId}: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    for (let offset = 0; offset < entries.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
-      const batch = entries.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
-      await Promise.allSettled(batch.map(async (entry) => {
-        try {
-          if (!retainsLarkStreamingCardTransportFor(larkAppId, chatId)) return;
-          const ids = new Set(entry.ownedIds);
-          for (const candidateId of entry.candidateIds) {
-            if (provenIds.has(candidateId)) ids.add(candidateId);
-          }
-          for (const id of ids) rememberOwnedStreamingCard(entry.owner, id);
-          await unpinStreamingCardIds(larkAppId, [...ids], entry.owner);
-        } catch {
-          /* explicit cleanup remains fail-open */
-        }
-      }));
+    const owner = { larkAppId, sessionId };
+    const ids = new Set([...snapshot.candidateIds, ...snapshot.ownedIds]);
+    for (const messageId of ids) {
+      targets.push({ chatId: snapshot.chatId, messageId, owner });
     }
   }
+  await unpinProvenStreamingCardTargets(larkAppId, targets);
 }
 
 async function reconcileRestoredStreamingCardPinsForRequest(
@@ -2696,44 +2713,34 @@ async function reconcileRestoredStreamingCardPinsForRequest(
       if (localCandidateIds.size === 0) continue;
       const remotePins = await listChatPins(larkAppId, chatId);
       const provenIds = sameAppRemoteAppIdProofIds(larkAppId, localCandidateIds, remotePins);
-      await Promise.allSettled(entries.map(async (entry) => {
-        const provenFrozen = entry.frozenIds.filter(id => provenIds.has(id));
-        if (entry.enabled) {
-          if (!entry.currentId || !isRealStreamingCardId(entry.currentId)) return;
-          const currentPins = remotePins.filter(pin => pin.messageId === entry.currentId);
-          const currentOwned = currentPins.length > 0
-            ? currentPins.every(pin => isExactSameAppPin(pin, larkAppId, entry.currentId!))
-              && pinStreamingCardEnabled(entry.ds)
-              && ownsCurrentStreamingCard(entry.ds, entry.currentId)
-            : await pinStreamingCardIfEnabled(entry.ds, entry.currentId);
-          if (currentOwned && currentPins.length > 0) {
-            rememberOwnedStreamingCard(entry.owner, entry.currentId);
+      const cleanupTargets: StreamingCardPinCleanupTarget[] = [];
+      for (let offset = 0; offset < entries.length; offset += BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) {
+        const batch = entries.slice(offset, offset + BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE);
+        await Promise.allSettled(batch.map(async (entry) => {
+          for (const frozenId of entry.frozenIds) {
+            if (provenIds.has(frozenId)) {
+              cleanupTargets.push({ chatId, messageId: frozenId, owner: entry.owner });
+            }
           }
-          if (!currentOwned || provenFrozen.length === 0) return;
-          for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
-          await unpinStreamingCardIds(larkAppId, provenFrozen, entry.owner);
-          return;
-        }
-        if (provenIds.size === 0) return;
-        const provenCurrent = entry.currentId && provenIds.has(entry.currentId)
-          ? entry.currentId
-          : undefined;
-        if (provenCurrent) rememberOwnedStreamingCard(entry.owner, provenCurrent);
-        for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
-        // Maintainer intent: bot-wide OFF still excludes chats that had already
-        // opted out from the authoritative local snapshot, but a restart-time
-        // remote same-app proof may retry cleanup strictly inside those
-        // enqueue-time local candidates. This adds authorization only; it must
-        // never expand cleanup beyond the locally captured ids.
-        await unpinStreamingCardIds(
-          larkAppId,
-          [
-            ...(provenCurrent ? [provenCurrent] : []),
-            ...provenFrozen,
-          ],
-          entry.owner,
-        );
-      }));
+          if (entry.enabled) {
+            if (!entry.currentId || !isRealStreamingCardId(entry.currentId)) return;
+            const currentPins = remotePins.filter(pin => pin.messageId === entry.currentId);
+            const currentOwned = currentPins.length > 0
+              ? currentPins.every(pin => isExactSameAppPin(pin, larkAppId, entry.currentId!))
+                && pinStreamingCardEnabled(entry.ds)
+                && ownsCurrentStreamingCard(entry.ds, entry.currentId)
+              : await pinStreamingCardIfEnabled(entry.ds, entry.currentId);
+            if (currentOwned && currentPins.length > 0) {
+              rememberOwnedStreamingCard(entry.owner, entry.currentId);
+            }
+            return;
+          }
+          if (entry.currentId && provenIds.has(entry.currentId)) {
+            cleanupTargets.push({ chatId, messageId: entry.currentId, owner: entry.owner });
+          }
+        }));
+      }
+      await unpinProvenStreamingCardTargets(larkAppId, cleanupTargets);
     } catch (err) {
       logger.debug(`[${larkAppId}] streaming-card restore pin proof list failed for chat ${chatId}: ${summary(err)}`);
       /* one chat's remote proof failure must not block other chats */
@@ -6523,7 +6530,15 @@ export async function closeSession(
     if (hadPreviewTarget) publishSessionPreviewCleared(sessionId);
     const closeStreamingOwner = ds ?? closeStoredOwner;
     if (closeAppId && closeStreamingOwner && closePinnedStreamingIds.length > 0) {
-      void unpinStreamingCardIds(closeAppId, closePinnedStreamingIds, closeStreamingOwner);
+      const closeChatId = ds?.chatId ?? stored?.chatId;
+      if (closeChatId) {
+        void unpinProvenStreamingCardTargets(
+          closeAppId,
+          closePinnedStreamingIds.map(messageId => ({
+            chatId: closeChatId, messageId, owner: closeStreamingOwner,
+          })),
+        );
+      }
     }
   }
 
@@ -8119,7 +8134,12 @@ export async function transferSession(
   // Unpin exactly the pre-commit capture: a target publication racing after
   // this point must never be selected by source cleanup.
   if (sourcePinnedStreamingIds.length > 0) {
-    void unpinStreamingCardIds(ds.larkAppId, sourcePinnedStreamingIds, ds);
+    void unpinProvenStreamingCardTargets(
+      ds.larkAppId,
+      sourcePinnedStreamingIds.map(messageId => ({
+        chatId: oldChatId, messageId, owner: ds,
+      })),
+    );
   }
 
   dashboardEventBus.publish({

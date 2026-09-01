@@ -24,6 +24,7 @@ const pinMessageMock = vi.fn(async (larkAppId: string, messageId: string) => ({
   messageId, operatorId: larkAppId, operatorIdType: 'app_id',
 }));
 const unpinMessageMock = vi.fn(async () => true);
+const listChatPinsMock = vi.fn(async () => []);
 const { loggerInfoMock } = vi.hoisted(() => ({ loggerInfoMock: vi.fn() }));
 const sameAppPin = (messageId: string) => ({
   messageId, operatorId: 'app_test', operatorIdType: 'app_id',
@@ -38,6 +39,7 @@ vi.mock('../src/im/lark/client.js', () => {
     deleteMessage: (...args: any[]) => deleteMessageMock(...args),
     pinMessage: (...args: any[]) => pinMessageMock(...args),
     unpinMessage: (...args: any[]) => unpinMessageMock(...args),
+    listChatPins: (...args: any[]) => listChatPinsMock(...args),
     MessageWithdrawnError,
   };
 });
@@ -238,6 +240,8 @@ describe('Worker ready: set_display_mode re-sync', () => {
       messageId, operatorId: larkAppId, operatorIdType: 'app_id',
     }));
     unpinMessageMock.mockResolvedValue(true);
+    listChatPinsMock.mockReset();
+    listChatPinsMock.mockResolvedValue([]);
     getBotMock.mockReturnValue({
       config: { larkAppId: 'app_test', larkAppSecret: 'secret', cliId: 'claude-code' },
       resolvedAllowedUsers: [],
@@ -273,6 +277,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       worker: fakeWorker,
     });
     activate(ds);
+    listChatPinsMock.mockResolvedValue([sameAppPin('om_new_card')]);
 
     setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc', turnId: 'om_turn_1' });
@@ -309,6 +314,7 @@ describe('Worker ready: set_display_mode re-sync', () => {
       }]]),
     });
     activate(ds);
+    listChatPinsMock.mockResolvedValue([sameAppPin('om_restored_card')]);
 
     setupActiveWorkerHandlers(ds, fakeWorker);
     fakeWorker.emit('message', { type: 'ready', port: 9999, token: 'tok_abc' });
