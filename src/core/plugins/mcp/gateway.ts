@@ -304,6 +304,13 @@ function allocateName(
   return value;
 }
 
+/** The MCP SDK requires a concrete string map; ProcessEnv may carry undefined. */
+function toMcpSdkEnvironment(env: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(
+    Object.entries(env).filter((entry): entry is [string, string] => entry[1] !== undefined),
+  );
+}
+
 export class PluginMcpGateway {
   readonly server: Server;
   private readonly env: NodeJS.ProcessEnv;
@@ -406,7 +413,7 @@ export class PluginMcpGateway {
     try {
       if (descriptor.server.transport === 'stdio') {
         const resolved = resolveStdioCommand(descriptor);
-        const downstreamEnv: NodeJS.ProcessEnv = {
+        const downstreamEnv = toMcpSdkEnvironment({
           ...getDefaultEnvironment(),
           ...(this.frozenSessionEnv ?? {}),
           ...descriptor.server.env,
@@ -414,7 +421,7 @@ export class PluginMcpGateway {
           BOTMUX_PLUGIN_DIR: descriptor.pluginDir,
           BOTMUX_PLUGIN_HOME: pluginHome(descriptor.pluginId),
           ...(this.env.BOTMUX_SESSION_ID ? { BOTMUX_SESSION_ID: this.env.BOTMUX_SESSION_ID } : {}),
-        };
+        });
         // Only the managed runtime has a frozen session contract.  Its owner
         // identity is applied after descriptor env so a plugin cannot override
         // it; an ownerless frozen session must delete both legacy channels.
