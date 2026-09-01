@@ -1002,7 +1002,7 @@ function OncallRow(props: {
   member: GroupBot & { oncallChat?: { workingDir?: string } | null };
   disabled?: boolean;
   tr: Translator;
-  onSaved(): Promise<void>;
+  onSaved(): Promise<GroupsSnapshot>;
 }) {
   const { member, tr } = props;
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -1043,12 +1043,29 @@ function OncallRow(props: {
         : await fetch(url, { method: 'DELETE' });
       const body = await r.json().catch(() => ({}));
       if (r.ok && body.ok) {
-        dirtyRef.current = false;
         setStatus({
           text: enabled ? `✓ 已绑定 → ${body.resolvedPath ?? wd}` : '✓ 已解绑',
           className: 'hint-ok',
         });
-        try { await props.onSaved(); } catch { /* tolerate */ }
+        try {
+          const snapshot = await props.onSaved();
+          const refreshedMember = snapshot.chats
+            .find(chat => chat.chatId === props.chat.chatId)
+            ?.memberBots
+            .find(member => member.larkAppId === props.member.larkAppId);
+          if (refreshedMember) {
+            dirtyRef.current = false;
+            setEnabled(!!refreshedMember.oncallChat);
+            setWorkingDir(refreshedMember.oncallChat?.workingDir ?? '');
+          }
+        } catch (error) {
+          dirtyRef.current = true;
+          const message = error instanceof Error ? error.message : String(error);
+          setStatus({
+            text: `${enabled ? `✓ 已绑定 → ${body.resolvedPath ?? wd}` : '✓ 已解绑'}；刷新失败：${message}`,
+            className: 'hint-warn-inline',
+          });
+        }
       } else {
         setStatus({ text: `✗ ${body.error ?? r.status}`, className: 'hint-warn-inline' });
       }
@@ -1109,7 +1126,7 @@ function GroupPinStreamingCardRow(props: {
   member: GroupChat['memberBots'][number];
   disabled?: boolean;
   tr: Translator;
-  onSaved(): Promise<void>;
+  onSaved(): Promise<GroupsSnapshot>;
 }) {
   const { chat, member, tr } = props;
   const initialChecked = member.pinStreamingCardChatEnabled === true;
@@ -1225,6 +1242,11 @@ export function ManageDialog(props: {
   inChatIdsRef.current = new Set(inChat.map(member => member.larkAppId));
   const availableRef = useRef(available);
   availableRef.current = available;
+  const mountedRef = useRef(true);
+  useEffect(() => () => {
+    mountedRef.current = false;
+  }, []);
+  const isAlive = useCallback(() => mountedRef.current && availableRef.current, []);
 
   useEffect(() => {
     setLeaveSelection(current => {
@@ -1244,11 +1266,11 @@ export function ManageDialog(props: {
   }
 
   async function leaveSelected(): Promise<void> {
-    if (!availableRef.current) return;
+    if (!isAlive()) return;
     const selected = [...leaveSelection];
     if (selected.length === 0) { toast('至少选一个机器人', { kind: 'warning' }); return; }
-    if (!await confirm({ title: '退出群聊', message: `确定让 ${selected.length} 个机器人退出群聊？该 bot 在此群的会话会一并关闭。`, danger: true })) return;
-    if (!availableRef.current) return;
+    const confirmed = await confirm({ title: '退出群聊', message: `确定让 ${selected.length} 个机器人退出群聊？该 bot 在此群的会话会一并关闭。`, danger: true });
+    if (!isAlive() || !confirmed) return;
     const checked = selected.filter(appId => inChatIdsRef.current.has(appId));
     if (checked.length === 0) return;
     try {
@@ -1257,7 +1279,9 @@ export function ManageDialog(props: {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ larkAppIds: checked }),
       });
+      if (!isAlive()) return;
       const respBody = await r.json();
+      if (!isAlive()) return;
       const lines = (respBody.result ?? []).map((x: any) => {
         if (!x.ok) return `${x.larkAppId}: 失败 (${x.error ?? 'unknown'})`;
         const closed = (x.closedSessions ?? []) as any[];
@@ -1275,30 +1299,34 @@ export function ManageDialog(props: {
       }).join('\n');
       toast(lines || `Unexpected: ${JSON.stringify(respBody)}`, { kind: 'success' });
       await props.onReloadGroups({ force: true });
+      if (!isAlive()) return;
     } catch (err) {
+      if (!isAlive()) return;
       toast('Network error: ' + err, { kind: 'error' });
     } finally {
-      props.onClose();
+      if (isAlive()) props.onClose();
     }
   }
 
   async function disband(): Promise<void> {
-    if (!availableRef.current || inChat.length === 0) return;
-    if (!await confirm({ title: '解散群聊', message: `确定解散群聊「${chat.name ?? chat.chatId}」？此操作不可恢复，本群所有机器人会话也会一并关闭。`, danger: true })) return;
-    if (!availableRef.current) return;
+    if (!isAlive() || inChat.length === 0) return;
+    const confirmed = await confirm({ title: '解散群聊', message: `确定解散群聊「${chat.name ?? chat.chatId}」？此操作不可恢复，本群所有机器人会话也会一并关闭。`, danger: true });
+    if (!isAlive() || !confirmed) return;
     const ordered = [...inChat].sort((a, b) =>
       (b.larkAppId === ownerAppId ? 1 : 0) - (a.larkAppId === ownerAppId ? 1 : 0),
     );
     const errs: string[] = [];
     for (const member of ordered) {
-      if (!availableRef.current) return;
+      if (!isAlive()) return;
       try {
         const r = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/disband`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ larkAppId: member.larkAppId }),
         });
+        if (!isAlive()) return;
         const respBody = await r.json();
+        if (!isAlive()) return;
         if (respBody.ok) {
           const closed = (respBody.closedSessions ?? []) as any[];
           const failed = closed.filter(c => !c.ok).length;
@@ -1311,14 +1339,17 @@ export function ManageDialog(props: {
               + `${residuals.length ? `\n⚠️ ${residuals.length} 个有残留需人工清理：${residuals.join(', ')}` : ''}。`;
           toast(`已解散（由 ${member.botName ?? member.larkAppId} 执行）${closedNote}`, { kind: 'success' });
           await props.onReloadGroups({ force: true });
+          if (!isAlive()) return;
           props.onClose();
           return;
         }
         errs.push(`${member.botName ?? member.larkAppId}: ${respBody.error ?? r.status}`);
       } catch (err) {
+        if (!isAlive()) return;
         errs.push(`${member.botName ?? member.larkAppId}: ${err}`);
       }
     }
+    if (!isAlive()) return;
     toast(`所有在群机器人均无法解散：\n${errs.join('\n')}\n\n建议改用「退出群聊」。`, { kind: 'error' });
   }
 
@@ -1345,7 +1376,7 @@ export function ManageDialog(props: {
             member={member}
             disabled={!available}
             tr={tr}
-            onSaved={async () => { await props.onReloadGroups({ force: true }); }}
+            onSaved={() => props.onReloadGroups({ force: true })}
           />
         ))}
       </fieldset>
@@ -1362,7 +1393,7 @@ export function ManageDialog(props: {
             member={member}
             disabled={!available}
             tr={tr}
-            onSaved={async () => { await props.onReloadGroups({ force: true }); }}
+            onSaved={() => props.onReloadGroups({ force: true })}
           />
         ))}
       </fieldset>
@@ -1469,6 +1500,7 @@ function DialogHost(props: {
     const chat = currentChat ?? capturedChat;
     content = (
       <ManageDialog
+        key={capturedChat.chatId}
         chat={chat}
         available={!!currentChat}
         tr={props.tr}

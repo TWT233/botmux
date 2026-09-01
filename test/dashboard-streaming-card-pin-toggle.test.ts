@@ -842,6 +842,43 @@ describe('group manage streaming-card pin rows', () => {
     );
   });
 
+  it('keeps the submitted oncall working directory when an older snapshot arrives before a failed reload', async () => {
+    const saveResponse = deferred<any>();
+    const reloadResponse = deferred<any>();
+    (globalThis as any).fetch = vi.fn(() => saveResponse.promise);
+    const onReloadGroups = vi.fn(() => reloadResponse.promise);
+    const oldMember = makeMember({ oncallChat: { workingDir: '/srv/old-repo' } });
+    const renderer = renderManage(makeChat([oldMember]), onReloadGroups);
+
+    act(() => {
+      renderer.root.findByProps({ 'data-input': 'workingDir' })
+        .props.onChange({ currentTarget: { value: '/srv/submitted-repo' } });
+    });
+    act(() => {
+      renderer.root.findByProps({ 'data-action': 'save' }).props.onClick();
+    });
+
+    await act(async () => {
+      saveResponse.resolve(jsonResponse({ ok: true, resolvedPath: '/srv/submitted-repo' }));
+      await vi.waitFor(() => expect(onReloadGroups).toHaveBeenCalledOnce());
+    });
+    act(() => {
+      renderer.update(manageElement(makeChat([{
+        ...oldMember,
+        botName: 'Claude (older snapshot)',
+      }]), onReloadGroups));
+    });
+    await act(async () => {
+      reloadResponse.reject(new Error('reload_failed'));
+      await reloadResponse.promise.catch(() => undefined);
+    });
+
+    expect(renderer.root.findByProps({ 'data-input': 'workingDir' }).props.value)
+      .toBe('/srv/submitted-repo');
+    expect(renderer.root.findByProps({ 'data-status': true }).children.join(''))
+      .toContain('reload_failed');
+  });
+
   it('drops a selected leave target when a fresh chat snapshot removes that member', () => {
     const initialMember = makeMember();
     const freshMember = makeMember({ larkAppId: 'cli_b', botName: 'Codex' });
@@ -923,6 +960,89 @@ describe('group manage streaming-card pin rows', () => {
     await act(async () => { confirmation.resolve(true); });
 
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('stops disbanding remaining bots when the dialog unmounts before the first request fails', async () => {
+    const firstDisband = deferred<any>();
+    const requests: string[] = [];
+    confirmDialog.confirm.mockResolvedValueOnce(true);
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      requests.push(`${String(init?.method ?? 'GET')} ${String(input)} ${String((init?.body as string | undefined) ?? '')}`);
+      return firstDisband.promise;
+    });
+    const onReloadGroups = vi.fn(async () => ({ chats: [], bots: [] }));
+    const renderer = renderManage(makeChat([
+      makeMember({ larkAppId: 'cli_a', botName: 'Claude' }),
+      makeMember({ larkAppId: 'cli_b', botName: 'Codex' }),
+    ], { ownerId: 'cli_b' }), onReloadGroups);
+
+    act(() => { renderer.root.findByProps({ id: 'g-disband-btn' }).props.onClick(); });
+    await vi.waitFor(() => expect(requests).toHaveLength(1));
+
+    act(() => renderer.unmount());
+    await act(async () => {
+      firstDisband.reject(new Error('first_failed'));
+      await firstDisband.promise.catch(() => undefined);
+      await Promise.resolve();
+    });
+
+    expect(requests).toHaveLength(1);
+    expect(requests[0]).toContain('POST /api/groups/oc_group/disband');
+    expect(onReloadGroups).not.toHaveBeenCalled();
+  });
+
+  it('does not let an old leave completion close a replacement manage dialog', async () => {
+    const chatA = makeChat([makeMember({ larkAppId: 'cli_a', botName: 'Claude' })], {
+      chatId: 'oc_group_a',
+      name: 'Room A',
+    });
+    const chatB = makeChat([makeMember({ larkAppId: 'cli_b', botName: 'Codex' })], {
+      chatId: 'oc_group_b',
+      name: 'Room B',
+    });
+    const leaveResponse = deferred<any>();
+    const requests: string[] = [];
+    primeGroupsSnapshotCache({ chats: [chatA, chatB], bots: [] });
+    confirmDialog.confirm.mockResolvedValueOnce(true);
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET');
+      requests.push(`${method} ${url}`);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/groups/oc_group_a/leave' && method === 'POST') return leaveResponse.promise;
+      if (url === '/api/groups?refresh=1') return Promise.resolve(jsonResponse({ chats: [chatA, chatB], bots: [] }));
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(2);
+    });
+
+    const manageButtons = renderer.root.findAllByProps({ className: 'manage-chat' });
+    act(() => { manageButtons[0].props.onClick(); });
+    expect(renderer.root.findByType('h3').children.join('')).toContain('Room A');
+    act(() => {
+      renderer.root.findByProps({ name: 'leave-bot', value: 'cli_a' })
+        .props.onChange({ currentTarget: { checked: true } });
+    });
+    act(() => { renderer.root.findByProps({ id: 'g-leave-btn' }).props.onClick(); });
+    await vi.waitFor(() => expect(requests).toContain('POST /api/groups/oc_group_a/leave'));
+
+    act(() => { manageButtons[1].props.onClick(); });
+    expect(renderer.root.findByType('h3').children.join('')).toContain('Room B');
+    await act(async () => {
+      leaveResponse.resolve(jsonResponse({ result: [{ larkAppId: 'cli_a', ok: true, closedSessions: [] }] }));
+      await leaveResponse.promise;
+      await Promise.resolve();
+    });
+
+    expect(renderer.root.findAllByType(ManageDialog)).toHaveLength(1);
+    expect(renderer.root.findByType('h3').children.join('')).toContain('Room B');
+
+    act(() => renderer.unmount());
   });
 
   it('shows master-off copy and keeps the row editable without letting the chat force-enable pinning', async () => {
