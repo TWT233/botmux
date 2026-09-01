@@ -16,7 +16,7 @@ state can never broaden that candidate set. Remote discovery only narrows it.
 
 ## Lark transport
 
-listChatPins(larkAppId, chatId) calls im.v1.pin.list directly with page_size 100
+listChatPins(larkAppId, chatId) calls im.v1.pin.list directly with page_size 50
 and explicit page tokens. It returns normalized records and throws on non-zero
 or missing response codes, missing/repeated continuation tokens, and SDK errors.
 Worker code catches failures per chat, logs debug, and continues; failed lookup

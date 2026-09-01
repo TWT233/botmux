@@ -974,6 +974,8 @@ export interface LarkPinRecord {
   createTime?: string;
 }
 
+const LARK_PIN_LIST_MAX_PAGE = 50;
+
 /**
  * List every Pin record in one chat, following explicit page_token pagination.
  * This is a strict read wrapper: non-zero or missing `code`, missing next-page
@@ -990,7 +992,7 @@ export async function listChatPins(larkAppId: string, chatId: string): Promise<L
     const res: any = await c.im.v1.pin.list({
       params: {
         chat_id: chatId,
-        page_size: 100,
+        page_size: LARK_PIN_LIST_MAX_PAGE,
         ...(pageToken ? { page_token: pageToken } : {}),
       },
     });

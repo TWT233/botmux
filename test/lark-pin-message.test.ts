@@ -170,13 +170,13 @@ describe('listChatPins pagination contract', () => {
     expect(list).toHaveBeenNthCalledWith(1, {
       params: {
         chat_id: 'oc_chat',
-        page_size: 100,
+        page_size: 50,
       },
     });
     expect(list).toHaveBeenNthCalledWith(2, {
       params: {
         chat_id: 'oc_chat',
-        page_size: 100,
+        page_size: 50,
         page_token: 'next-token',
       },
     });
@@ -321,7 +321,7 @@ describe('listChatPins pagination contract', () => {
     expect(list).toHaveBeenNthCalledWith(2, {
       params: {
         chat_id: 'oc_chat',
-        page_size: 100,
+        page_size: 50,
         page_token: 'opaque-token',
       },
     });

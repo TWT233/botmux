@@ -28,7 +28,7 @@
 
 - [ ] Add failing tests for exact first/next payload and normalized records.
 - [ ] Add failing tests for non-zero/missing code, SDK errors, and missing/repeated token.
-- [ ] Implement strict explicit pagination with page size 100.
+- [ ] Implement strict explicit pagination with page size 50.
 - [ ] Run focused tests, commit feat(card): 封装群内 Pin 来源分页查询, and push.
 
 ### Task 2: Provenance-aware worker reconciliation
