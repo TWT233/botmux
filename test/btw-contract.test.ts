@@ -1,3 +1,6 @@
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import { supportsManagedBtw, type BtwAdapter } from '../src/adapters/cli/btw.js';
@@ -19,6 +22,56 @@ import {
 } from './fixtures/btw-fixtures.js';
 
 describe('managed BTW contracts', () => {
+  it('exports the complete operation-store type surface without runtime behavior', () => {
+    const contractProbeDir = mkdtempSync(resolve('.tmp-btw-operation-store-contract-'));
+    const contractProbe = join(contractProbeDir, 'probe.ts');
+    writeFileSync(contractProbe, `
+      import type { BtwTerminalOutcome } from '../src/adapters/cli/btw.js';
+      import type {
+        BtwInitialCardAttemptOutcome, BtwOperation, BtwOperationScope,
+        BtwOperationStore, BtwProjectionFailure, BtwProjectionItem,
+        BtwProjectionProviderOutcome, PrepareBtwInput, PrepareBtwResult,
+        btwOperationPath, createBtwOperationStore,
+      } from '../src/features/btw/types.js';
+      type Equal<A, B> = (<T>() => T extends A ? 1 : 2) extends
+        (<T>() => T extends B ? 1 : 2)
+          ? ((<T>() => T extends B ? 1 : 2) extends (<T>() => T extends A ? 1 : 2) ? true : false)
+          : false;
+      type Assert<T extends true> = T;
+      type ExpectedStore = {
+        pathFor(scope: BtwOperationScope, btwOpId: string): string;
+        prepareBtw(input: PrepareBtwInput): PrepareBtwResult;
+        getBtwOperation(scope: BtwOperationScope, btwOpId: string): BtwOperation | undefined;
+        listPendingInitialCards(larkAppId: string): BtwOperation[];
+        recordInitialCardAttempt(scope: BtwOperationScope, btwOpId: string, outcome: BtwInitialCardAttemptOutcome): BtwOperation;
+        recordBtwCard(scope: BtwOperationScope, btwOpId: string, messageId: string): BtwOperation;
+        listExecutableBtwOperations(runtimeEpoch: string): BtwOperation[];
+        prepareBtwSubmission(scope: BtwOperationScope, btwOpId: string, runtimeEpoch: string): BtwOperation;
+        recordBtwDefinitelyUnsent(scope: BtwOperationScope, btwOpId: string, runtimeEpoch: string): BtwOperation;
+        recordBtwSubmissionUnknown(scope: BtwOperationScope, btwOpId: string, message: string): BtwOperation;
+        recordBtwRunning(scope: BtwOperationScope, btwOpId: string, nativeTurnId: string): BtwOperation;
+        recordBtwTerminal(scope: BtwOperationScope, btwOpId: string, terminal: BtwTerminalOutcome): { kind: 'advanced' | 'duplicate'; operation: BtwOperation };
+        listPendingBtwProjections(larkAppId: string): BtwProjectionItem[];
+        recordBtwProjectionFailure(scope: BtwOperationScope, btwOpId: string, expected: { operationRevision: number; projectionRevision: number }, failure: BtwProjectionFailure): { kind: 'applied' | 'stale'; operation: BtwOperation };
+        ackBtwProjection(scope: BtwOperationScope, btwOpId: string, expected: { operationRevision: number; projectionRevision: number }, outcome: BtwProjectionProviderOutcome): { kind: 'applied' | 'stale'; operation: BtwOperation };
+        reconcileBtwOperations(input: { runtimeEpoch: string; liveSessionIds: ReadonlySet<string> }): BtwOperation[];
+      };
+      type StoreContract = Assert<Equal<BtwOperationStore, ExpectedStore>>;
+      type PathContract = Assert<Equal<typeof btwOperationPath, (dataDir: string, scope: BtwOperationScope, btwOpId: string) => string>>;
+      type FactoryContract = Assert<Equal<typeof createBtwOperationStore, (options: { dataDir: string; now?: () => Date }) => BtwOperationStore>>;
+      export type ContractProbe = [StoreContract, PathContract, FactoryContract];
+    `);
+    try {
+      expect(() => execFileSync(resolve('node_modules/.bin/tsc'), [
+        '--noEmit', '--pretty', 'false', '--strict', '--skipLibCheck',
+        '--target', 'ES2022', '--module', 'NodeNext', '--moduleResolution', 'NodeNext',
+        contractProbe,
+      ], { stdio: 'pipe' })).not.toThrow();
+    } finally {
+      rmSync(contractProbeDir, { recursive: true, force: true });
+    }
+  });
+
   it.each(ALL_BTW_CAPABILITY_COMBINATIONS)(
     'manages only the all-true capability row %#',
     ({ capabilities, managed }) => {

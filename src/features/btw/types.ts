@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto';
+import type { BtwTerminalOutcome } from '../../adapters/cli/btw.js';
 
 export type BtwOperationState =
   | 'card_pending'
@@ -146,6 +147,53 @@ export interface BtwQuiesceResult {
   affectedAppIds: string[];
   projectionWatermarks: BtwProjectionWatermark[];
 }
+
+/** Frozen store surface implemented by `operation-store.ts` in Task 2. */
+export interface BtwOperationStore {
+  pathFor(scope: BtwOperationScope, btwOpId: string): string;
+  prepareBtw(input: PrepareBtwInput): PrepareBtwResult;
+  getBtwOperation(scope: BtwOperationScope, btwOpId: string): BtwOperation | undefined;
+  listPendingInitialCards(larkAppId: string): BtwOperation[];
+  recordInitialCardAttempt(scope: BtwOperationScope, btwOpId: string, outcome: BtwInitialCardAttemptOutcome): BtwOperation;
+  recordBtwCard(scope: BtwOperationScope, btwOpId: string, messageId: string): BtwOperation;
+  listExecutableBtwOperations(runtimeEpoch: string): BtwOperation[];
+  prepareBtwSubmission(scope: BtwOperationScope, btwOpId: string, runtimeEpoch: string): BtwOperation;
+  recordBtwDefinitelyUnsent(scope: BtwOperationScope, btwOpId: string, runtimeEpoch: string): BtwOperation;
+  recordBtwSubmissionUnknown(scope: BtwOperationScope, btwOpId: string, message: string): BtwOperation;
+  recordBtwRunning(scope: BtwOperationScope, btwOpId: string, nativeTurnId: string): BtwOperation;
+  recordBtwTerminal(
+    scope: BtwOperationScope,
+    btwOpId: string,
+    terminal: BtwTerminalOutcome,
+  ): { kind: 'advanced' | 'duplicate'; operation: BtwOperation };
+  listPendingBtwProjections(larkAppId: string): BtwProjectionItem[];
+  recordBtwProjectionFailure(
+    scope: BtwOperationScope,
+    btwOpId: string,
+    expected: { operationRevision: number; projectionRevision: number },
+    failure: BtwProjectionFailure,
+  ): { kind: 'applied' | 'stale'; operation: BtwOperation };
+  ackBtwProjection(
+    scope: BtwOperationScope,
+    btwOpId: string,
+    expected: { operationRevision: number; projectionRevision: number },
+    outcome: BtwProjectionProviderOutcome,
+  ): { kind: 'applied' | 'stale'; operation: BtwOperation };
+  reconcileBtwOperations(input: { runtimeEpoch: string; liveSessionIds: ReadonlySet<string> }): BtwOperation[];
+}
+
+/** Callable declaration implemented by `operation-store.ts` in Task 2. */
+export declare function btwOperationPath(
+  dataDir: string,
+  scope: BtwOperationScope,
+  btwOpId: string,
+): string;
+
+/** Callable declaration implemented by `operation-store.ts` in Task 2. */
+export declare function createBtwOperationStore(options: {
+  dataDir: string;
+  now?: () => Date;
+}): BtwOperationStore;
 
 export interface BtwIdentifiers {
   btwOpId: string;
