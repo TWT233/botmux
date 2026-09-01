@@ -1084,6 +1084,36 @@ describe('streaming-card pin policy', () => {
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_opted_current');
   });
 
+  it('disabled startup recovery does not clean matching candidate ids when remote provenance uses open_id even if the operator id string equals the app id', async () => {
+    const ds = makeDs(
+      'om_current',
+      new Map<string, FrozenCard>([
+        ['frozen', { messageId: 'om_frozen', content: '', title: '', displayMode: 'hidden' }],
+      ]),
+    );
+    activate(ds);
+    getBotMock.mockReturnValue({
+      config: {
+        larkAppId: 'app-pin',
+        cliId: 'claude-code',
+        pinStreamingCard: false,
+      },
+    } as any);
+    listChatPinsMock.mockResolvedValue([
+      { messageId: 'om_current', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'open_id' },
+      { messageId: 'om_frozen', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'open_id' },
+    ]);
+
+    reconcileRestoredStreamingCardPins('app-pin');
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(listChatPinsMock).toHaveBeenCalledTimes(1);
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_current');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_frozen');
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
   it('lists each chat at most once per restore run and isolates one chat failure from others', async () => {
     const first = makeDs('om_first', undefined, 'pin-session-1', 'om_root_1');
     const secondSameChat = makeDs('om_second', undefined, 'pin-session-2', 'om_root_2');
