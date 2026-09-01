@@ -27,6 +27,8 @@ const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_PENDING_REQUESTS_PER_SOCKET = 64;
 const SOCKET_PATH_MAX_BYTES = process.platform === 'darwin' ? 96 : 100;
 const STARTUP_CLAIM_LEASE_MS = 5_000;
+const STARTUP_PUBLICATION_TIMEOUT_MS = 10_000;
+const STARTUP_POLL_MS = 50;
 
 interface RuntimePaths {
   runtimeDir: string;
@@ -100,6 +102,7 @@ const runtimeStates = new Map<string, RuntimeState>();
 /** Deterministic startup-handoff interleaving seam; never set by production code. */
 export interface BtwRuntimeTestHooks {
   afterChildClaimLockAcquired?: () => void | Promise<void>;
+  onStartupClaimLeaseWait?: () => void | Promise<void>;
 }
 let runtimeTestHooks: BtwRuntimeTestHooks | undefined;
 export function __testOnly_setBtwRuntimeHooks(hooks?: BtwRuntimeTestHooks): void { runtimeTestHooks = hooks; }
@@ -249,6 +252,10 @@ function isStartupClaim(marker: RuntimeStartupMarker | RuntimeStartupClaim): mar
 
 function removeStartupMarker(paths: RuntimePaths): void {
   try { unlinkSync(paths.startupPath); } catch { /* absent or concurrently removed */ }
+}
+
+function removePublishedDescriptor(paths: RuntimePaths): void {
+  try { unlinkSync(paths.descriptorPath); } catch { /* absent or concurrently removed */ }
 }
 
 function readDescriptor(paths: RuntimePaths): BtwRuntimeDescriptor {
@@ -637,85 +644,94 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
   const dataDir = canonicalDataDir(input.dataDir);
   const paths = runtimePaths(dataDir);
   const buildId = assertRuntimeBuildIdKnown();
-  await withFileLock(paths.lockPath, async () => {
-    let live: BtwRuntimeDescriptor | undefined;
-    try {
-      live = readDescriptor(paths);
-    } catch {
-      // no valid descriptor: create fresh runtime below
-    }
-    if (live) {
-      if (canReuseDescriptor(live)) {
-        // A live PID is not enough to reuse a published runtime.  The socket
-        // must prove possession of the descriptor token and epoch while we
-        // still hold the singleton lock.  Otherwise a stale socket pathname
-        // would make callers wait for a publication that can never occur, or
-        // tempt a later change to replace a process we have not authenticated.
-        if (await authenticatePublishedRuntime(paths, live)) return;
-        throw new Error('btw runtime is live but unavailable or unauthenticated');
-      }
-      // A marker is only an in-flight-publication lease while no descriptor
-      // exists.  Once we have rejected a published descriptor (especially
-      // after retiring an empty incompatible runtime), its matching marker
-      // must not suppress the replacement spawn while the old PID is still
-      // briefly visible during process exit.
-      removeStartupMarker(paths);
-      if (live.protocolVersion !== BTW_RUNTIME_PROTOCOL_VERSION) {
-        await stopEmptyIncompatibleRuntime(paths, live);
-        if (pidIsLive(live)) throw new Error('incompatible btw runtime has durable operations');
-      }
-    }
-    const starting = readStartupMarker(paths);
-    if (starting && starting.buildId === buildId) {
-      if (isStartupClaim(starting)) {
-        if (readProcessStartIdentity(starting.ownerPid) === starting.ownerStartIdentity
-          || Date.now() < starting.leaseExpiresAt) return;
-      }
-      if (!isStartupClaim(starting)
-        && readProcessStartIdentity(starting.pid) === starting.startIdentity) return;
-    }
-    removeStartupMarker(paths);
-
-    cleanupSocketFile(paths.socketPath);
-    const ownerStartIdentity = readProcessStartIdentity(process.pid);
-    if (!ownerStartIdentity) throw new Error('cannot determine btw runtime startup claimant identity');
-    const claim = randomToken();
-    // Reserve before spawn. If this process dies at any later point, a future
-    // ensure can prove the owner dead and reclaim it; it never mistakes a
-    // reservation for a live child.
-    writeStartupMarker(paths, {
-      claim, ownerPid: process.pid, ownerStartIdentity, buildId,
-      // A child has only the opaque claim capability, not the parent's PID. If
-      // P dies just after spawning C, this lease prevents a reclaimer from
-      // deleting the reservation before C can atomically bind itself.
-      leaseExpiresAt: Date.now() + STARTUP_CLAIM_LEASE_MS,
-    });
-    const { spawn } = await import('node:child_process');
-    const childRuntime = childSpawn();
-    const child = spawn(childRuntime.command, childRuntime.args, {
-      cwd: process.cwd(),
-      env: {
-        ...process.env,
-        SESSION_DATA_DIR: dataDir,
-        BOTMUX_BTW_RUNTIME_CHILD: '1',
-        BOTMUX_BTW_RUNTIME_STARTUP_CLAIM: claim,
-      },
-      detached: true,
-      stdio: 'ignore',
-    });
-    child.unref();
-    const startIdentity = child.pid === undefined ? undefined : readProcessStartIdentity(child.pid);
-    if (!child.pid || !startIdentity) {
-      removeStartupMarker(paths);
-      throw new Error('cannot determine spawned btw runtime identity');
-    }
-  });
-
-  // Publication is intentionally outside the singleton lock.  The marker above
-  // lets every concurrent caller converge on the one spawn decision instead of
-  // timing out while the child initializes its socket and durable store.
-  const deadline = Date.now() + 10_000;
+  const deadline = Date.now() + STARTUP_PUBLICATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
+    let waitingForDeadParentClaim = false;
+    await withFileLock(paths.lockPath, async () => {
+      let live: BtwRuntimeDescriptor | undefined;
+      try {
+        live = readDescriptor(paths);
+      } catch {
+        // no valid descriptor: create fresh runtime below
+      }
+      if (live) {
+        if (canReuseDescriptor(live)) {
+          // A live PID is not enough to reuse a published runtime.  The socket
+          // must prove possession of the descriptor token and epoch while we
+          // still hold the singleton lock.  Otherwise a stale socket pathname
+          // would make callers wait for a publication that can never occur, or
+          // tempt a later change to replace a process we have not authenticated.
+          if (await authenticatePublishedRuntime(paths, live)) return;
+          throw new Error('btw runtime is live but unavailable or unauthenticated');
+        }
+        // A marker is only an in-flight-publication lease while no descriptor
+        // exists.  Once we have rejected a published descriptor (especially
+        // after retiring an empty incompatible runtime), its matching marker
+        // must not suppress the replacement spawn while the old PID is still
+        // briefly visible during process exit.
+        removeStartupMarker(paths);
+        if (live.protocolVersion !== BTW_RUNTIME_PROTOCOL_VERSION) {
+          await stopEmptyIncompatibleRuntime(paths, live);
+          if (pidIsLive(live)) throw new Error('incompatible btw runtime has durable operations');
+        }
+        // A rejected descriptor must not survive a later reservation wait. This
+        // loop revisits the lock while a new child publishes; leaving the old
+        // descriptor in place would make that later pass remove the new claim
+        // and repeatedly spawn instead of observing the child publication.
+        removePublishedDescriptor(paths);
+      }
+      const starting = readStartupMarker(paths);
+      if (starting && starting.buildId === buildId) {
+        if (isStartupClaim(starting)) {
+          const ownerIsLive = readProcessStartIdentity(starting.ownerPid) === starting.ownerStartIdentity;
+          if (ownerIsLive || Date.now() < starting.leaseExpiresAt) {
+            // A dead owner may already have spawned a child carrying this opaque
+            // capability. Wait outside the lock through its bounded lease, then
+            // reacquire and inspect again before anyone can reclaim it.
+            waitingForDeadParentClaim = !ownerIsLive;
+            return;
+          }
+        }
+        if (!isStartupClaim(starting)
+          && readProcessStartIdentity(starting.pid) === starting.startIdentity) return;
+      }
+      removeStartupMarker(paths);
+
+      cleanupSocketFile(paths.socketPath);
+      const ownerStartIdentity = readProcessStartIdentity(process.pid);
+      if (!ownerStartIdentity) throw new Error('cannot determine btw runtime startup claimant identity');
+      const claim = randomToken();
+      // Reserve before spawn. If this process dies at any later point, a future
+      // ensure can prove the owner dead and reclaim it; it never mistakes a
+      // reservation for a live child.
+      writeStartupMarker(paths, {
+        claim, ownerPid: process.pid, ownerStartIdentity, buildId,
+        // A child has only the opaque claim capability, not the parent's PID. If
+        // P dies just after spawning C, this lease prevents a reclaimer from
+        // deleting the reservation before C can atomically bind itself.
+        leaseExpiresAt: Date.now() + STARTUP_CLAIM_LEASE_MS,
+      });
+      const { spawn } = await import('node:child_process');
+      const childRuntime = childSpawn();
+      const child = spawn(childRuntime.command, childRuntime.args, {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          SESSION_DATA_DIR: dataDir,
+          BOTMUX_BTW_RUNTIME_CHILD: '1',
+          BOTMUX_BTW_RUNTIME_STARTUP_CLAIM: claim,
+        },
+        detached: true,
+        stdio: 'ignore',
+      });
+      child.unref();
+      const startIdentity = child.pid === undefined ? undefined : readProcessStartIdentity(child.pid);
+      if (!child.pid || !startIdentity) {
+        removeStartupMarker(paths);
+        throw new Error('cannot determine spawned btw runtime identity');
+      }
+    });
+
     try {
       const descriptor = readDescriptor(paths);
       // Build IDs are diagnostic, not a runtime compatibility boundary.  A
@@ -729,8 +745,9 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
     } catch {
       // child has not atomically published both descriptor and token yet
     }
+    if (waitingForDeadParentClaim) await runtimeTestHooks?.onStartupClaimLeaseWait?.();
     await new Promise(resolvePromise => {
-      const timer = setTimeout(resolvePromise, 50);
+      const timer = setTimeout(resolvePromise, STARTUP_POLL_MS);
       timer.unref?.();
     });
   }
