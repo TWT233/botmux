@@ -42,6 +42,23 @@ function createStore(dataDir: string) {
   });
 }
 
+function createAdvancingClock(start = FIXED_NOW) {
+  let currentMs = Date.parse(start);
+  return {
+    now: () => new Date(currentMs),
+    advance: (ms = 1000) => {
+      currentMs += ms;
+    },
+  };
+}
+
+function createStoreWithClock(dataDir: string, clock: { now: () => Date }) {
+  return createBtwOperationStore({
+    dataDir,
+    now: clock.now,
+  });
+}
+
 function expectedScopeHash(scope = makeBtwScope()): string {
   return createHash('sha256')
     .update(scope.larkAppId)
@@ -350,7 +367,8 @@ describe('btw operation store', () => {
 
   it('enforces accepted-only submission transitions and exact native-id ACKs', () => {
     const dataDir = newDataDir();
-    const store = createStore(dataDir);
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
     const input = makeBtwPrepareInput();
     const scope = makeBtwScope();
     const created = store.prepareBtw(input).operation;
@@ -400,6 +418,7 @@ describe('btw operation store', () => {
       frameState: 'acknowledged',
     });
 
+    clock.advance();
     const runningAgain = store.recordBtwRunning(scope, opId, retried.execution.nativeTurnId);
     expect(runningAgain).toEqual(running);
     expect(runningAgain.revision).toBe(running.revision);
@@ -408,13 +427,15 @@ describe('btw operation store', () => {
 
   it('accepts cards only from card_pending and keeps the accepted binding immutable', () => {
     const dataDir = newDataDir();
-    const store = createStore(dataDir);
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
     const scope = makeBtwScope();
 
     const pending = store.prepareBtw(makeBtwPrepareInput()).operation;
     const accepted = store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1');
     expect(accepted.execution.state).toBe('accepted');
     expect(accepted.card.messageId).toBe('om_card_binding_1');
+    clock.advance();
     const acceptedAgain = store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1');
     expect(acceptedAgain).toEqual(accepted);
     expect(acceptedAgain.revision).toBe(accepted.revision);
@@ -441,7 +462,8 @@ describe('btw operation store', () => {
 
   it('allows definitely-unsent only for same-epoch submit_prepared may-have-been-sent records', () => {
     const dataDir = newDataDir();
-    const store = createStore(dataDir);
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
     const scope = makeBtwScope();
 
     const acceptedOnly = store.prepareBtw({
@@ -459,6 +481,7 @@ describe('btw operation store', () => {
     store.prepareBtwSubmission(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
     const definitelyUnsent = store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
     expect(definitelyUnsent.execution.frameState).toBe('definitely_unsent');
+    clock.advance();
     const definitelyUnsentAgain = store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
     expect(definitelyUnsentAgain).toEqual(definitelyUnsent);
     expect(definitelyUnsentAgain.revision).toBe(definitelyUnsent.revision);
@@ -486,7 +509,8 @@ describe('btw operation store', () => {
 
   it('enforces submission-unknown and terminal legality across submit_prepared, running, and same-live unknown states', () => {
     const dataDir = newDataDir();
-    const store = createStore(dataDir);
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
     const scope = makeBtwScope();
 
     const preSubmit = store.prepareBtw({
@@ -561,6 +585,7 @@ describe('btw operation store', () => {
     store.prepareBtwSubmission(scope, unknown.btwOpId, unknown.parent.runtimeEpoch);
     const unknownState = store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'send timeout');
     expect(unknownState.execution.state).toBe('submission_unknown');
+    clock.advance();
     const duplicateUnknown = store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'send timeout');
     expect(duplicateUnknown).toEqual(unknownState);
     expect(duplicateUnknown.revision).toBe(unknownState.revision);
@@ -579,7 +604,8 @@ describe('btw operation store', () => {
 
   it('preserves conservative ambiguous execution handling and quarantines conflicting terminals', () => {
     const dataDir = newDataDir();
-    const store = createStore(dataDir);
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
     const input = makeBtwPrepareInput();
     const scope = makeBtwScope();
     const accepted = store.recordBtwCard(
@@ -607,9 +633,17 @@ describe('btw operation store', () => {
       status: 'completed',
       answer: 'done before ack',
     });
+    clock.advance();
+    const duplicateTerminalAfterTick = store.recordBtwTerminal(scope, opId, {
+      status: 'completed',
+      answer: 'done before ack',
+    });
     expect(duplicateTerminal.kind).toBe('duplicate');
     expect(duplicateTerminal.operation.revision).toBe(terminalBeforeAck.operation.revision);
     expect(duplicateTerminal.operation.updatedAt).toBe(terminalBeforeAck.operation.updatedAt);
+    expect(duplicateTerminalAfterTick.kind).toBe('duplicate');
+    expect(duplicateTerminalAfterTick.operation.revision).toBe(terminalBeforeAck.operation.revision);
+    expect(duplicateTerminalAfterTick.operation.updatedAt).toBe(terminalBeforeAck.operation.updatedAt);
 
     const conflictingTerminal = store.recordBtwTerminal(scope, opId, {
       status: 'failed',
