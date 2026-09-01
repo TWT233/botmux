@@ -83,12 +83,16 @@ describe('graceful shutdown supervisor contract', () => {
     const start = cli.indexOf('async function cmdRestart()');
     const end = cli.indexOf('export type StartBotLiveResult', start);
     const restart = cli.slice(start, end);
+    const consumeRefresh = restart.indexOf('consumeDetachedRestartEnvRefresh()');
+    const firstAwait = restart.indexOf('await ');
     const consume = restart.indexOf('consumeRestartIntentTo(');
     const writeIntent = restart.indexOf('writeRestartAttemptIntentTo(', consume);
-    const restartFleet = restart.indexOf('restartFleet()', writeIntent);
+    const restartFleet = restart.indexOf('restartFleet({ refreshPersistedEnv })', writeIntent);
     const health = restart.indexOf('waitFleetOnline(', restartFleet);
     const removeOnFail = restart.indexOf('removeRestartIntentAttemptTo(', health);
     const commit = restart.indexOf('commitRestartIntentAttemptTo(', health);
+    expect(consumeRefresh).toBeGreaterThanOrEqual(0);
+    expect(consumeRefresh).toBeLessThan(firstAwait);
     expect(consume).toBeGreaterThanOrEqual(0);
     expect(writeIntent).toBeGreaterThan(consume);
     expect(restartFleet).toBeGreaterThan(writeIntent);
@@ -131,7 +135,7 @@ describe('graceful shutdown supervisor contract', () => {
       cli.indexOf('/**\n * Bring a SINGLE bot'),
     );
     expect(cmdStart).toContain('startFleetViaSupervisor()');
-    expect(cmdRestart).toContain('restartFleet()');
+    expect(cmdRestart).toContain('restartFleet({ refreshPersistedEnv })');
     expect(startBot).toContain('startBotViaSupervisor(');
     expect(stopBot).toContain('stopBotViaSupervisor(');
     for (const [label, region] of [['start', cmdStart], ['restart', cmdRestart], ['start-bot', startBot], ['stop-bot', stopBot]] as const) {

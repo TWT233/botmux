@@ -160,15 +160,97 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
 
     expect(env.WEB_HOST).toBe('10.9.9.9');
   });
+
+  it('reloads persisted settings when the caller explicitly requests a refresh', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: '127.0.0.1',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, 'WEB_HOST=10.9.9.9', true);
+
+    expect(env.WEB_HOST).toBe('10.9.9.9');
+  });
+
+  it('preserves an inherited restart snapshot when .env cannot be read', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: '127.0.0.1',
+      WEB_EXTERNAL_PORT: '9000',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'failed' }, true);
+
+    expect(env.WEB_HOST).toBe('127.0.0.1');
+    expect(env.WEB_EXTERNAL_PORT).toBe('9000');
+  });
+
+  it('keeps the resolved snapshot stable when the supervisor parses a changed file again', () => {
+    const first = resolveFleetDaemonEnv({
+      WEB_HOST: '127.0.0.1',
+      WEB_EXTERNAL_PORT: '9000',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, 'WEB_HOST=10.9.9.9\nWEB_EXTERNAL_PORT=9100', true);
+    const second = resolveFleetDaemonEnv(
+      first,
+      'WEB_HOST=192.0.2.10\nWEB_EXTERNAL_PORT=9200',
+      false,
+    );
+
+    expect(second.WEB_HOST).toBe('10.9.9.9');
+    expect(second.WEB_EXTERNAL_PORT).toBe('9100');
+  });
+
+  it('pins a complete inherited snapshot after a read failure so supervisor retry cannot drift', () => {
+    const first = resolveFleetDaemonEnv({
+      WEB_HOST: '127.0.0.1',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'failed' }, true);
+    const second = resolveFleetDaemonEnv(
+      first,
+      'WEB_HOST=192.0.2.10\nWEB_EXTERNAL_PORT=9200',
+      false,
+    );
+
+    expect(second.WEB_HOST).toBe('127.0.0.1');
+    expect(second.WEB_EXTERNAL_PORT).toBe('');
+  });
 });
 
 describe('readFleetDaemonEnvFile', () => {
-  it.each(['ENOENT', 'EISDIR', 'EACCES'])('treats %s as an absent optional .env', (code) => {
-    const error = Object.assign(new Error(code), { code });
-    const readTextFile = vi.fn(() => { throw error; });
+  it('distinguishes an absent optional .env from a read failure', () => {
+    const readTextFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
+    const statFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
 
-    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile)).toBeUndefined();
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({ status: 'missing' });
     expect(readTextFile).toHaveBeenCalledOnce();
-    expect(readTextFile).toHaveBeenCalledWith('/fake/.env');
+  });
+
+  it('loads a file that appears immediately after an initial ENOENT probe', () => {
+    const readTextFile = vi.fn(() => 'WEB_HOST=127.0.0.1');
+    const statFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({
+      status: 'loaded',
+      text: 'WEB_HOST=127.0.0.1',
+    });
+    expect(readTextFile).toHaveBeenCalledOnce();
+  });
+
+  it.each(['EACCES', 'EIO'])('reports a %s stat error as a read failure', (code) => {
+    const readTextFile = vi.fn(() => 'unreachable');
+    const statFile = vi.fn(() => { throw Object.assign(new Error(code), { code }); });
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({ status: 'failed' });
+    expect(readTextFile).not.toHaveBeenCalled();
+  });
+
+  it.each(['ENOENT', 'EISDIR', 'EACCES'])('reports %s after a successful stat as a read failure', (code) => {
+    const readTextFile = vi.fn(() => { throw Object.assign(new Error(code), { code }); });
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, () => ({}))).toEqual({ status: 'failed' });
+  });
+
+  it('returns the loaded file text', () => {
+    expect(readFleetDaemonEnvFile('/fake/.env', () => 'WEB_HOST=127.0.0.1', () => ({}))).toEqual({
+      status: 'loaded',
+      text: 'WEB_HOST=127.0.0.1',
+    });
   });
 });

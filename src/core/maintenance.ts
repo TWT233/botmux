@@ -59,6 +59,16 @@ import {
 } from './binary-self-update.js';
 import { globalWrapperPath } from '../utils/local-dev-update.js';
 
+export const DETACHED_RESTART_ENV_REFRESH = 'BOTMUX_INTERNAL_REFRESH_DAEMON_ENV';
+
+export function consumeDetachedRestartEnvRefresh(
+  env: NodeJS.ProcessEnv = process.env,
+): boolean {
+  const refresh = Boolean(env[DETACHED_RESTART_ENV_REFRESH]?.trim());
+  delete env[DETACHED_RESTART_ENV_REFRESH];
+  return refresh;
+}
+
 export interface MaintenanceState {
   /** Local date the auto-update run was last handled (fired or skipped). */
   autoUpdate?: { lastDate: string };
@@ -347,38 +357,14 @@ export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env
   // included in the shared fleet env, see DAEMON_ENV_KEYS), so a detached restart
   // it spawns would inherit the APP_SECRET. The restart driver has no consumer
   // for any of it and must not carry it toward the fleet; the fresh dashboard reloads
-  // the family from .env itself. Not part of the DAEMON_ENV_KEYS mirror below —
-  // this is credential hygiene, not baked-snapshot invalidation.
+  // the family from .env itself. This is credential hygiene, separate from the
+  // non-secret lifecycle snapshot retained below.
   stripDashboardH5Env(env);
-  // The dashboard/daemon snapshot may outlive a ~/.botmux/.env edit. Let the
-  // fresh CLI reload these settings from the file.
-  //
-  // This list MUST mirror DAEMON_ENV_KEYS in src/cli/daemon-lifecycle-env.ts:
-  // every key included in the shared fleet env there has to be stripped here, or a
-  // detached restart (dashboard update/restart, maintenance auto-update) keeps
-  // the stale baked value instead of reloading from the file. Kept as a local
-  // literal so this stays importable from the daemon/dashboard without pulling
-  // in the CLI layer; test/maintenance.test.ts iterates the exported
-  // DAEMON_ENV_KEYS and fails the moment the two drift apart.
-  for (const key of [
-    'WEB_HOST',
-    'WEB_EXTERNAL_HOST',
-    'WEB_EXTERNAL_PORT',
-    'BOTMUX_WEB_PROXY_BASE_PORT',
-    'BOTMUX_WORKER_HTTP_HOST',
-    'BOTMUX_WORKER_HOST',
-    'BOTMUX_DASHBOARD_EXTERNAL_HOST',
-    'BOTMUX_DASHBOARD_HOST',
-    'BOTMUX_DASHBOARD_PORT',
-    'BOTMUX_DAEMON_IPC_BASE_PORT',
-    'BOTMUX_DASHBOARD_PUBLIC_READONLY',
-    'BOTMUX_PUBLIC_URL',
-    // Dashboard control-audit destination + terminal takeover lease TTL.
-    'BOTMUX_DASHBOARD_CONTROL_AUDIT_PATH',
-    'BOTMUX_DASHBOARD_TERMINAL_CONTROL_TTL_MS',
-    // Merlin Devbox auto-export switch.
-    'BOTMUX_DEVBOX_AUTO_EXPORT',
-  ]) delete env[key];
+  // The dashboard/daemon snapshot may outlive a ~/.botmux/.env edit. Mark the
+  // fresh CLI so it treats the persisted file as authoritative. Keep the old
+  // lifecycle values as a fallback when that file exists but cannot be read;
+  // cmdRestart consumes the marker before any async work or child process.
+  env[DETACHED_RESTART_ENV_REFRESH] = '1';
   return env;
 }
 
