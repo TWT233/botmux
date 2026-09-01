@@ -323,6 +323,66 @@ describe('group manage streaming-card pin rows', () => {
     act(() => renderer.unmount());
   });
 
+  it('applies an earlier save reload after a later manual refresh fails', async () => {
+    const initialChat = makeChat([makeMember({ botName: 'Claude (stale)' })]);
+    const savedChat = makeChat([makeMember({
+      botName: 'Claude (saved)',
+      pinStreamingCardChatEnabled: true,
+      pinStreamingCardEffectiveEnabled: true,
+    })], { name: 'Saved Room' });
+    primeGroupsSnapshotCache({ chats: [initialChat], bots: [] });
+    const saveResponse = deferred<any>();
+    const saveReloadResponse = deferred<any>();
+    const manualReloadResponse = deferred<any>();
+    const reloadStarted = [deferred<void>(), deferred<void>()];
+    let reloadCount = 0;
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/groups/oc_group/pin-streaming-card/cli_a' && init?.method === 'PUT') {
+        return saveResponse.promise;
+      }
+      if (url === '/api/groups?refresh=1') {
+        const index = reloadCount++;
+        reloadStarted[index].resolve();
+        return index === 0 ? saveReloadResponse.promise : manualReloadResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(1);
+    });
+    act(() => { renderer.root.findByProps({ className: 'manage-chat' }).props.onClick(); });
+    act(() => { groupPinToggle(renderer).props.onChange({ currentTarget: { checked: true } }); });
+    await act(async () => {
+      saveResponse.resolve(jsonResponse({ ok: true }));
+      await reloadStarted[0].promise;
+    });
+
+    act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
+    await reloadStarted[1].promise;
+    await act(async () => { manualReloadResponse.reject(new Error('later_manual_failed')); });
+    expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
+      && node.children.join('').includes('later_manual_failed'))).toHaveLength(1);
+
+    await act(async () => {
+      saveReloadResponse.resolve(jsonResponse({ chats: [savedChat], bots: [] }));
+    });
+
+    expect(renderer.root.findByType('h3').children.join('')).toContain('Saved Room');
+    expect(groupPinToggle(renderer).props.checked).toBe(true);
+    expect(renderer.root.findByProps({ 'data-pin-master-state': 'on' }).children.join(''))
+      .toContain('会置顶');
+    expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
+      && node.children.join('').includes('later_manual_failed'))).toHaveLength(0);
+
+    act(() => renderer.unmount());
+  });
+
   it('does not let an older create poll overwrite a newer manual reload', async () => {
     const bot = { larkAppId: 'cli_a', botName: 'Claude' };
     primeGroupsSnapshotCache({ chats: [], bots: [bot] });

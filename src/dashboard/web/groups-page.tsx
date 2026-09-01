@@ -1467,7 +1467,8 @@ function GroupsPage() {
   const timersRef = useRef<Set<number>>(new Set());
   const delayResolversRef = useRef<Map<number, () => void>>(new Map());
   const roleContextRunRef = useRef(0);
-  const snapshotRunRef = useRef(0);
+  const snapshotRequestRunRef = useRef(0);
+  const snapshotSuccessRunRef = useRef(0);
   const [snapshot, setSnapshotState] = useState<GroupsSnapshot>(emptyGroupsSnapshot);
   const [roleContext, setRoleContext] = useState<RoleProfileContext>(() => emptyRoleContext());
   const [filters, setFilters] = useState<GroupFilters>({ q: '', missingOnly: false });
@@ -1517,32 +1518,34 @@ function GroupsPage() {
   }, []);
 
   const reloadGroups = useCallback(async (options?: { force?: boolean }): Promise<GroupsSnapshot> => {
-    const runId = ++snapshotRunRef.current;
+    const runId = ++snapshotRequestRunRef.current;
     try {
       const next = await fetchGroupsSnapshot({ force: options?.force });
-      if (!mountedRef.current || runId !== snapshotRunRef.current) return snapshotRef.current;
+      if (!mountedRef.current || runId < snapshotSuccessRunRef.current) return snapshotRef.current;
+      snapshotSuccessRunRef.current = runId;
       setSnapshot(next);
       setLoadError(null);
       void refreshRoleProfileContext(next);
       return next;
     } catch (error) {
-      if (!mountedRef.current || runId !== snapshotRunRef.current) return snapshotRef.current;
+      if (!mountedRef.current || runId !== snapshotRequestRunRef.current) return snapshotRef.current;
       throw error;
     }
   }, [refreshRoleProfileContext, setSnapshot]);
 
   const refreshUntilSeen = useCallback(async (chatId: string, expectedBotIds: Set<string>): Promise<void> => {
-    const runId = ++snapshotRunRef.current;
+    const runId = ++snapshotRequestRunRef.current;
     const delays = [600, 1200, 1200, 1200, 1200, 1200];
     for (const ms of delays) {
       await delay(ms);
-      if (!mountedRef.current || runId !== snapshotRunRef.current) return;
+      if (!mountedRef.current || runId < snapshotSuccessRunRef.current) return;
       let next: GroupsSnapshot;
       try { next = await fetchGroupsSnapshot({ force: true }); }
       catch { continue; }
-      if (!mountedRef.current || runId !== snapshotRunRef.current) return;
+      if (!mountedRef.current || runId < snapshotSuccessRunRef.current) return;
       const row = (next.chats ?? []).find(chat => chat.chatId === chatId);
       if (row && allExpectedInChat(row, expectedBotIds)) {
+        snapshotSuccessRunRef.current = runId;
         setSnapshot(next);
         void refreshRoleProfileContext(next);
         return;
