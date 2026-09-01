@@ -24,6 +24,12 @@ export const DAEMON_ENV_KEYS = [
   'WEB_EXTERNAL_HOST',
   'WEB_EXTERNAL_PORT',
   'BOTMUX_WEB_PROXY_BASE_PORT',
+  // Per-session terminal listener. Keep both names in the lifecycle snapshot:
+  // the canonical key takes precedence, while BOTMUX_WORKER_HOST remains a
+  // supported legacy alias. Both must be cleared on restart so a stale
+  // canonical value cannot shadow a freshly persisted alias.
+  'BOTMUX_WORKER_HTTP_HOST',
+  'BOTMUX_WORKER_HOST',
   'BOTMUX_DASHBOARD_EXTERNAL_HOST',
   'BOTMUX_DASHBOARD_HOST',
   'BOTMUX_DASHBOARD_PORT',
@@ -84,6 +90,21 @@ export function resolveDaemonEnv(
     DAEMON_ENV_KEYS.map(key => [key, resolve(key)]),
   ) as Record<DaemonEnvKey, string>;
   resolved.WEB_HOST ||= '0.0.0.0';
+
+  // Normalize the legacy worker-host alias into the canonical key before this
+  // snapshot is inherited by the supervisor and every daemon. Returning an
+  // empty canonical key alongside a populated alias would suppress the alias:
+  // getConfiguredWorkerHttpHost deliberately gives the canonical name priority.
+  // For ordinary shell starts this ordering reproduces dotenv's no-override
+  // behavior per key, followed by the worker resolver's canonical-key priority.
+  const workerHost = sessionOrigin
+    ? fileEnv.BOTMUX_WORKER_HTTP_HOST ?? fileEnv.BOTMUX_WORKER_HOST
+    : inheritedEnv.BOTMUX_WORKER_HTTP_HOST
+      ?? fileEnv.BOTMUX_WORKER_HTTP_HOST
+      ?? inheritedEnv.BOTMUX_WORKER_HOST
+      ?? fileEnv.BOTMUX_WORKER_HOST;
+  resolved.BOTMUX_WORKER_HTTP_HOST = workerHost?.trim() || '0.0.0.0';
+  resolved.BOTMUX_WORKER_HOST = '';
   resolved.BOTMUX_DASHBOARD_HOST ||= '0.0.0.0';
   return resolved;
 }

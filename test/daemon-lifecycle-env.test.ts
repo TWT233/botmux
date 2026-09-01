@@ -13,6 +13,8 @@ function expected(overrides: Partial<Record<string, string>> = {}): Record<strin
   return {
     ...Object.fromEntries(DAEMON_ENV_KEYS.map(key => [key, ''])),
     WEB_HOST: '0.0.0.0',
+    BOTMUX_WORKER_HTTP_HOST: '0.0.0.0',
+    BOTMUX_WORKER_HOST: '',
     BOTMUX_DASHBOARD_HOST: '0.0.0.0',
     ...overrides,
   };
@@ -26,6 +28,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: '10.255.64.131',
       WEB_EXTERNAL_PORT: '9000',
       BOTMUX_WEB_PROXY_BASE_PORT: '8800',
+      BOTMUX_WORKER_HTTP_HOST: '0.0.0.0',
+      BOTMUX_WORKER_HOST: '::',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: '10.255.64.131',
       BOTMUX_DASHBOARD_HOST: '10.255.64.131',
       BOTMUX_DASHBOARD_PORT: '9999',
@@ -44,6 +48,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: 'stale.example.com',
       WEB_EXTERNAL_PORT: '9000',
       BOTMUX_WEB_PROXY_BASE_PORT: '8800',
+      BOTMUX_WORKER_HTTP_HOST: '0.0.0.0',
+      BOTMUX_WORKER_HOST: '::',
       BOTMUX_DASHBOARD_HOST: '0.0.0.0',
       BOTMUX_DASHBOARD_PORT: '7891',
     }, [
@@ -51,6 +57,8 @@ describe('resolveDaemonEnv()', () => {
       'WEB_EXTERNAL_HOST=relay.example.com',
       'WEB_EXTERNAL_PORT=9100',
       'BOTMUX_WEB_PROXY_BASE_PORT=8900',
+      'BOTMUX_WORKER_HTTP_HOST=127.0.0.2',
+      'BOTMUX_WORKER_HOST=::1',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',
@@ -65,6 +73,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: 'relay.example.com',
       WEB_EXTERNAL_PORT: '9100',
       BOTMUX_WEB_PROXY_BASE_PORT: '8900',
+      BOTMUX_WORKER_HTTP_HOST: '127.0.0.2',
+      BOTMUX_WORKER_HOST: '',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: 'dashboard.example.com',
       BOTMUX_DASHBOARD_HOST: '127.0.0.1',
       BOTMUX_DASHBOARD_PORT: '7991',
@@ -80,6 +90,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: 'shell.example.com',
       WEB_EXTERNAL_PORT: '9200',
       BOTMUX_WEB_PROXY_BASE_PORT: '8200',
+      BOTMUX_WORKER_HTTP_HOST: '127.0.0.3',
+      BOTMUX_WORKER_HOST: '::2',
       BOTMUX_DASHBOARD_HOST: '127.0.0.2',
       BOTMUX_DASHBOARD_PORT: '7992',
       BOTMUX_DAEMON_IPC_BASE_PORT: '7993',
@@ -90,6 +102,8 @@ describe('resolveDaemonEnv()', () => {
       'WEB_EXTERNAL_HOST=file.example.com',
       'WEB_EXTERNAL_PORT=9100',
       'BOTMUX_WEB_PROXY_BASE_PORT=8900',
+      'BOTMUX_WORKER_HTTP_HOST=127.0.0.2',
+      'BOTMUX_WORKER_HOST=::1',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',
@@ -101,6 +115,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: 'shell.example.com',
       WEB_EXTERNAL_PORT: '9200',
       BOTMUX_WEB_PROXY_BASE_PORT: '8200',
+      BOTMUX_WORKER_HTTP_HOST: '127.0.0.3',
+      BOTMUX_WORKER_HOST: '',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: 'dashboard.example.com',
       BOTMUX_DASHBOARD_HOST: '127.0.0.2',
       BOTMUX_DASHBOARD_PORT: '7992',
@@ -116,6 +132,8 @@ describe('resolveDaemonEnv()', () => {
       WEB_EXTERNAL_HOST: '',
       WEB_EXTERNAL_PORT: '',
       BOTMUX_WEB_PROXY_BASE_PORT: '   ',
+      BOTMUX_WORKER_HTTP_HOST: '',
+      BOTMUX_WORKER_HOST: '   ',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: '   ',
       BOTMUX_DASHBOARD_HOST: '',
       BOTMUX_DASHBOARD_PORT: '   ',
@@ -127,6 +145,8 @@ describe('resolveDaemonEnv()', () => {
       'WEB_EXTERNAL_HOST=file.example.com',
       'WEB_EXTERNAL_PORT=9100',
       'BOTMUX_WEB_PROXY_BASE_PORT=8900',
+      'BOTMUX_WORKER_HTTP_HOST=127.0.0.2',
+      'BOTMUX_WORKER_HOST=::1',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',
@@ -134,6 +154,17 @@ describe('resolveDaemonEnv()', () => {
       'BOTMUX_DASHBOARD_PUBLIC_READONLY=false',
       'BOTMUX_PUBLIC_URL=http://file.proxy.example.com',
     ].join('\n'))).toEqual(expected());
+  });
+
+  it('normalizes the legacy worker host alias into the canonical fleet snapshot', () => {
+    expect(resolveDaemonEnv({
+      BOTMUX_SESSION_ID: 'session-1',
+      BOTMUX_WORKER_HTTP_HOST: '0.0.0.0',
+      BOTMUX_WORKER_HOST: '::',
+    }, 'BOTMUX_WORKER_HOST=127.0.0.4')).toEqual(expected({
+      BOTMUX_WORKER_HTTP_HOST: '127.0.0.4',
+      BOTMUX_WORKER_HOST: '',
+    }));
   });
 });
 
