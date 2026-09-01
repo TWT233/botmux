@@ -662,6 +662,64 @@ describe('group manage streaming-card pin rows', () => {
     }
   });
 
+  it('does not let an older page reload overwrite the shared cache after a newer external refresh succeeds', async () => {
+    const initialChat = makeChat([makeMember({ botName: 'Claude (initial)' })], { name: 'Initial Room' });
+    const pageAcceptedChat = makeChat([makeMember({ botName: 'Claude (older-page)' })], { name: 'Older Page Room' });
+    const newestSharedChat = makeChat([makeMember({
+      botName: 'Claude (newest-shared)',
+      pinStreamingCardChatEnabled: true,
+      pinStreamingCardEffectiveEnabled: true,
+    })], { name: 'Newest Shared Room' });
+    const pageReloadResponse = deferred<any>();
+    const externalRefreshResponse = deferred<any>();
+    const requests: string[] = [];
+    let refreshCount = 0;
+
+    primeGroupsSnapshotCache({ chats: [initialChat], bots: [] });
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      requests.push(`${String(init?.method ?? 'GET')} ${url}`);
+      if (url === '/api/groups?refresh=1') {
+        refreshCount += 1;
+        if (refreshCount === 1) return pageReloadResponse.promise;
+        if (refreshCount === 2) return externalRefreshResponse.promise;
+      }
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(1);
+    });
+    expect(renderer.root.findByProps({ 'data-chat': 'oc_group' }).findByType('b').children.join(''))
+      .toBe('Initial Room');
+
+    act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
+    await vi.waitFor(() => expect(refreshCount).toBe(1));
+
+    const externalRefresh = fetchGroupsSnapshot({ force: true });
+    await vi.waitFor(() => expect(refreshCount).toBe(2));
+    await expect((async () => {
+      externalRefreshResponse.resolve(jsonResponse({ chats: [newestSharedChat], bots: [] }));
+      return externalRefresh;
+    })()).resolves.toEqual({ chats: [newestSharedChat], bots: [] });
+    await act(async () => {
+      pageReloadResponse.resolve(jsonResponse({ chats: [pageAcceptedChat], bots: [] }));
+    });
+
+    await waitForRender(() => {
+      expect(renderer.root.findByProps({ 'data-chat': 'oc_group' }).findByType('b').children.join(''))
+        .toBe('Older Page Room');
+    });
+    await expect(fetchGroupsSnapshot()).resolves.toEqual({ chats: [newestSharedChat], bots: [] });
+
+    act(() => renderer.unmount());
+  });
+
   it('ignores a pre-write snapshot during save when the post-write reload fails', async () => {
     const initialMember = makeMember();
     const freshMember = { ...initialMember };

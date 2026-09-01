@@ -39,7 +39,6 @@ import {
 import {
   allExpectedInChat,
   availableBotsForPicker,
-  commitGroupsSnapshotCache,
   collectGroupProfileEntries,
   emptyGroupsSnapshot,
   fetchGroupsSnapshot,
@@ -1557,7 +1556,6 @@ function GroupsPage() {
       const next = await fetchGroupsSnapshot({ force: options?.force });
       if (!mountedRef.current || runId < snapshotSuccessRunRef.current) return snapshotRef.current;
       snapshotSuccessRunRef.current = runId;
-      commitGroupsSnapshotCache(next);
       setSnapshot(next);
       setLoadError(null);
       void refreshRoleProfileContext(next);
@@ -1581,7 +1579,6 @@ function GroupsPage() {
       const row = (next.chats ?? []).find(chat => chat.chatId === chatId);
       if (row && allExpectedInChat(row, expectedBotIds)) {
         snapshotSuccessRunRef.current = runId;
-        commitGroupsSnapshotCache(next);
         setSnapshot(next);
         setLoadError(null);
         void refreshRoleProfileContext(next);

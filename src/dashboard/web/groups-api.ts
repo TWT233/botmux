@@ -43,7 +43,7 @@ let cachedSnapshot: GroupsSnapshot = emptyGroupsSnapshot;
 let cachedAt = 0;
 let inFlight: Promise<GroupsSnapshot> | null = null;
 let requestSeq = 0;
-let latestRequestSeq = 0;
+let latestSuccessfulRequestSeq = 0;
 
 function normalizeGroupsSnapshot(body: any): GroupsSnapshot {
   return {
@@ -55,11 +55,6 @@ function normalizeGroupsSnapshot(body: any): GroupsSnapshot {
 export function primeGroupsSnapshotCache(snapshot: GroupsSnapshot): void {
   cachedSnapshot = snapshot;
   cachedAt = Date.now();
-}
-
-/** Publish a snapshot after the caller has accepted it under its own ordering fence. */
-export function commitGroupsSnapshotCache(snapshot: GroupsSnapshot): void {
-  primeGroupsSnapshotCache(snapshot);
 }
 
 // ─── 名称/头像专用轻量缓存（与上面的完整矩阵缓存**完全分离**）──────────────
@@ -122,13 +117,15 @@ export async function fetchGroupsSnapshot(options: FetchGroupsSnapshotOptions = 
   if (!options.force && inFlight) return inFlight;
 
   const seq = ++requestSeq;
-  latestRequestSeq = seq;
   const request = (async () => {
     const r = await fetch(options.force ? '/api/groups?refresh=1' : '/api/groups');
     const body = await r.json().catch(() => ({}));
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const snapshot = normalizeGroupsSnapshot(body);
-    if (seq === latestRequestSeq) primeGroupsSnapshotCache(snapshot);
+    if (seq > latestSuccessfulRequestSeq) {
+      primeGroupsSnapshotCache(snapshot);
+      latestSuccessfulRequestSeq = seq;
+    }
     return snapshot;
   })();
 
