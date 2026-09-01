@@ -48,6 +48,8 @@ import {
   deleteEphemeralCard, uploadImage, uploadFile,
   LarkTransportDisabledError,
 } from '../src/im/lark/client.js';
+import { createBtwProjector } from '../src/features/btw/projector.js';
+import { makeBtwOperation } from './fixtures/btw-fixtures.js';
 
 const APIONLY = 'local_riff';
 const NORMAL = 'app_normal';
@@ -57,7 +59,10 @@ function bot(apiOnly: boolean) {
 }
 
 describe('assertLarkTransport — bot-level outbound gate', () => {
-  beforeEach(() => getBotMock.mockReset());
+  beforeEach(() => {
+    vi.clearAllMocks();
+    getBotMock.mockReset();
+  });
 
   it('every outbound write primitive throws LarkTransportDisabledError for an apiOnly bot', async () => {
     getBotMock.mockReturnValue(bot(true));
@@ -84,5 +89,22 @@ describe('assertLarkTransport — bot-level outbound gate', () => {
     await expect(updateMessage(NORMAL, 'om', '{}')).resolves.toBeUndefined();
     expect(fakeClient.im.v1.message.create).toHaveBeenCalled();
     expect(fakeClient.im.v1.message.patch).toHaveBeenCalled();
+  });
+
+  it('the BTW projector also remains behind the shared bot-level transport gate', async () => {
+    getBotMock.mockReturnValue(bot(true));
+    const operation = makeBtwOperation();
+    const runtime = {
+      recordInitialCardAttempt: vi.fn(async (_scope, _opId, _outcome) => operation),
+      recordCard: vi.fn(),
+    };
+    const projector = createBtwProjector({ runtime: runtime as any });
+
+    await expect(projector.ensureInitialCard(operation)).resolves.toMatchObject({ kind: 'pending' });
+    expect(runtime.recordInitialCardAttempt).toHaveBeenCalledWith(
+      expect.any(Object), operation.btwOpId,
+      expect.objectContaining({ kind: 'definitely_unsent' }),
+    );
+    expect(fakeClient.im.v1.message.create).not.toHaveBeenCalled();
   });
 });
