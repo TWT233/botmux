@@ -11,7 +11,7 @@ vi.mock('@larksuiteoapi/node-sdk', () => {
 });
 
 import { registerBot, getBot } from '../src/bot-registry.js';
-import { pinMessage, unpinMessage } from '../src/im/lark/client.js';
+import { listChatPins, pinMessage, unpinMessage } from '../src/im/lark/client.js';
 
 function setPinImpl(appId: string, impl: (req: any) => Promise<any>) {
   registerBot({ larkAppId: appId, larkAppSecret: 's', cliId: 'claude-code' });
@@ -21,6 +21,11 @@ function setPinImpl(appId: string, impl: (req: any) => Promise<any>) {
 function setUnpinImpl(appId: string, impl: (req: any) => Promise<any>) {
   registerBot({ larkAppId: appId, larkAppSecret: 's', cliId: 'claude-code' });
   getBot(appId).client = { im: { v1: { pin: { delete: impl } } } } as any;
+}
+
+function setListPinsImpl(appId: string, impl: (req: any) => Promise<any>) {
+  registerBot({ larkAppId: appId, larkAppSecret: 's', cliId: 'claude-code' });
+  getBot(appId).client = { im: { v1: { pin: { list: impl } } } } as any;
 }
 
 afterEach(() => vi.restoreAllMocks());
@@ -106,5 +111,123 @@ describe('pinMessage/unpinMessage boolean contract', () => {
     setUnpinImpl('u_idem', async () => ({ code: 0 }));
     await expect(unpinMessage('u_idem', 'om_pin')).resolves.toBe(true);
     await expect(unpinMessage('u_idem', 'om_pin')).resolves.toBe(true);
+  });
+});
+
+describe('listChatPins pagination contract', () => {
+  it('drains pages with exact first and next payloads and normalizes records', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [
+            {
+              message_id: 'om_first',
+              chat_id: 'oc_chat',
+              operator_id: 'ou_first',
+              operator_id_type: 'open_id',
+              create_time: '1700000000000',
+            },
+          ],
+          has_more: true,
+          page_token: 'next-token',
+        },
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [
+            {
+              message_id: 'om_second',
+              chat_id: 'oc_chat',
+              operator_id: 'ou_second',
+              operator_id_type: 'union_id',
+              create_time: '1700000001000',
+            },
+          ],
+          has_more: false,
+        },
+      });
+    setListPinsImpl('list_ok', list);
+
+    await expect(listChatPins('list_ok', 'oc_chat')).resolves.toEqual([
+      {
+        messageId: 'om_first',
+        chatId: 'oc_chat',
+        operatorId: 'ou_first',
+        operatorIdType: 'open_id',
+        createTime: '1700000000000',
+      },
+      {
+        messageId: 'om_second',
+        chatId: 'oc_chat',
+        operatorId: 'ou_second',
+        operatorIdType: 'union_id',
+        createTime: '1700000001000',
+      },
+    ]);
+    expect(list).toHaveBeenCalledTimes(2);
+    expect(list).toHaveBeenNthCalledWith(1, {
+      params: {
+        chat_id: 'oc_chat',
+        page_size: 100,
+      },
+    });
+    expect(list).toHaveBeenNthCalledWith(2, {
+      params: {
+        chat_id: 'oc_chat',
+        page_size: 100,
+        page_token: 'next-token',
+      },
+    });
+  });
+
+  it('throws on non-zero code or missing code', async () => {
+    setListPinsImpl('list_bad_code', async () => ({ code: 230001, msg: 'fail' }));
+    setListPinsImpl('list_missing_code', async () => ({ data: { items: [] } }));
+
+    await expect(listChatPins('list_bad_code', 'oc_chat')).rejects.toThrow(/230001|fail/);
+    await expect(listChatPins('list_missing_code', 'oc_chat')).rejects.toThrow(/missing code/i);
+  });
+
+  it('rethrows SDK errors', async () => {
+    const err = new Error('sdk failed');
+    setListPinsImpl('list_throw', async () => { throw err; });
+    await expect(listChatPins('list_throw', 'oc_chat')).rejects.toThrow('sdk failed');
+  });
+
+  it('throws when has_more is true but next page token is missing', async () => {
+    setListPinsImpl('list_missing_token', async () => ({
+      code: 0,
+      data: {
+        items: [],
+        has_more: true,
+      },
+    }));
+
+    await expect(listChatPins('list_missing_token', 'oc_chat')).rejects.toThrow(/page token/i);
+  });
+
+  it('throws when the server repeats a page token', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: 'dup-token',
+        },
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: 'dup-token',
+        },
+      });
+    setListPinsImpl('list_dup_token', list);
+
+    await expect(listChatPins('list_dup_token', 'oc_chat')).rejects.toThrow(/repeated page token/i);
   });
 });
