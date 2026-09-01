@@ -20,9 +20,9 @@ controls whether streaming cards are sent.
 Each daemon GET /api/groups row exposes three booleans for its own bot:
 
 ~~~ts
-pinStreamingCardMaster: boolean;
-pinStreamingCardChat: boolean;
-pinStreamingCardEffective: boolean;
+pinStreamingCardMasterEnabled: boolean;
+pinStreamingCardChatEnabled: boolean;
+pinStreamingCardEffectiveEnabled: boolean;
 ~~~
 
 The daemon accepts PUT /api/chat-pin-streaming-card/:chatId with
