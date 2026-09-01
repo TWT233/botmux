@@ -128,4 +128,3 @@ export function nativeSubagentRuntimeHookCommand(
   const executable = resolveStableBotmuxWrapperPath(env, platform);
   return `"${executable}" native-subagent-runtime-hook`;
 }
-

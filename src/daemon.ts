@@ -83,6 +83,7 @@ import {
   type VcMeetingConsumerProfileConfig,
 } from './bot-registry.js';
 import { setDisplayNameRefresher, findConfigField, applyConfigField } from './services/bot-config-store.js';
+import { registerPinStreamingCardChangeHandler } from './services/pin-streaming-card-change.js';
 import { getSkillFeedbackStore } from './services/skill-feedback-store.js';
 import { enqueueTurnTerminal, drainTurnTerminalQueue } from './services/turn-completion-events.js';
 import { FeedbackWebhookSecretStore, startFeedbackWebhookDispatcher } from './services/feedback-webhook-dispatcher.js';
@@ -201,6 +202,7 @@ import {
   getDaemonBootId,
   getDaemonStreamingCardUsageSnapshot,
   postTurnStartingCard,
+  reconcileBotStreamingCardPins,
   isSessionTransferring,
   snapshotCodexAppFinalSettlements,
   codexAppFinalSettlementCount,
@@ -237,6 +239,7 @@ import {
   DISPATCH_REPORT_REGISTER_ROUTE,
 } from './core/dispatch-report-binding.js';
 import { recordDispatchRegistryEntry } from './core/dispatch-registry.js';
+import { initialDispatchLifecycle } from './core/dispatch-lifecycle.js';
 import { saveFrozenCards, deleteFrozenCards } from './services/frozen-card-store.js';
 import { DAEMON_COMMANDS, SESSIONLESS_DAEMON_COMMANDS, EXISTING_SESSION_ONLY_DAEMON_COMMANDS, resolvePassthroughCommands, resolveAdapterDefaultPassthroughCommands, handleCommand, handleCardCommand, handleCotCommand, handleTermLinkCommand, parseSlashCommandInvocation, parseForceTopicInvocation } from './core/command-handler.js';
 import { docWatchCommandNeedsSession } from './core/doc-watch-command.js';
@@ -5824,6 +5827,7 @@ ipcRoute('POST', DISPATCH_REPORT_REGISTER_ROUTE, async (req, res) => {
   const sessionId = typeof body?.sessionId === 'string' ? body.sessionId.trim() : '';
   const seedText = typeof body?.seedText === 'string' ? body.seedText.trim() : '';
   const targetChatId = typeof body?.targetChatId === 'string' ? body.targetChatId.trim() : '';
+  const acceptanceRequested = body?.acceptanceRequested === true;
   const title = typeof body?.title === 'string' ? body.title.trim().slice(0, 200) : '';
   if (!sessionId) return jsonRes(res, 400, { ok: false, error: 'missing_session_id' });
   if (!seedText) {
@@ -5893,7 +5897,9 @@ ipcRoute('POST', DISPATCH_REPORT_REGISTER_ROUTE, async (req, res) => {
         targetAppIds: stringArray(body?.targetAppIds),
         title,
         bots: stringArray(body?.bots),
+        ...initialDispatchLifecycle(acceptanceRequested),
         createdAt: issuedAt,
+        updatedAt: issuedAt,
         reportBinding,
       },
     );
@@ -22072,6 +22078,7 @@ export async function startDaemon(botIndex?: number): Promise<void> {
   // Expose the activeSessions Map (owned by daemon) to worker-pool readers,
   // so dashboard IPC and other consumers can list/lookup live sessions.
   setActiveSessionsRegistry(activeSessions);
+  registerPinStreamingCardChangeHandler(reconcileBotStreamingCardPins);
 
   // Idempotency boot reconcile — MUST run before startIpcServer binds (a normal
   // fleet has no core-only readiness gate, so a live /api/trigger could otherwise

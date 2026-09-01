@@ -661,12 +661,16 @@ export async function getChatInfo(larkAppId: string, chatId: string): Promise<{ 
  * Throws on API failure (e.g. missing `im:chat`/member-read scope) so the
  * caller can decide how to degrade — it does NOT swallow errors, because a
  * silent empty list would look like "no allowedUser present" and wrongly
- * suppress auto-start.
+ * suppress auto-start. For the same reason it also throws when the member list
+ * exceeds the page cap (>2000 members) and is still `has_more`: a silently
+ * truncated list would make members past the cap look like "not in the chat"
+ * (wrong-answer fail-open), so a truncation is surfaced as an error instead.
  */
 export async function listChatMemberOpenIds(larkAppId: string, chatId: string): Promise<string[]> {
   const c = getBotClient(larkAppId);
   const openIds: string[] = [];
   let pageToken: string | undefined;
+  let truncated = false;
   // Hard page cap as a runaway guard (100 members/page × 20 = 2000 members).
   for (let page = 0; page < 20; page++) {
     const params: Record<string, string> = { member_id_type: 'open_id', page_size: '100' };
@@ -681,6 +685,15 @@ export async function listChatMemberOpenIds(larkAppId: string, chatId: string): 
     }
     if (!res.data?.has_more || !res.data?.page_token) break;
     pageToken = res.data.page_token;
+    // Hit the cap with more pages remaining → the list is incomplete. Fail
+    // closed rather than return a truncated list (see docstring).
+    if (page === 19) truncated = true;
+  }
+  if (truncated) {
+    throw new Error(
+      `Chat ${chatId} has more than 2000 members; member list truncated at the page cap. ` +
+      `Refusing to return an incomplete list (would misjudge members past the cap as "not in chat").`,
+    );
   }
   return openIds;
 }
@@ -930,6 +943,48 @@ export async function deleteMessage(larkAppId: string, messageId: string): Promi
       return false;
     }
   });
+}
+
+/**
+ * Pin a message in a chat (best-effort QoL). Returns `true` only when Lark
+ * explicitly confirms success (`code === 0`); any other outcome returns `false`
+ * and must not affect session behavior.
+ */
+export async function pinMessage(larkAppId: string, messageId: string): Promise<boolean> {
+  assertLarkTransport(larkAppId, 'pinMessage');
+  const c = getBotClient(larkAppId);
+  try {
+    const res: any = await c.im.v1.pin.create({ data: { message_id: messageId } });
+    if (res?.code !== 0) {
+      logger.debug(`[pin:${larkAppId}] failed message=${messageId} code=${res?.code ?? 'missing'}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.debug(`[pin:${larkAppId}] failed message=${messageId}: ${formatLarkError(err) ?? (err instanceof Error ? err.message : 'unknown error')}`);
+    return false;
+  }
+}
+
+/**
+ * Unpin a message in a chat (best-effort QoL). Returns `true` only when Lark
+ * explicitly confirms success (`code === 0`); any other outcome returns `false`
+ * and must not affect session behavior.
+ */
+export async function unpinMessage(larkAppId: string, messageId: string): Promise<boolean> {
+  assertLarkTransport(larkAppId, 'unpinMessage');
+  const c = getBotClient(larkAppId);
+  try {
+    const res: any = await c.im.v1.pin.delete({ path: { message_id: messageId } });
+    if (res?.code !== 0) {
+      logger.debug(`[unpin:${larkAppId}] failed message=${messageId} code=${res?.code ?? 'missing'}`);
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logger.debug(`[unpin:${larkAppId}] failed message=${messageId}: ${formatLarkError(err) ?? (err instanceof Error ? err.message : 'unknown error')}`);
+    return false;
+  }
 }
 
 /** Error code Feishu returns from `ephemeral/v1/send` when the target chat is a
