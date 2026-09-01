@@ -2480,6 +2480,30 @@ async function unpinProvenStreamingCardTargets(
   return succeeded;
 }
 
+async function pinCurrentStreamingCardIfUnoccupied(ds: DaemonSession): Promise<boolean> {
+  const messageId = ds.streamCardId;
+  if (!isRealStreamingCardId(messageId) || !pinStreamingCardEnabled(ds) || !ownsCurrentStreamingCard(ds, messageId)) {
+    return false;
+  }
+  try {
+    const remotePins = await listChatPins(ds.larkAppId, ds.chatId);
+    const matching = remotePins.filter(pin => pin.messageId === messageId);
+    if (matching.length > 0) {
+      if (matching.every(pin => isExactSameAppPin(pin, ds.larkAppId, messageId))
+        && pinStreamingCardEnabled(ds)
+        && ownsCurrentStreamingCard(ds, messageId)) {
+        rememberOwnedStreamingCard(ds, messageId, ds.chatId);
+        return true;
+      }
+      return false;
+    }
+    return await pinStreamingCardIfEnabled(ds, messageId);
+  } catch (err) {
+    logger.debug(`[${tag(ds)}] streaming-card enable proof failed: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
 /** Pin exactly the current public streaming card.  Pin is deliberately outside
  * the publication success boundary: every failure is swallowed and a late
  * success is compensated with an Unpin of the captured id. */
@@ -2564,7 +2588,7 @@ export async function reconcileStreamingCardPins(
   try {
     if (enabled) {
       const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== currentId);
-      if (currentId && await pinStreamingCardIfEnabled(ds, currentId)) {
+      if (currentId && await pinCurrentStreamingCardIfUnoccupied(ds)) {
         await unpinProvenStreamingCardTargets(
           ds.larkAppId,
           frozenIds.map(frozenId => ({ chatId: ds.chatId, messageId: frozenId, owner: ds })),

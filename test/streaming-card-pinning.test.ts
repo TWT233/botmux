@@ -243,6 +243,26 @@ describe('streaming-card pin policy', () => {
     expect(calls).toEqual(['list', 'unpin']);
   });
 
+  it('hot enable leaves an existing foreign current Pin untouched', async () => {
+    const ds = makeDs('om_foreign_hot_enable');
+    activate(ds);
+    listChatPinsMock.mockResolvedValue([{
+      messageId: 'om_foreign_hot_enable',
+      chatId: 'oc_chat',
+      operatorId: 'app-other',
+      operatorIdType: 'app_id',
+    }]);
+
+    await reconcileStreamingCardPins(ds, true);
+
+    expect(listChatPinsMock).toHaveBeenCalledWith('app-pin', 'oc_chat');
+    expect(pinMessageMock).not.toHaveBeenCalled();
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+
+    await reconcileStreamingCardPins(ds, false);
+    expect(unpinMessageMock).not.toHaveBeenCalled();
+  });
+
   it('explicit on-to-off toggle cleans same-app proven current and frozen ids after provenance reset', async () => {
     const ds = makeDs(
       'om_current',
