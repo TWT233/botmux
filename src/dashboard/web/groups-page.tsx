@@ -1001,6 +1001,7 @@ function SaveProfileDialog(props: {
 function OncallRow(props: {
   chat: GroupChat;
   member: GroupBot & { oncallChat?: { workingDir?: string } | null };
+  disabled?: boolean;
   tr: Translator;
   onSaved(): Promise<void>;
 }) {
@@ -1011,6 +1012,9 @@ function OncallRow(props: {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ text: string; className?: string } | null>(null);
   const dirtyRef = useRef(false);
+  const disabledRef = useRef(!!props.disabled);
+  const savingRef = useRef(false);
+  disabledRef.current = !!props.disabled;
 
   useEffect(() => {
     if (dirtyRef.current) return;
@@ -1019,6 +1023,7 @@ function OncallRow(props: {
   }, [member]);
 
   async function save(): Promise<void> {
+    if (disabledRef.current || savingRef.current) return;
     setStatus(null);
     const wd = workingDir.trim();
     if (enabled && !wd) {
@@ -1026,6 +1031,7 @@ function OncallRow(props: {
       return;
     }
 
+    savingRef.current = true;
     setSaving(true);
     try {
       const url = `/api/groups/${encodeURIComponent(props.chat.chatId)}/oncall/${encodeURIComponent(member.larkAppId)}`;
@@ -1050,6 +1056,7 @@ function OncallRow(props: {
     } catch (err: any) {
       setStatus({ text: `✗ ${err?.message ?? err}`, className: 'hint-warn-inline' });
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -1061,7 +1068,9 @@ function OncallRow(props: {
           type="checkbox"
           data-action="toggle"
           checked={enabled}
+          disabled={props.disabled || saving}
           onChange={ev => {
+            if (disabledRef.current || savingRef.current) return;
             dirtyRef.current = true;
             setEnabled(ev.currentTarget.checked);
             if (ev.currentTarget.checked) window.setTimeout(() => inputRef.current?.focus(), 0);
@@ -1077,13 +1086,14 @@ function OncallRow(props: {
           data-input="workingDir"
           placeholder="e.g. /root/iserver/botmux"
           value={workingDir}
-          disabled={!enabled}
+          disabled={props.disabled || saving || !enabled}
           onChange={ev => {
+            if (disabledRef.current || savingRef.current) return;
             dirtyRef.current = true;
             setWorkingDir(ev.currentTarget.value);
           }}
         />
-        <button type="button" data-action="save" disabled={saving} onClick={() => void save()}>{tr('groups.save')}</button>
+        <button type="button" data-action="save" disabled={props.disabled || saving} onClick={() => void save()}>{tr('groups.save')}</button>
         <span className={`oncall-status ${status?.className ?? ''}`} data-status>{status?.text ?? ''}</span>
       </div>
     </div>
@@ -1098,6 +1108,7 @@ function responseErrorText(res: { status: number; body: any }): string {
 function GroupPinStreamingCardRow(props: {
   chat: GroupChat;
   member: GroupChat['memberBots'][number];
+  disabled?: boolean;
   tr: Translator;
   onSaved(): Promise<void>;
 }) {
@@ -1109,7 +1120,10 @@ function GroupPinStreamingCardRow(props: {
   const [statusTone, setStatusTone] = useState<'ok' | 'warn' | 'muted'>('muted');
   const lastAppliedMemberRef = useRef(member);
   const latestMemberRef = useRef(member);
+  const disabledRef = useRef(!!props.disabled);
+  const savingRef = useRef(false);
   latestMemberRef.current = member;
+  disabledRef.current = !!props.disabled;
 
   useEffect(() => {
     if (saving || lastAppliedMemberRef.current === member) return;
@@ -1127,8 +1141,10 @@ function GroupPinStreamingCardRow(props: {
   const detailTone = !masterEnabled ? 'warn' : effectiveEnabled ? 'ok' : 'muted';
 
   async function save(nextChecked: boolean): Promise<void> {
+    if (disabledRef.current || savingRef.current) return;
     const previous = checked;
     setChecked(nextChecked);
+    savingRef.current = true;
     setSaving(true);
     setStatus(tr('groups.pinStreamingCardSaving'));
     setStatusTone('warn');
@@ -1162,6 +1178,7 @@ function GroupPinStreamingCardRow(props: {
       setStatus(tr('groups.pinStreamingCardSaveFailed', { error: message }));
       setStatusTone('warn');
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   }
@@ -1175,7 +1192,7 @@ function GroupPinStreamingCardRow(props: {
       <StreamingCardPinToggle
         scope="group-manage"
         checked={checked}
-        disabled={saving}
+        disabled={props.disabled || saving}
         title={tr('groups.pinStreamingCard')}
         description={tr('groups.pinStreamingCardDescription')}
         help={tr('groups.pinStreamingCardHelp')}
@@ -1195,16 +1212,20 @@ function GroupPinStreamingCardRow(props: {
 
 export function ManageDialog(props: {
   chat: GroupChat;
+  available?: boolean;
   tr: Translator;
   onClose(): void;
   onReloadGroups(options?: { force?: boolean }): Promise<GroupsSnapshot>;
 }) {
   const { chat, tr } = props;
+  const available = props.available !== false;
   const inChat = (chat.memberBots ?? []).filter(member => member.inChat);
   const ownerAppId = typeof chat.ownerId === 'string' ? chat.ownerId : '';
   const [leaveSelection, setLeaveSelection] = useState<Set<string>>(() => new Set());
   const inChatIdsRef = useRef(new Set(inChat.map(member => member.larkAppId)));
   inChatIdsRef.current = new Set(inChat.map(member => member.larkAppId));
+  const availableRef = useRef(available);
+  availableRef.current = available;
 
   useEffect(() => {
     setLeaveSelection(current => {
@@ -1214,6 +1235,7 @@ export function ManageDialog(props: {
   }, [chat.chatId, chat.memberBots]);
 
   function toggleLeave(appId: string, checked: boolean): void {
+    if (!availableRef.current) return;
     setLeaveSelection(cur => {
       const next = new Set(cur);
       if (checked) next.add(appId);
@@ -1223,9 +1245,11 @@ export function ManageDialog(props: {
   }
 
   async function leaveSelected(): Promise<void> {
+    if (!availableRef.current) return;
     const selected = [...leaveSelection];
     if (selected.length === 0) { toast('至少选一个机器人', { kind: 'warning' }); return; }
     if (!await confirm({ title: '退出群聊', message: `确定让 ${selected.length} 个机器人退出群聊？该 bot 在此群的会话会一并关闭。`, danger: true })) return;
+    if (!availableRef.current) return;
     const checked = selected.filter(appId => inChatIdsRef.current.has(appId));
     if (checked.length === 0) return;
     try {
@@ -1260,13 +1284,15 @@ export function ManageDialog(props: {
   }
 
   async function disband(): Promise<void> {
-    if (inChat.length === 0) return;
+    if (!availableRef.current || inChat.length === 0) return;
     if (!await confirm({ title: '解散群聊', message: `确定解散群聊「${chat.name ?? chat.chatId}」？此操作不可恢复，本群所有机器人会话也会一并关闭。`, danger: true })) return;
+    if (!availableRef.current) return;
     const ordered = [...inChat].sort((a, b) =>
       (b.larkAppId === ownerAppId ? 1 : 0) - (a.larkAppId === ownerAppId ? 1 : 0),
     );
     const errs: string[] = [];
     for (const member of ordered) {
+      if (!availableRef.current) return;
       try {
         const r = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/disband`, {
           method: 'POST',
@@ -1304,6 +1330,9 @@ export function ManageDialog(props: {
         <span><b>chatId</b><code>{chat.chatId}</code></span>
         <span><b>{tr('groups.owner')}</b><code>{chat.ownerId ?? tr('common.unknown')}</code></span>
       </div>
+      {!available ? (
+        <p className="hint-warn" data-chat-unavailable>该群聊已不在最新列表中，管理操作已禁用。</p>
+      ) : null}
 
       <fieldset>
         <legend>{tr('groups.oncall')}</legend>
@@ -1315,6 +1344,7 @@ export function ManageDialog(props: {
             key={member.larkAppId}
             chat={chat}
             member={member}
+            disabled={!available}
             tr={tr}
             onSaved={async () => { await props.onReloadGroups({ force: true }); }}
           />
@@ -1331,6 +1361,7 @@ export function ManageDialog(props: {
             key={`pin-${member.larkAppId}`}
             chat={chat}
             member={member}
+            disabled={!available}
             tr={tr}
             onSaved={async () => { await props.onReloadGroups({ force: true }); }}
           />
@@ -1350,6 +1381,7 @@ export function ManageDialog(props: {
                   name="leave-bot"
                   value={member.larkAppId}
                   checked={leaveSelection.has(member.larkAppId)}
+                  disabled={!available}
                   onChange={ev => toggleLeave(member.larkAppId, ev.currentTarget.checked)}
                 />
                 <span className="checkbox-row-main">
@@ -1365,8 +1397,8 @@ export function ManageDialog(props: {
       <p className="g-manage-danger-hint">{tr('groups.dangerHint')}</p>
       <div className="actions">
         <button type="button" onClick={props.onClose}>{tr('sessions.dismiss')}</button>
-        <button id="g-leave-btn" type="button" disabled={inChat.length === 0} onClick={() => void leaveSelected()}>{tr('groups.leaveSelected')}</button>
-        <button id="g-disband-btn" type="button" className="contrast" disabled={inChat.length === 0} onClick={() => void disband()}>{tr('groups.disband')}</button>
+        <button id="g-leave-btn" type="button" disabled={!available || inChat.length === 0} onClick={() => void leaveSelected()}>{tr('groups.leaveSelected')}</button>
+        <button id="g-disband-btn" type="button" className="contrast" disabled={!available || inChat.length === 0} onClick={() => void disband()}>{tr('groups.disband')}</button>
       </div>
     </article>
   );
@@ -1434,11 +1466,12 @@ function DialogHost(props: {
     );
   } else if (props.dialog?.type === 'manage') {
     const capturedChat = props.dialog.chat;
-    const chat = props.snapshot.chats.find(chat => chat.chatId === capturedChat.chatId)
-      ?? capturedChat;
+    const currentChat = props.snapshot.chats.find(chat => chat.chatId === capturedChat.chatId);
+    const chat = currentChat ?? capturedChat;
     content = (
       <ManageDialog
         chat={chat}
+        available={!!currentChat}
         tr={props.tr}
         onClose={props.onClose}
         onReloadGroups={props.onReloadGroups}

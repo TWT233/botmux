@@ -192,8 +192,13 @@ describe('group manage streaming-card pin rows', () => {
   };
   type ReloadGroups = React.ComponentProps<typeof ManageDialog>['onReloadGroups'];
   const emptyReload: ReloadGroups = async () => ({ chats: [], bots: [] });
-  const manageElement = (chat: GroupChat, onReloadGroups: ReloadGroups = emptyReload) => React.createElement(ManageDialog, {
+  const manageElement = (
+    chat: GroupChat,
+    onReloadGroups: ReloadGroups = emptyReload,
+    available?: boolean,
+  ) => React.createElement(ManageDialog, {
     chat,
+    available,
     tr,
     onClose: () => undefined,
     onReloadGroups,
@@ -216,9 +221,13 @@ describe('group manage streaming-card pin rows', () => {
   });
 
   it('keeps the open manage dialog synced to reloads and falls back if the chat is missing', async () => {
-    const initialChat = makeChat([makeMember({ botName: 'Claude (stale)' })]);
+    const initialChat = makeChat([makeMember({
+      botName: 'Claude (stale)',
+      oncallChat: { workingDir: '/srv/stale-repo' },
+    })]);
     const reloadedChat = makeChat([makeMember({
       botName: 'Claude (fresh)',
+      oncallChat: { workingDir: '/srv/fresh-repo' },
       pinStreamingCardChatEnabled: true,
       pinStreamingCardEffectiveEnabled: true,
     })], { name: 'Release Room (fresh)' });
@@ -269,6 +278,18 @@ describe('group manage streaming-card pin rows', () => {
     act(() => {
       renderer.root.findByProps({ className: 'manage-chat' }).props.onClick();
     });
+    act(() => {
+      renderer.root.findByProps({ name: 'leave-bot', value: 'cli_a' })
+        .props.onChange({ currentTarget: { checked: true } });
+    });
+    const stalePinOnChange = groupPinToggle(renderer).props.onChange;
+    const staleOncallToggleChange = renderer.root.findByProps({ 'data-action': 'toggle' }).props.onChange;
+    const staleOncallInputChange = renderer.root.findByProps({ 'data-input': 'workingDir' }).props.onChange;
+    const staleOncallSaveClick = renderer.root.findByProps({ 'data-action': 'save' }).props.onClick;
+    const staleLeaveCheckboxChange = renderer.root
+      .findByProps({ name: 'leave-bot', value: 'cli_a' }).props.onChange;
+    const staleLeaveClick = renderer.root.findByProps({ id: 'g-leave-btn' }).props.onClick;
+    const staleDisbandClick = renderer.root.findByProps({ id: 'g-disband-btn' }).props.onClick;
 
     expect(renderer.root.findByType('h3').children.join('')).toContain('Release Room');
     expect(groupPinToggle(renderer).props.checked).toBe(false);
@@ -319,6 +340,37 @@ describe('group manage streaming-card pin rows', () => {
     expect(renderer.root.findByType(ManageDialog).findAllByType('strong').some(node =>
       node.children.join('') === 'Claude (stale)'
     )).toBe(true);
+
+    const pinToggle = groupPinToggle(renderer);
+    const oncallToggle = renderer.root.findByProps({ 'data-action': 'toggle' });
+    const oncallInput = renderer.root.findByProps({ 'data-input': 'workingDir' });
+    const oncallSave = renderer.root.findByProps({ 'data-action': 'save' });
+    const leaveCheckbox = renderer.root.findByProps({ name: 'leave-bot', value: 'cli_a' });
+    const leaveButton = renderer.root.findByProps({ id: 'g-leave-btn' });
+    const disbandButton = renderer.root.findByProps({ id: 'g-disband-btn' });
+    expect(pinToggle.props.disabled).toBe(true);
+    expect(oncallToggle.props.disabled).toBe(true);
+    expect(oncallInput.props.disabled).toBe(true);
+    expect(oncallSave.props.disabled).toBe(true);
+    expect(leaveCheckbox.props.disabled).toBe(true);
+    expect(leaveButton.props.disabled).toBe(true);
+    expect(disbandButton.props.disabled).toBe(true);
+
+    const mutationsBefore = requests.filter(request => !request.startsWith('GET '));
+    confirmDialog.confirm.mockResolvedValue(true);
+    await act(async () => {
+      stalePinOnChange({ currentTarget: { checked: false } });
+      staleOncallToggleChange({ currentTarget: { checked: false } });
+      staleOncallInputChange({ currentTarget: { value: '/srv/should-not-save' } });
+      staleOncallSaveClick();
+      staleLeaveCheckboxChange({ currentTarget: { checked: true } });
+      staleLeaveClick();
+      staleDisbandClick();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(requests.filter(request => !request.startsWith('GET '))).toEqual(mutationsBefore);
+    expect(confirmDialog.confirm).not.toHaveBeenCalled();
 
     act(() => renderer.unmount());
   });
@@ -686,6 +738,52 @@ describe('group manage streaming-card pin rows', () => {
       .toBe('/unsaved-user-edit');
   });
 
+  it('locks oncall fields while a save is pending', async () => {
+    const saveResponse = deferred<any>();
+    const fetchMock = vi.fn(() => saveResponse.promise);
+    (globalThis as any).fetch = fetchMock;
+    const onReloadGroups = vi.fn(async () => ({ chats: [], bots: [] }));
+    const renderer = renderManage(makeChat([makeMember({
+      oncallChat: { workingDir: '/srv/current-repo' },
+    })]), onReloadGroups);
+    const staleToggleChange = renderer.root.findByProps({ 'data-action': 'toggle' }).props.onChange;
+    const staleInputChange = renderer.root.findByProps({ 'data-input': 'workingDir' }).props.onChange;
+    const staleSaveClick = renderer.root.findByProps({ 'data-action': 'save' }).props.onClick;
+
+    act(() => {
+      staleSaveClick();
+    });
+
+    const toggle = renderer.root.findByProps({ 'data-action': 'toggle' });
+    const input = renderer.root.findByProps({ 'data-input': 'workingDir' });
+    const save = renderer.root.findByProps({ 'data-action': 'save' });
+    expect(toggle.props.disabled).toBe(true);
+    expect(input.props.disabled).toBe(true);
+    expect(save.props.disabled).toBe(true);
+
+    act(() => {
+      staleToggleChange({ currentTarget: { checked: false } });
+      staleInputChange({ currentTarget: { value: '/srv/during-save' } });
+      staleSaveClick();
+    });
+    expect(renderer.root.findByProps({ 'data-action': 'toggle' }).props.checked).toBe(true);
+    expect(renderer.root.findByProps({ 'data-input': 'workingDir' }).props.value)
+      .toBe('/srv/current-repo');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      saveResponse.resolve(jsonResponse({ ok: true, resolvedPath: '/srv/current-repo' }));
+      await saveResponse.promise;
+    });
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/groups/oc_group/oncall/cli_a',
+      expect.objectContaining({
+        method: 'PUT',
+        body: JSON.stringify({ workingDir: '/srv/current-repo' }),
+      }),
+    );
+  });
+
   it('drops a selected leave target when a fresh chat snapshot removes that member', () => {
     const initialMember = makeMember();
     const freshMember = makeMember({ larkAppId: 'cli_b', botName: 'Codex' });
@@ -728,6 +826,42 @@ describe('group manage streaming-card pin rows', () => {
     expect(confirmDialog.confirm).toHaveBeenCalledOnce();
 
     act(() => { renderer.update(manageElement(makeChat([freshMember]), onReloadGroups)); });
+    await act(async () => { confirmation.resolve(true); });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not submit leave when the chat disappears while confirmation is open', async () => {
+    const chat = makeChat([makeMember()]);
+    const confirmation = deferred<boolean>();
+    confirmDialog.confirm.mockReturnValueOnce(confirmation.promise);
+    const fetchMock = vi.fn();
+    (globalThis as any).fetch = fetchMock;
+    const renderer = renderManage(chat);
+    act(() => {
+      renderer.root.findByProps({ name: 'leave-bot', value: 'cli_a' })
+        .props.onChange({ currentTarget: { checked: true } });
+    });
+    act(() => { renderer.root.findByProps({ id: 'g-leave-btn' }).props.onClick(); });
+    expect(confirmDialog.confirm).toHaveBeenCalledOnce();
+
+    act(() => { renderer.update(manageElement(chat, emptyReload, false)); });
+    await act(async () => { confirmation.resolve(true); });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('does not submit disband when the chat disappears while confirmation is open', async () => {
+    const chat = makeChat([makeMember()]);
+    const confirmation = deferred<boolean>();
+    confirmDialog.confirm.mockReturnValueOnce(confirmation.promise);
+    const fetchMock = vi.fn();
+    (globalThis as any).fetch = fetchMock;
+    const renderer = renderManage(chat);
+    act(() => { renderer.root.findByProps({ id: 'g-disband-btn' }).props.onClick(); });
+    expect(confirmDialog.confirm).toHaveBeenCalledOnce();
+
+    act(() => { renderer.update(manageElement(chat, emptyReload, false)); });
     await act(async () => { confirmation.resolve(true); });
 
     expect(fetchMock).not.toHaveBeenCalled();
