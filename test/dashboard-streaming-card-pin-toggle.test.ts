@@ -3,6 +3,7 @@ import TestRenderer, { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardBehaviorSection } from '../src/dashboard/web/bot-defaults-page.js';
 import { ManageDialog } from '../src/dashboard/web/groups-page.js';
+import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -31,6 +32,52 @@ describe('shared streaming-card pin toggle', () => {
     expect(renderer.root.findByProps({ 'data-streaming-card-pin-toggle': 'bot-defaults' })).toBeTruthy();
     expect(renderer.root.findByProps({ 'data-streaming-card-pin-help': 'bot-defaults' }).children.join(''))
       .toContain('默认关闭');
+  });
+
+  it('associates the checkbox with the rendered help paragraph via aria-describedby', () => {
+    const putCardPref = vi.fn(async () => ({ ok: true, status: 200, body: { ok: true } }));
+    let renderer!: TestRenderer.ReactTestRenderer;
+
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(CardBehaviorSection, {
+        bot: { larkAppId: 'cli_pin_a11y' },
+        putCardPref,
+      }));
+    });
+
+    const toggle = findByDataAction(renderer, 'toggle-pin-streaming-card');
+    const help = renderer.root.findByProps({ 'data-streaming-card-pin-help': 'bot-defaults' });
+    expect(typeof help.props.id).toBe('string');
+    expect(help.props.id.length).toBeGreaterThan(0);
+    expect(toggle.props['aria-describedby']).toContain(help.props.id);
+  });
+
+  it('merges external aria-describedby values with the shared help and description ids', () => {
+    let renderer!: TestRenderer.ReactTestRenderer;
+
+    act(() => {
+      renderer = TestRenderer.create(
+        React.createElement(StreamingCardPinToggle, {
+          scope: 'bot-defaults',
+          checked: false,
+          title: 'Pin current live card',
+          description: 'Shared description',
+          help: 'Shared help',
+          describedBy: 'external-status external-error',
+          onChange: () => undefined,
+        }),
+      );
+    });
+
+    const toggle = renderer.root.findByType('input');
+    const help = renderer.root.findByProps({ 'data-streaming-card-pin-help': 'bot-defaults' });
+    const description = renderer.root.findByType('small');
+    const describedBy = String(toggle.props['aria-describedby'] ?? '');
+
+    expect(describedBy).toContain('external-status');
+    expect(describedBy).toContain('external-error');
+    expect(describedBy).toContain(String(description.props.id));
+    expect(describedBy).toContain(String(help.props.id));
   });
 
   it('keeps bot-defaults rollback behavior after the shared toggle refactor', async () => {
@@ -227,5 +274,56 @@ describe('group manage streaming-card pin rows', () => {
       .toBe(true);
     expect(renderer.root.findByProps({ 'data-pin-status': 'cli_a' }).children.join('')).toContain('refresh failed');
     expect(renderer.root.findByProps({ 'data-pin-status': 'cli_a' }).children.join('')).not.toContain('Save failed');
+  });
+
+  it('uses a distinct help id per row and points each checkbox aria-describedby at its own help element', () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, status: 200, json: async () => ({ ok: true }) })) as any;
+    (globalThis as any).fetch = fetchMock;
+    const onReloadGroups = vi.fn(async () => ({ chats: [], bots: [] }));
+    let renderer!: TestRenderer.ReactTestRenderer;
+
+    act(() => {
+      renderer = TestRenderer.create(React.createElement(ManageDialog, {
+        chat: {
+          chatId: 'oc_group',
+          name: 'Release Room',
+          ownerId: 'ou_owner',
+          memberBots: [
+            {
+              larkAppId: 'cli_a',
+              botName: 'Claude',
+              inChat: true,
+              pinStreamingCardMasterEnabled: true,
+              pinStreamingCardChatEnabled: false,
+              pinStreamingCardEffectiveEnabled: false,
+            },
+            {
+              larkAppId: 'cli_b',
+              botName: 'Codex',
+              inChat: true,
+              pinStreamingCardMasterEnabled: false,
+              pinStreamingCardChatEnabled: false,
+              pinStreamingCardEffectiveEnabled: false,
+            },
+          ],
+        },
+        tr,
+        onClose: () => undefined,
+        onReloadGroups,
+      }));
+    });
+
+    const rows = renderer.root.findAllByProps({ 'data-streaming-card-pin-help': 'group-manage' });
+    expect(rows).toHaveLength(2);
+    const ids = rows.map(row => row.props.id);
+    expect(new Set(ids).size).toBe(2);
+
+    for (const appId of ['cli_a', 'cli_b']) {
+      const toggle = renderer.root.findByProps({ 'data-action': 'toggle-pin-streaming-card-group', 'data-app-id': appId });
+      const describedBy = String(toggle.props['aria-describedby'] ?? '');
+      const helpId = rows.find(row => describedBy.includes(String(row.props.id)))?.props.id;
+      expect(helpId).toBeTruthy();
+      expect(describedBy).toContain(String(helpId));
+    }
   });
 });

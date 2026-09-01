@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react';
+import { useId, type ReactNode } from 'react';
 
 type StatusTone = 'ok' | 'warn' | 'muted';
 
@@ -21,6 +21,7 @@ export function StreamingCardPinToggle(props: {
   title: ReactNode;
   help?: ReactNode;
   description?: ReactNode;
+  describedBy?: string;
   detail?: ReactNode;
   detailTone?: StatusTone;
   detailAttrs?: Record<string, string>;
@@ -37,6 +38,10 @@ export function StreamingCardPinToggle(props: {
     `streaming-card-pin-toggle-${props.scope}`,
     props.className ?? '',
   ].filter(Boolean).join(' ');
+  const baseId = useId();
+  const descriptionId = props.description ? `${baseId}-description` : '';
+  const helpId = props.help ? `${baseId}-help` : '';
+  const ariaDescribedBy = [props.describedBy, descriptionId, helpId].filter(Boolean).join(' ') || undefined;
 
   return (
     <div className={className} data-streaming-card-pin-toggle={props.scope}>
@@ -45,6 +50,7 @@ export function StreamingCardPinToggle(props: {
           type="checkbox"
           data-action={props.dataAction}
           data-app-id={props.dataAppId}
+          aria-describedby={ariaDescribedBy}
           checked={props.checked}
           disabled={props.disabled}
           onChange={event => props.onChange(event.currentTarget.checked)}
@@ -52,11 +58,15 @@ export function StreamingCardPinToggle(props: {
         <span className="switch" aria-hidden="true" />
         <span className="toggle-tx">
           <strong>{props.title}</strong>
-          {props.description ? <small>{props.description}</small> : null}
+          {props.description ? <small id={descriptionId}>{props.description}</small> : null}
         </span>
       </label>
       {props.help ? (
-        <p className="streaming-card-pin-toggle-help hint-muted" data-streaming-card-pin-help={props.scope}>
+        <p
+          id={helpId}
+          className="streaming-card-pin-toggle-help hint-muted"
+          data-streaming-card-pin-help={props.scope}
+        >
           {props.help}
         </p>
       ) : null}
