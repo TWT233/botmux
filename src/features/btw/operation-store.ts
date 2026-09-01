@@ -1196,7 +1196,7 @@ function isValidBtwOpId(btwOpId: string): boolean {
 }
 
 function isTerminalConflictDiagnosticFile(name: string): boolean {
-  const match = /^(?<btwOpId>.+)\.terminal-conflict\.(?<digest>[0-9a-f]{64})\.json$/.exec(name);
+  const match = /^(?<btwOpId>.+)\.terminal-conflict\.(?<digest>[0-9a-f]{24}|[0-9a-f]{64})\.json$/.exec(name);
   if (!match?.groups) return false;
   return isValidBtwOpId(match.groups.btwOpId);
 }
