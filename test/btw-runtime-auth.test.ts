@@ -12,6 +12,7 @@ import { runtimeBuildIdentity } from '../src/utils/runtime-build-id.js';
 import { readProcessStartIdentity } from '../src/core/session-marker.js';
 import { deriveBtwIdentifiers } from '../src/features/btw/types.js';
 import { makeBtwPrepareInput, makeBtwScope } from './fixtures/btw-fixtures.js';
+import { spawnTsEvalWithRepoImports } from './helpers/ts-runner.js';
 
 const tempDirs: string[] = [];
 const staleSocketPaths: string[] = [];
@@ -393,20 +394,87 @@ describe('BTW runtime auth and singleton boot', () => {
     expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
   });
 
-  it('does not reclaim a dead parent reservation while its spawned-child lease is valid', async () => {
+  it('waits for an actual child to bind a dead parent claim and reuses its authenticated singleton', async () => {
     const dataDir = newDataDir();
+    const build = runtimeBuildIdentity();
+    if (build.status !== 'known') throw new Error('test needs known runtime build');
+    const claim = 'actual-child-capability';
+    const runtimeDir = join(dataDir, 'btw');
+    mkdirSync(runtimeDir, { mode: 0o700 });
+    writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
+      claim, ownerPid: 999999, ownerStartIdentity: 'dead-parent', buildId: build.id, leaseExpiresAt: Date.now() + 5_000,
+    }));
+
+    let childPid: number | undefined;
+    let childStarted: Promise<void> | undefined;
+    __testOnly_setBtwRuntimeHooks({
+      onStartupClaimLeaseWait: () => {
+        if (childStarted) return;
+        childStarted = new Promise<void>((resolvePromise, rejectPromise) => {
+          const child = spawnTsEvalWithRepoImports(`
+            import { runBtwRuntime } from './src/features/btw/runtime-server.js';
+            await runBtwRuntime({ dataDir: process.env.BTW_DATA_DIR });
+            process.stdout.write(String(process.pid) + '\\n');
+          `, {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              BTW_DATA_DIR: dataDir,
+              BOTMUX_BTW_RUNTIME_STARTUP_CLAIM: claim,
+            },
+            stdio: ['ignore', 'pipe', 'pipe'],
+          });
+          let output = '';
+          let errors = '';
+          child.stdout?.on('data', chunk => {
+            output += String(chunk);
+            const pid = Number(output.trim());
+            if (Number.isSafeInteger(pid) && pid > 1) {
+              childPid = pid;
+              resolvePromise();
+            }
+          });
+          child.stderr?.on('data', chunk => { errors += String(chunk); });
+          child.once('error', rejectPromise);
+          child.once('exit', code => {
+            if (!childPid) rejectPromise(new Error(errors || `runtime child exited ${code}`));
+          });
+        });
+      },
+    });
+    try {
+      const reclaimer = ensureTestRuntime(dataDir);
+      await childStarted;
+      const descriptor = await reclaimer;
+      expect(descriptor.pid).toBe(childPid);
+      const connected = await connectTestRuntime(dataDir);
+      expect(`${connected.descriptor.pid}:${connected.descriptor.epoch}`).toBe(`${descriptor.pid}:${descriptor.epoch}`);
+      connected.close();
+    } finally {
+      __testOnly_setBtwRuntimeHooks();
+    }
+  }, 12_000);
+
+  it('reclaims a dead parent reservation after its bounded child-claim lease in the same ensure', async () => {
+    const dataDir = newDataDir();
+    const build = runtimeBuildIdentity();
+    if (build.status !== 'known') throw new Error('test needs known runtime build');
     const runtimeDir = join(dataDir, 'btw');
     mkdirSync(runtimeDir, { mode: 0o700 });
     writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
       claim: 'child-capability', ownerPid: 999999, ownerStartIdentity: 'dead-parent',
-      buildId: runtimeBuildIdentity().status === 'known' ? runtimeBuildIdentity().id : 'unknown',
-      leaseExpiresAt: Date.now() + 30_000,
+      buildId: build.id,
+      // This deliberately short lease proves recovery without carrying the
+      // production five-second child window into the test. No external retry
+      // may be needed after this call starts.
+      leaseExpiresAt: Date.now() + 50,
     }));
 
-    await expect(ensureBtwRuntime({ dataDir })).rejects.toThrow('failed to publish');
-    const reservation = JSON.parse(readFileSync(join(runtimeDir, 'runtime.starting.json'), 'utf8')) as { claim?: string };
-    expect(reservation.claim).toBe('child-capability');
-    expect(existsSync(join(runtimeDir, 'runtime.json'))).toBe(false);
+    const descriptor = await ensureTestRuntime(dataDir);
+    expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
+    const connected = await connectTestRuntime(dataDir);
+    expect(`${connected.descriptor.pid}:${connected.descriptor.epoch}`).toBe(`${descriptor.pid}:${descriptor.epoch}`);
+    connected.close();
   }, 12_000);
 
   it('serializes a dead-parent reclaimer behind the spawned child claim transition', async () => {
