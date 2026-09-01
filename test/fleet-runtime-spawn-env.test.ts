@@ -61,6 +61,18 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
 
+  it('does not carry the one-shot refresh marker into the supervisor', async () => {
+    vi.stubEnv('BOTMUX_INTERNAL_REFRESH_DAEMON_ENV', '1');
+    const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
+
+    expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({
+      action: 'started',
+      supervisorPid: 4321,
+    });
+    const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
+    expect(options.env.BOTMUX_INTERNAL_REFRESH_DAEMON_ENV).toBeUndefined();
+  });
+
   it('clears inherited lifecycle settings when the persisted .env is absent', async () => {
     rmSync(join(home, '.botmux', '.env'));
     delete process.env.BOTMUX_SESSION_ID;

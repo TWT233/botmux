@@ -20,6 +20,7 @@ import type { FleetProcState, FleetState } from './fleet-supervisor-policy.js';
 import { FLEET_GRACEFUL_EXIT_CODE } from './fleet-supervisor-policy.js';
 import { botProcessName } from '../setup/bot-config-editor.js';
 import { resolveDaemonEnv } from '../cli/daemon-lifecycle-env.js';
+import { scrubDetachedRestartEnvRefresh } from './restart-env-refresh.js';
 
 const CONFIG_DIR = join(homedir(), '.botmux');
 const HEAPSHOT_DIR = join(CONFIG_DIR, 'heapshots');
@@ -114,6 +115,7 @@ export function resolveFleetDaemonEnv(
       envFileRead.status === 'failed' ? false : refreshPersistedEnv,
     ),
   };
+  scrubDetachedRestartEnvRefresh(env);
   //
   // MIGRATION-CRITICAL: pin SESSION_DATA_DIR for every supervised child. The old
   // pm2 ecosystem injected `SESSION_DATA_DIR: DATA_DIR` into both the bot daemons
