@@ -62,6 +62,10 @@ interface ConnectRuntimeInput {
   expectedEpoch?: string;
 }
 
+type RuntimeDescriptorOnDisk = Omit<BtwRuntimeDescriptor, 'protocolVersion'> & {
+  protocolVersion: number;
+};
+
 interface AuthRequest {
   kind: 'auth';
   token: string;
@@ -258,7 +262,7 @@ function removePublishedDescriptor(paths: RuntimePaths): void {
   try { unlinkSync(paths.descriptorPath); } catch { /* absent or concurrently removed */ }
 }
 
-function readDescriptor(paths: RuntimePaths): BtwRuntimeDescriptor {
+function readDescriptor(paths: RuntimePaths): RuntimeDescriptorOnDisk {
   const raw = JSON.parse(readFileSync(paths.descriptorPath, 'utf8')) as Record<string, unknown>;
   const descriptor = {
     pid: requiredNumber(raw.pid, 'pid'),
@@ -267,7 +271,7 @@ function readDescriptor(paths: RuntimePaths): BtwRuntimeDescriptor {
     protocolVersion: requiredNumber(raw.protocolVersion, 'protocolVersion'),
     buildId: requiredString(raw.buildId, 'buildId'),
     epoch: requiredString(raw.epoch, 'epoch'),
-  } satisfies BtwRuntimeDescriptor;
+  } satisfies RuntimeDescriptorOnDisk;
   const keys = Object.keys(raw).sort();
   if (keys.join(',') !== ['buildId', 'epoch', 'pid', 'protocolVersion', 'socket', 'startIdentity'].join(',')) {
     throw new Error('invalid btw runtime descriptor fields');
@@ -285,12 +289,12 @@ function requiredNumber(value: unknown, name: string): number {
   return value as number;
 }
 
-function pidIsLive(descriptor: BtwRuntimeDescriptor): boolean {
+function pidIsLive(descriptor: RuntimeDescriptorOnDisk): boolean {
   const liveStart = readProcessStartIdentity(descriptor.pid);
   return liveStart !== undefined && liveStart === descriptor.startIdentity;
 }
 
-function canReuseDescriptor(descriptor: BtwRuntimeDescriptor): boolean {
+function canReuseDescriptor(descriptor: RuntimeDescriptorOnDisk): descriptor is BtwRuntimeDescriptor {
   return descriptor.protocolVersion === BTW_RUNTIME_PROTOCOL_VERSION && pidIsLive(descriptor);
 }
 
@@ -299,7 +303,7 @@ function runtimeHasDurableOperations(paths: RuntimePaths): boolean {
   try { return readdirSync(operationsDir, { recursive: true }).some(item => String(item).endsWith('.json')); } catch { return false; }
 }
 
-async function stopEmptyIncompatibleRuntime(paths: RuntimePaths, descriptor: BtwRuntimeDescriptor): Promise<void> {
+async function stopEmptyIncompatibleRuntime(paths: RuntimePaths, descriptor: RuntimeDescriptorOnDisk): Promise<void> {
   // Never signal a PID unless its start identity still matches.  A protocol
   // replacement may only retire an empty runtime; durable work is preserved.
   if (!pidIsLive(descriptor) || runtimeHasDurableOperations(paths)) return;
@@ -648,7 +652,7 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
   while (Date.now() < deadline) {
     let waitingForDeadParentClaim = false;
     await withFileLock(paths.lockPath, async () => {
-      let live: BtwRuntimeDescriptor | undefined;
+      let live: RuntimeDescriptorOnDisk | undefined;
       try {
         live = readDescriptor(paths);
       } catch {
