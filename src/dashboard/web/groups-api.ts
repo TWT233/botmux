@@ -57,6 +57,11 @@ export function primeGroupsSnapshotCache(snapshot: GroupsSnapshot): void {
   cachedAt = Date.now();
 }
 
+/** Publish a snapshot after the caller has accepted it under its own ordering fence. */
+export function commitGroupsSnapshotCache(snapshot: GroupsSnapshot): void {
+  primeGroupsSnapshotCache(snapshot);
+}
+
 // ─── 名称/头像专用轻量缓存（与上面的完整矩阵缓存**完全分离**）──────────────
 //
 // 为什么必须分开存：完整矩阵（12.59MB）里 chats[].memberBots 占 12341KB，而
