@@ -910,6 +910,41 @@ describe('btw operation store', () => {
     expect(() => store.prepareBtwSubmission(scope, created.btwOpId, created.parent.runtimeEpoch)).toThrow(/accepted/i);
   });
 
+  it('rejects generic projection acknowledgements while card creation is still pending and leaves state untouched', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+    const created = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_projection_ack_cannot_create_card',
+    }).operation;
+
+    const currentCas = {
+      operationRevision: created.revision,
+      projectionRevision: created.projection.desiredRevision,
+    };
+    const disallowedOutcomes = [
+      { kind: 'patched' } as const,
+      { kind: 'withdrawn' } as const,
+      { kind: 'replacement_created', messageId: 'om_replacement_should_not_bind' } as const,
+      { kind: 'retryable_failure', errorCode: 'HTTP_429', message: 'retry later', retryAt: '2026-09-01T00:02:00.000Z' } as const,
+      { kind: 'reminder_sent' } as const,
+      { kind: 'reminder_definitely_unsent', retryAt: '2026-09-01T00:02:00.000Z' } as const,
+      { kind: 'reminder_unknown' } as const,
+    ];
+
+    for (const outcome of disallowedOutcomes) {
+      const before = store.getBtwOperation(scope, created.btwOpId)!;
+      expect(() => store.ackBtwProjection(scope, created.btwOpId, currentCas, outcome)).toThrow();
+      expect(store.getBtwOperation(scope, created.btwOpId)).toEqual(before);
+    }
+
+    expect(store.listPendingInitialCards(scope.larkAppId).map(op => op.btwOpId)).toEqual([created.btwOpId]);
+    const accepted = store.recordBtwCard(scope, created.btwOpId, 'om_card_created_normally');
+    expect(accepted.execution.state).toBe('accepted');
+    expect(accepted.card.messageId).toBe('om_card_created_normally');
+  });
+
   it('lists only terminal projection revisions, enforces CAS staleness, and makes repeated patch success idempotent', () => {
     const dataDir = newDataDir();
     const clock = createAdvancingClock();
@@ -984,6 +1019,54 @@ describe('btw operation store', () => {
       operationRevision: staleExpected.expectedOperationRevision,
       projectionRevision: staleExpected.projectionRevision,
     }, { kind: 'patched' }).kind).toBe('stale');
+  });
+
+  it('treats patched during reminder phase as a strict no-op idempotent acknowledgement', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+    const created = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_projection_patched_during_reminder',
+    }).operation;
+    store.recordBtwCard(scope, created.btwOpId, 'om_card_projection_patched_during_reminder');
+    store.prepareBtwSubmission(scope, created.btwOpId, created.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, created.btwOpId, {
+      status: 'completed',
+      answer: 'answer already visible',
+    });
+
+    const contentPending = store.listPendingBtwProjections(scope.larkAppId)
+      .find(item => item.btwOpId === created.btwOpId)!;
+    const firstPatch = store.ackBtwProjection(scope, created.btwOpId, {
+      operationRevision: contentPending.expectedOperationRevision,
+      projectionRevision: contentPending.projectionRevision,
+    }, { kind: 'patched' });
+    expect(firstPatch.operation.projection).toMatchObject({
+      desiredRevision: 2,
+      patchedRevision: 2,
+      reminderState: 'pending',
+    });
+
+    const reminderPending = store.listPendingBtwProjections(scope.larkAppId)
+      .find(item => item.btwOpId === created.btwOpId)!;
+    const beforeReminderPatch = store.getBtwOperation(scope, created.btwOpId)!;
+    const repeatedPatched = store.ackBtwProjection(scope, created.btwOpId, {
+      operationRevision: reminderPending.expectedOperationRevision,
+      projectionRevision: reminderPending.projectionRevision,
+    }, { kind: 'patched' });
+
+    expect(repeatedPatched.kind).toBe('applied');
+    expect(repeatedPatched.operation).toEqual(beforeReminderPatch);
+    expect(repeatedPatched.operation.revision).toBe(beforeReminderPatch.revision);
+    expect(repeatedPatched.operation.updatedAt).toBe(beforeReminderPatch.updatedAt);
+    expect(repeatedPatched.operation.projection).toMatchObject({
+      desiredRevision: 2,
+      patchedRevision: 2,
+      reminderState: 'pending',
+      reminderAttempt: 0,
+    });
+    expect(store.listPendingBtwProjections(scope.larkAppId)).toEqual([reminderPending]);
   });
 
   it('keeps retryable projection failures pending, blocks only the exact provider-permanent revision, and preserves full answers for visible fallback', () => {
@@ -1196,6 +1279,52 @@ describe('btw operation store', () => {
     });
     expect(unknownReminder.operation.projection.reminderNextAttemptAt).toBeUndefined();
     expect(store.listPendingBtwProjections(scope.larkAppId).some(item => item.btwOpId === created.btwOpId)).toBe(false);
+  });
+
+  it('lists valid pending projections while quarantining corrupt siblings in the same app partition', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const scope = makeBtwScope();
+    const created = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_projection_with_corrupt_sibling',
+    }).operation;
+    store.recordBtwCard(scope, created.btwOpId, 'om_card_projection_with_corrupt_sibling');
+    store.prepareBtwSubmission(scope, created.btwOpId, created.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, created.btwOpId, {
+      status: 'completed',
+      answer: 'projection remains listable',
+    });
+
+    const corruptSiblingPath = operationPathForRequest(dataDir, 'om_request_projection_corrupt_sibling');
+    mkdirSync(dirname(corruptSiblingPath), { recursive: true });
+    writeFileSync(corruptSiblingPath, JSON.stringify({
+      ...makeBtwOperation(),
+      btwOpId: deriveBtwIdentifiers(scope, 'om_request_projection_corrupt_sibling').btwOpId,
+      requestId: 'om_request_projection_corrupt_sibling',
+      replyTarget: {
+        ...makeBtwReplyTarget(),
+        larkAppId: scope.larkAppId,
+      },
+      parent: {
+        ...makeBtwParent(),
+        botmuxSessionId: scope.botmuxSessionId,
+      },
+      projection: {
+        ...makeBtwOperation().projection,
+        reminderState: 'not-a-real-reminder-state',
+      },
+    }, null, 2));
+
+    const pending = store.listPendingBtwProjections(scope.larkAppId);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]).toMatchObject({
+      btwOpId: created.btwOpId,
+      projectionRevision: 2,
+    });
+    expect(existsSync(corruptSiblingPath)).toBe(false);
+    expect(readdirSync(dirname(corruptSiblingPath)).some(name =>
+      name.startsWith(`${basenameWithoutJson(corruptSiblingPath)}.corrupt.`))).toBe(true);
   });
 
   it('reconciles old epochs and dead sessions without reviving terminal records', () => {
