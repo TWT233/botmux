@@ -307,6 +307,8 @@ function allocateName(
 export class PluginMcpGateway {
   readonly server: Server;
   private readonly env: NodeJS.ProcessEnv;
+  /** Present only for a managed runtime's frozen session generation. */
+  private readonly frozenSessionEnv?: NodeJS.ProcessEnv;
   private readonly trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider;
   private readonly pluginIds: string[];
   private readonly descriptors: GatewayDescriptor[];
@@ -325,9 +327,12 @@ export class PluginMcpGateway {
       trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider;
       /** Explicit frozen generation for a persistent runtime-owned host. */
       manifest?: SessionMcpRuntimeManifest | null;
+      /** Frozen session env; makes session/owner identity authoritative downstream. */
+      frozenSessionEnv?: NodeJS.ProcessEnv;
     } = {},
   ) {
     this.env = env;
+    this.frozenSessionEnv = opts.frozenSessionEnv;
     this.trustedTurnIdentity = opts.trustedTurnIdentity;
     const runtime = resolveGatewayRuntime(pluginIds, env, opts.manifest);
     this.pluginIds = runtime.pluginIds;
@@ -401,18 +406,33 @@ export class PluginMcpGateway {
     try {
       if (descriptor.server.transport === 'stdio') {
         const resolved = resolveStdioCommand(descriptor);
+        const downstreamEnv: NodeJS.ProcessEnv = {
+          ...getDefaultEnvironment(),
+          ...(this.frozenSessionEnv ?? {}),
+          ...descriptor.server.env,
+          BOTMUX_PLUGIN_ID: descriptor.pluginId,
+          BOTMUX_PLUGIN_DIR: descriptor.pluginDir,
+          BOTMUX_PLUGIN_HOME: pluginHome(descriptor.pluginId),
+          ...(this.env.BOTMUX_SESSION_ID ? { BOTMUX_SESSION_ID: this.env.BOTMUX_SESSION_ID } : {}),
+        };
+        // Only the managed runtime has a frozen session contract.  Its owner
+        // identity is applied after descriptor env so a plugin cannot override
+        // it; an ownerless frozen session must delete both legacy channels.
+        if (this.frozenSessionEnv) {
+          if (this.frozenSessionEnv.BOTMUX_OWNER_OPEN_ID) {
+            downstreamEnv.BOTMUX_OWNER_OPEN_ID = this.frozenSessionEnv.BOTMUX_OWNER_OPEN_ID;
+            downstreamEnv.__OWNER_OPEN_ID = this.frozenSessionEnv.__OWNER_OPEN_ID
+              ?? this.frozenSessionEnv.BOTMUX_OWNER_OPEN_ID;
+          } else {
+            delete downstreamEnv.BOTMUX_OWNER_OPEN_ID;
+            delete downstreamEnv.__OWNER_OPEN_ID;
+          }
+        }
         transport = new StdioClientTransport({
           command: resolved.command,
           args: resolved.args,
           cwd: descriptor.pluginDir,
-          env: {
-            ...getDefaultEnvironment(),
-            ...descriptor.server.env,
-            BOTMUX_PLUGIN_ID: descriptor.pluginId,
-            BOTMUX_PLUGIN_DIR: descriptor.pluginDir,
-            BOTMUX_PLUGIN_HOME: pluginHome(descriptor.pluginId),
-            ...(this.env.BOTMUX_SESSION_ID ? { BOTMUX_SESSION_ID: this.env.BOTMUX_SESSION_ID } : {}),
-          },
+          env: downstreamEnv,
           stderr: 'inherit',
         });
       } else {

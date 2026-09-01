@@ -149,6 +149,24 @@ describe('plugin MCP Gateway', () => {
     await gateway.close();
   });
 
+  it('keeps non-managed gateways on their inherited default environment', async () => {
+    installFixturePlugin('plugin-a', 'alpha');
+    const gateway = new PluginMcpGateway(['plugin-a'], {
+      ...process.env,
+      FROZEN_SESSION_ENV: 'generic-gateway-only',
+    });
+    const client = new Client({ name: 'gateway-default-env-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([gateway.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: 'echo', arguments: {} });
+      expect((result.content[0] as { text: string }).text).toContain(':frozen=:owner=');
+    } finally {
+      await client.close();
+      await gateway.close();
+    }
+  });
+
   it('isolates a failed downstream server', async () => {
     const connectSpy = vi.spyOn(Client.prototype, 'connect');
     installFixturePlugin('plugin-a', 'alpha');

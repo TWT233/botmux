@@ -48,7 +48,10 @@ function profile(dataDir: string, sessionId: string, configHash: string): Frozen
   };
 }
 
-function fixtureMcpManifest(sessionId: string): SessionMcpRuntimeManifest {
+function fixtureMcpManifest(
+  sessionId: string,
+  serverEnv?: Record<string, string>,
+): SessionMcpRuntimeManifest {
   return {
     schemaVersion: 1, sessionId, pluginIds: ['fixture'], generatedAt: new Date().toISOString(),
     entries: [{
@@ -57,6 +60,7 @@ function fixtureMcpManifest(sessionId: string): SessionMcpRuntimeManifest {
       server: {
         name: 'fixture', transport: 'stdio',
         command: [process.execPath, fileURLToPath(new URL('./fixtures/plugin-mcp-server.mjs', import.meta.url)), 'alpha'],
+        ...(serverEnv ? { env: serverEnv } : {}),
       },
     }],
   };
@@ -231,6 +235,98 @@ describe('managed runtime support continuity', () => {
     } finally {
       await gateway.close().catch(() => undefined);
       await replacement.detach().catch(() => undefined);
+    }
+  }, 20_000);
+
+  it('keeps the first frozen session environment and owner at MCP tools after attachment replacement', async () => {
+    chmodSync(fakeCli, 0o755);
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-support-frozen-env-'));
+    dirs.push(dataDir);
+    const originalFrozenEnv = process.env.FROZEN_SESSION_ENV;
+    const originalOwner = process.env.BOTMUX_OWNER_OPEN_ID;
+    const originalLegacyOwner = process.env.__OWNER_OPEN_ID;
+    try {
+      process.env.FROZEN_SESSION_ENV = 'ambient-runtime-start';
+      process.env.BOTMUX_OWNER_OPEN_ID = 'ou_ambient_runtime_owner';
+      process.env.__OWNER_OPEN_ID = 'ou_ambient_runtime_legacy_owner';
+      const runtime = await startRuntime(dataDir);
+      const sessionId = 'support-continuity-frozen-env';
+      const frozen = {
+        ...profile(dataDir, sessionId, 'generation-one'),
+        env: {
+          ...profile(dataDir, sessionId, 'generation-one').env,
+          FROZEN_SESSION_ENV: 'first-generation',
+        },
+        ownerOpenId: 'ou_frozen_owner',
+        mcpManifest: fixtureMcpManifest(sessionId, {
+          BOTMUX_OWNER_OPEN_ID: 'ou_descriptor_override',
+          __OWNER_OPEN_ID: 'ou_descriptor_legacy_override',
+        }),
+        mcpManifestDigest: 'digest-frozen-env',
+      };
+      await runtime.client.ensureSession(frozen);
+      process.env.FROZEN_SESSION_ENV = 'ambient-replacement';
+      process.env.BOTMUX_OWNER_OPEN_ID = 'ou_ambient_override';
+      process.env.__OWNER_OPEN_ID = 'ou_ambient_legacy_override';
+
+      const first = await runtime.client.attachSession({ sessionId, cursor: 0 });
+      await first.detach();
+      const replacement = await runtime.client.attachSession({ sessionId, cursor: 0 });
+      const gatewaySocketPath = sessionMcpGatewaySocketPath(sessionId, realpathSync(dataDir));
+      const gateway = await connectRuntimeGateway(sessionId, dataDir, gatewaySocketPath);
+      try {
+        const result = await gateway.callTool({ name: 'echo', arguments: {} });
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('frozen=first-generation');
+        expect(text).toContain('owner=ou_frozen_owner');
+        expect(text).toContain('legacyOwner=ou_frozen_owner');
+      } finally {
+        await gateway.close().catch(() => undefined);
+        await replacement.detach().catch(() => undefined);
+      }
+    } finally {
+      if (originalFrozenEnv === undefined) delete process.env.FROZEN_SESSION_ENV;
+      else process.env.FROZEN_SESSION_ENV = originalFrozenEnv;
+      if (originalOwner === undefined) delete process.env.BOTMUX_OWNER_OPEN_ID;
+      else process.env.BOTMUX_OWNER_OPEN_ID = originalOwner;
+      if (originalLegacyOwner === undefined) delete process.env.__OWNER_OPEN_ID;
+      else process.env.__OWNER_OPEN_ID = originalLegacyOwner;
+    }
+  }, 20_000);
+
+  it('does not let descriptor or ambient owner values repopulate an ownerless frozen session', async () => {
+    chmodSync(fakeCli, 0o755);
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-support-ownerless-env-'));
+    dirs.push(dataDir);
+    const originalOwner = process.env.BOTMUX_OWNER_OPEN_ID;
+    const originalLegacyOwner = process.env.__OWNER_OPEN_ID;
+    try {
+      process.env.BOTMUX_OWNER_OPEN_ID = 'ou_ambient_owner';
+      process.env.__OWNER_OPEN_ID = 'ou_ambient_legacy_owner';
+      const runtime = await startRuntime(dataDir);
+      const sessionId = 'support-continuity-ownerless-env';
+      await runtime.client.ensureSession({
+        ...profile(dataDir, sessionId, 'generation-one'),
+        mcpManifest: fixtureMcpManifest(sessionId, {
+          BOTMUX_OWNER_OPEN_ID: 'ou_descriptor_override',
+          __OWNER_OPEN_ID: 'ou_descriptor_legacy_override',
+        }),
+        mcpManifestDigest: 'digest-ownerless-env',
+      });
+      const gatewaySocketPath = sessionMcpGatewaySocketPath(sessionId, realpathSync(dataDir));
+      const gateway = await connectRuntimeGateway(sessionId, dataDir, gatewaySocketPath);
+      try {
+        const result = await gateway.callTool({ name: 'echo', arguments: {} });
+        const text = (result.content[0] as { text: string }).text;
+        expect(text).toContain('owner=:legacyOwner=');
+      } finally {
+        await gateway.close().catch(() => undefined);
+      }
+    } finally {
+      if (originalOwner === undefined) delete process.env.BOTMUX_OWNER_OPEN_ID;
+      else process.env.BOTMUX_OWNER_OPEN_ID = originalOwner;
+      if (originalLegacyOwner === undefined) delete process.env.__OWNER_OPEN_ID;
+      else process.env.__OWNER_OPEN_ID = originalLegacyOwner;
     }
   }, 20_000);
 });

@@ -184,10 +184,16 @@ async function ensureManagedSession(
   // The App Server executes model tools, so its gateway must exist before the
   // server starts.  This is the frozen session generation, never a read of
   // current plugin configuration.
+  // The profile's env is already sanitized by the daemon.  Freeze all
+  // config-controlled values before installing the host-owned owner identity;
+  // neither the bot env nor a stale inherited environment may override it.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
+  applySessionOwnerEnv(env, profile.ownerOpenId);
   const mcpGatewayHost = profile.mcpManifest?.entries.length
     ? await startSessionMcpGatewayHost({
       sessionId: profile.sessionId,
       dataDir: state.dataDir,
+      env,
       manifest: profile.mcpManifest,
       trustedTurnIdentity: () => managed.activeTurnIdentity
         ? {
@@ -200,10 +206,6 @@ async function ensureManagedSession(
         : undefined,
     })
     : null;
-  // The profile's env is already sanitized by the daemon.  Freeze all
-  // config-controlled values before installing the host-owned owner identity;
-  // neither the bot env nor a stale inherited environment may override it.
-  const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
   if (mcpGatewayHost) {
     env[MCP_GATEWAY_SOCKET_ENV] = mcpGatewayHost.socketPath;
     env[MCP_GATEWAY_REQUIRED_ENV] = '1';
@@ -211,7 +213,6 @@ async function ensureManagedSession(
     delete env[MCP_GATEWAY_SOCKET_ENV];
     delete env[MCP_GATEWAY_REQUIRED_ENV];
   }
-  applySessionOwnerEnv(env, profile.ownerOpenId);
   const engine = new CodexRpcSession({
     cliBin: profile.cliBin,
     cwd: profile.cwd,

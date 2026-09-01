@@ -100,6 +100,8 @@ function rotateGatewayAuthToken(socketPath: string): string {
 export async function startSessionMcpGatewayHost(opts: {
   sessionId: string;
   dataDir: string;
+  /** Sanitized, session-frozen environment for downstream plugin processes. */
+  env?: NodeJS.ProcessEnv;
   /** The persistent runtime's frozen generation. Never re-read live state when supplied. */
   manifest?: SessionMcpRuntimeManifest | null;
   trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider;
@@ -130,12 +132,13 @@ export async function startSessionMcpGatewayHost(opts: {
     void (async () => {
       if (!await acceptMcpGatewayHandshake(socket, authToken)) return;
       const gateway = new PluginMcpGateway(undefined, {
-        ...process.env,
+        ...(opts.env ?? process.env),
         SESSION_DATA_DIR: opts.dataDir,
         BOTMUX_SESSION_ID: opts.sessionId,
       }, {
         trustedTurnIdentity: opts.trustedTurnIdentity,
         manifest: opts.manifest,
+        frozenSessionEnv: opts.env ? { ...opts.env } : undefined,
       });
       let gatewayClose: Promise<void> | undefined;
       const closeGateway = (): Promise<void> => {
