@@ -674,19 +674,28 @@ describe('CodexRpcSession — dispatch boundary', () => {
     await session.start();
     await session.startThread();
 
-    const preSendOwner = owner('pre-send-owner', 1);
-    session.registerNativeTurnOwner('turn-pre-registered', preSendOwner);
-    let ownerVisibleDuringSend = false;
+    const terminals: any[] = [];
+    const ownerSession = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+      sessionId: `dispatch-owner-${Math.round(performance.now())}`,
+      onTurnTerminal: terminal => terminals.push(terminal),
+    });
+    await ownerSession.start();
+    await ownerSession.startThread();
+    ownerSession.registerNativeTurnOwner('turn-fake-1', owner('pre-send-owner', 1));
+    await ownerSession.requestWithDispatchBoundary('turn/start', { threadId: ownerSession.activeThreadId, input: [] });
+    await new Promise(resolve => setTimeout(resolve, 50));
+    expect(terminals).toEqual([expect.objectContaining({
+      nativeTurnId: 'turn-fake-1', identity: { turnId: 'pre-send-owner', dispatchAttempt: 1 },
+    })]);
+    ownerSession.closeOwnedProcess();
+
     const definitelyUnsent = await session.requestWithDispatchBoundary(
       'turn/start',
       { threadId: session.activeThreadId, input: [] },
-      { beforeSend: () => {
-        ownerVisibleDuringSend = (session as any).registeredNativeTurnOwners.get('turn-pre-registered')?.turnId === 'pre-send-owner';
-        throw new Error('client send refused');
-      } },
+      { beforeSend: () => { throw new Error('client send refused'); } },
     );
     expect(definitelyUnsent).toMatchObject({ kind: 'definitely_unsent', error: expect.any(Error) });
-    expect(ownerVisibleDuringSend).toBe(true);
 
     const acknowledged = await session.requestWithDispatchBoundary(
       'turn/start',
@@ -712,5 +721,69 @@ describe('CodexRpcSession — dispatch boundary', () => {
     expect(unknown).toMatchObject({ kind: 'submission_unknown', error: expect.any(Error) });
     ackDroppingSession.detachObserver();
     ackDroppingSession.closeOwnedProcess();
+  }, 20_000);
+
+  it('keeps a dispatch boundary private to its request while unrelated RPC traffic proceeds', async () => {
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: { ...process.env, FAKE_DELAY_THREAD_READ_MS: '100' },
+      sessionId: `dispatch-concurrent-${Math.round(performance.now())}`,
+    });
+    await session.start();
+    await session.startThread();
+    let boundaryWrites = 0;
+    const boundary = session.requestWithDispatchBoundary('thread/read', { threadId: session.activeThreadId }, {
+      beforeSend: () => { boundaryWrites += 1; },
+    });
+    await session.readThreadMetadata();
+    await expect(boundary).resolves.toMatchObject({ kind: 'acknowledged' });
+    expect(boundaryWrites).toBe(1);
+    session.closeOwnedProcess();
+  }, 20_000);
+
+  it('delivers normalized notifications once beside terminal and input callbacks', async () => {
+    const notifications: any[] = [];
+    const terminals: any[] = [];
+    const inputs: any[] = [];
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: { ...process.env, FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1' },
+      sessionId: `notifications-${Math.round(performance.now())}`,
+      onNotification: notification => notifications.push(notification),
+      onTurnTerminal: terminal => terminals.push(terminal),
+      onRequestUserInput: async params => { inputs.push(params); return { answers: { choice: { answers: ['Yes'] } } }; },
+    });
+    await session.start();
+    await session.startThread();
+    await session.sendTurn('hello', owner('notify-owner', 1));
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(notifications).toEqual([expect.objectContaining({ method: 'item/agentMessage/delta' })]);
+    expect(inputs).toHaveLength(1);
+    expect(terminals).toEqual([expect.objectContaining({ identity: { turnId: 'notify-owner', dispatchAttempt: 1 } })]);
+    session.closeOwnedProcess();
+  }, 20_000);
+
+  it('detachObserver suppresses all callbacks without killing its child; closeOwnedProcess is destructive', async () => {
+    let callbackCount = 0;
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: { ...process.env, FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1', FAKE_DIE_AFTER_MS: '600' },
+      sessionId: `detach-${Math.round(performance.now())}`,
+      onNotification: () => { callbackCount += 1; },
+      onTurnTerminal: () => { callbackCount += 1; },
+      onRequestUserInput: async () => { callbackCount += 1; return { answers: {} }; },
+      onDead: () => { callbackCount += 1; },
+    });
+    await session.start();
+    await session.startThread();
+    const pid = session.appServerPid!;
+    session.detachObserver();
+    expect(isAlive(pid)).toBe(true);
+    await session.sendTurn('suppressed', owner('detached-owner', 1));
+    await new Promise(resolve => setTimeout(resolve, 900));
+    expect(callbackCount).toBe(0);
+    session.closeOwnedProcess();
+    await new Promise(resolve => setTimeout(resolve, 100));
+    expect(isAlive(pid)).toBe(false);
   }, 20_000);
 });
