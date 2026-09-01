@@ -3920,6 +3920,7 @@ function writePidFile(): void {
     // resolve `botmux` (otherwise `botmux send` from a Windows CLI session fails).
     for (const file of botmuxWrapperFiles(cliScript, process.execPath, process.platform, standalone)) {
       const wrapper = join(BOTMUX_BIN_DIR, file.name);
+      const isMainWrapper = file.name === 'botmux' || file.name === 'botmux.cmd';
       // NEVER overwrite the running executable. install.sh installs the compiled
       // binary to exactly this path (~/.botmux/bin/botmux), so without this guard
       // the daemon replaced its own 94MB executable with a 47-byte script on every
@@ -3930,7 +3931,7 @@ function writePidFile(): void {
       // `botmux` on PATH, so there is nothing a wrapper needs to add.
       let isRunningBinary = false;
       try {
-        isRunningBinary = realpathSync(wrapper) === realpathSync(process.execPath);
+        isRunningBinary = isMainWrapper && realpathSync(wrapper) === realpathSync(process.execPath);
       } catch { /* wrapper absent (first boot) or unreadable → not the binary */ }
       if (isRunningBinary) {
         logger.info(`Wrapper skipped: ${wrapper} is this running executable (self-contained binary already on PATH)`);

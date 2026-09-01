@@ -169,9 +169,11 @@ An invalid state is reported as a fixed flag without returning the raw value.
 
 Sessions created after this feature is installed always contain the process hook.
 Policy edits therefore apply to their next spawn without restarting the parent.
-The hook command is rendered through the stable daemon-updated `botmux` wrapper
-rather than a checkout-local `dist/cli.js` path, so long-lived panes pick up the
-current Node or standalone build automatically. For persistent sandboxed panes,
+The hook command is rendered through the dedicated stable daemon-updated
+`botmux-native-subagent-runtime-hook` entrypoint rather than a checkout-local
+`dist/cli.js` path or the generic `botmux` wrapper, so long-lived panes pick up
+the current Node or standalone build automatically without coupling sandbox
+relay overlay to the native hook path. For persistent sandboxed panes,
 warm reattach remains gated by the daemon-managed isolation marker and its policy
 digest: install-root or native-hook protocol drift invalidates warm reattach and
 forces a cold spawn under the current policy instead of inheriting stale runtime

@@ -10,6 +10,16 @@ import { realpathSync } from 'node:fs';
 import { delimiter, join } from 'node:path';
 import { homedir } from 'node:os';
 
+const BOTMUX_WRAPPER_BASENAME = 'botmux';
+const NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME = 'botmux-native-subagent-runtime-hook';
+
+function wrapperFilename(
+  basenameWithoutExtension: string,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  return platform === 'win32' ? `${basenameWithoutExtension}.cmd` : basenameWithoutExtension;
+}
+
 /**
  * SINGLE SOURCE OF TRUTH for the `botmux` wrapper bin dir (codex P1). The daemon
  * WRITES the wrapper here and every consumer (worker-pool fork PATH, worker.ts
@@ -48,7 +58,17 @@ export function resolveStableBotmuxWrapperPath(
   const lexicalDir = resolveBotmuxWrapperBinDir(env);
   let canonicalDir = lexicalDir;
   try { canonicalDir = realpathSync(lexicalDir); } catch { /* wrapper dir not materialized yet */ }
-  return join(canonicalDir, platform === 'win32' ? 'botmux.cmd' : 'botmux');
+  return join(canonicalDir, wrapperFilename(BOTMUX_WRAPPER_BASENAME, platform));
+}
+
+export function resolveNativeSubagentRuntimeHookWrapperPath(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): string {
+  const lexicalDir = resolveBotmuxWrapperBinDir(env);
+  let canonicalDir = lexicalDir;
+  try { canonicalDir = realpathSync(lexicalDir); } catch { /* wrapper dir not materialized yet */ }
+  return join(canonicalDir, wrapperFilename(NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME, platform));
 }
 
 /**
@@ -112,24 +132,44 @@ export function botmuxWrapperFiles(
   if (standalone) {
     const binaryPath = nodePath;
     const files: BotmuxWrapperFile[] = [
-      { name: 'botmux', content: `#!/bin/sh\nexec "${binaryPath}" "$@"\n`, mode: 0o755 },
+      { name: BOTMUX_WRAPPER_BASENAME, content: `#!/bin/sh\nexec "${binaryPath}" "$@"\n`, mode: 0o755 },
+      {
+        name: NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME,
+        content: `#!/bin/sh\nexec "${binaryPath}" native-subagent-runtime-hook "$@"\n`,
+        mode: 0o755,
+      },
     ];
     if (platform === 'win32') {
       files.push({
-        name: 'botmux.cmd',
+        name: wrapperFilename(BOTMUX_WRAPPER_BASENAME, platform),
         content: `@echo off\r\n"${binaryPath}" %*\r\n`,
+        mode: 0o755,
+      });
+      files.push({
+        name: wrapperFilename(NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME, platform),
+        content: `@echo off\r\n"${binaryPath}" native-subagent-runtime-hook %*\r\n`,
         mode: 0o755,
       });
     }
     return files;
   }
   const files: BotmuxWrapperFile[] = [
-    { name: 'botmux', content: `#!/bin/sh\nexec node "${cliScript}" "$@"\n`, mode: 0o755 },
+    { name: BOTMUX_WRAPPER_BASENAME, content: `#!/bin/sh\nexec node "${cliScript}" "$@"\n`, mode: 0o755 },
+    {
+      name: NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME,
+      content: `#!/bin/sh\nexec node "${cliScript}" native-subagent-runtime-hook "$@"\n`,
+      mode: 0o755,
+    },
   ];
   if (platform === 'win32') {
     files.push({
-      name: 'botmux.cmd',
+      name: wrapperFilename(BOTMUX_WRAPPER_BASENAME, platform),
       content: `@echo off\r\n"${nodePath}" "${cliScript}" %*\r\n`,
+      mode: 0o755,
+    });
+    files.push({
+      name: wrapperFilename(NATIVE_SUBAGENT_RUNTIME_HOOK_WRAPPER_BASENAME, platform),
+      content: `@echo off\r\n"${nodePath}" "${cliScript}" native-subagent-runtime-hook %*\r\n`,
       mode: 0o755,
     });
   }

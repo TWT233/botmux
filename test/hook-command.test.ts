@@ -41,10 +41,11 @@ describe('sessionReadyHookCommand', () => {
 });
 
 describe('nativeSubagentRuntimeHookCommand', () => {
-  it('uses the stable installed wrapper so a reattached pane picks up the current build', () => {
+  it('uses the dedicated stable native-hook wrapper so a reattached pane picks up the current build', () => {
     const cmd = nativeSubagentRuntimeHookCommand();
-    expect(cmd).toMatch(/^".+[/\\]\.botmux[/\\]bin[/\\]botmux(?:\.cmd)?" native-subagent-runtime-hook$/);
+    expect(cmd).toMatch(/^".+[/\\]\.botmux[/\\]bin[/\\]botmux-native-subagent-runtime-hook(?:\.cmd)?"$/);
     expect(cmd).not.toContain('cli.js');
+    expect(cmd).not.toContain(' native-subagent-runtime-hook');
   });
 
   it('canonicalizes a symlinked HOME wrapper path so full bwrap can still see it', () => {
@@ -56,7 +57,7 @@ describe('nativeSubagentRuntimeHookCommand', () => {
     symlinkSync(realHome, aliasHome, 'dir');
     try {
       const cmd = nativeSubagentRuntimeHookCommand({ HOME: aliasHome }, 'linux');
-      expect(cmd).toBe(`"${join(realpathSync(join(realHome, '.botmux', 'bin')), 'botmux')}" native-subagent-runtime-hook`);
+      expect(cmd).toBe(`"${join(realpathSync(join(realHome, '.botmux', 'bin')), 'botmux-native-subagent-runtime-hook')}"`);
       expect(cmd).not.toContain(aliasHome);
     } finally {
       rmSync(root, { recursive: true, force: true });

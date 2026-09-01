@@ -78,18 +78,53 @@ describe('botmuxWrapperFiles', () => {
   const cli = String.raw`C:\Users\First Last\AppData\Roaming\npm\node_modules\botmux\dist\cli.js`;
   const node = String.raw`C:\Program Files\nodejs\node.exe`;
 
-  it('writes only the sh wrapper on POSIX', () => {
+  it('writes the main and dedicated native-hook sh wrappers on POSIX', () => {
     const files = botmuxWrapperFiles('/opt/botmux/dist/cli.js', '/usr/bin/node', 'linux');
-    expect(files.map(f => f.name)).toEqual(['botmux']);
+    expect(files.map(f => f.name)).toEqual(['botmux', 'botmux-native-subagent-runtime-hook']);
     expect(files[0].content).toBe('#!/bin/sh\nexec node "/opt/botmux/dist/cli.js" "$@"\n');
+    expect(files[1].content).toBe(
+      '#!/bin/sh\nexec node "/opt/botmux/dist/cli.js" native-subagent-runtime-hook "$@"\n',
+    );
     expect(files[0].mode).toBe(0o755);
+    expect(files[1].mode).toBe(0o755);
   });
 
-  it('adds a quoted botmux.cmd pinning the current node on Windows', () => {
+  it('adds quoted main + dedicated native-hook cmd wrappers on Windows', () => {
     const files = botmuxWrapperFiles(cli, node, 'win32');
-    expect(files.map(f => f.name)).toEqual(['botmux', 'botmux.cmd']);
+    expect(files.map(f => f.name)).toEqual([
+      'botmux',
+      'botmux-native-subagent-runtime-hook',
+      'botmux.cmd',
+      'botmux-native-subagent-runtime-hook.cmd',
+    ]);
     const cmd = files.find(f => f.name === 'botmux.cmd')!;
+    const nativeHookCmd = files.find(f => f.name === 'botmux-native-subagent-runtime-hook.cmd')!;
     // Quoted node + cli so spaced paths survive; CRLF + %* forward all args.
     expect(cmd.content).toBe(`@echo off\r\n"${node}" "${cli}" %*\r\n`);
+    expect(nativeHookCmd.content).toBe(
+      `@echo off\r\n"${node}" "${cli}" native-subagent-runtime-hook %*\r\n`,
+    );
+  });
+
+  it('standalone POSIX keeps the main wrapper generic and the hook wrapper pinned to the subcommand', () => {
+    const files = botmuxWrapperFiles('/$bunfs/root/cli.js', '/opt/botmux/bin/botmux', 'linux', true);
+    expect(files.map(f => f.name)).toEqual(['botmux', 'botmux-native-subagent-runtime-hook']);
+    expect(files[0].content).toBe('#!/bin/sh\nexec "/opt/botmux/bin/botmux" "$@"\n');
+    expect(files[1].content).toBe(
+      '#!/bin/sh\nexec "/opt/botmux/bin/botmux" native-subagent-runtime-hook "$@"\n',
+    );
+  });
+
+  it('standalone Windows emits a dedicated native-hook cmd wrapper too', () => {
+    const files = botmuxWrapperFiles('/$bunfs/root/cli.js', 'C:\\botmux\\botmux.exe', 'win32', true);
+    expect(files.map(f => f.name)).toEqual([
+      'botmux',
+      'botmux-native-subagent-runtime-hook',
+      'botmux.cmd',
+      'botmux-native-subagent-runtime-hook.cmd',
+    ]);
+    expect(files.find(f => f.name === 'botmux-native-subagent-runtime-hook.cmd')!.content).toBe(
+      '@echo off\r\n"C:\\botmux\\botmux.exe" native-subagent-runtime-hook %*\r\n',
+    );
   });
 });
