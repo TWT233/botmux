@@ -1010,6 +1010,11 @@ function OncallRow(props: {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ text: string; className?: string } | null>(null);
 
+  useEffect(() => {
+    setEnabled(!!member.oncallChat);
+    setWorkingDir(member.oncallChat?.workingDir ?? '');
+  }, [member]);
+
   async function save(): Promise<void> {
     setStatus(null);
     const wd = workingDir.trim();
@@ -1094,10 +1099,15 @@ function GroupPinStreamingCardRow(props: {
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
   const [statusTone, setStatusTone] = useState<'ok' | 'warn' | 'muted'>('muted');
+  const lastAppliedMemberRef = useRef(member);
+  const latestMemberRef = useRef(member);
+  latestMemberRef.current = member;
 
   useEffect(() => {
+    if (saving || lastAppliedMemberRef.current === member) return;
+    lastAppliedMemberRef.current = member;
     setChecked(member.pinStreamingCardChatEnabled === true);
-  }, [member.pinStreamingCardChatEnabled]);
+  }, [member, saving]);
 
   const masterEnabled = member.pinStreamingCardMasterEnabled === true;
   const effectiveEnabled = member.pinStreamingCardEffectiveEnabled === true;
@@ -1124,9 +1134,16 @@ function GroupPinStreamingCardRow(props: {
       }
       setStatus(tr('groups.pinStreamingCardSaved'));
       setStatusTone('ok');
+      const memberBeforeReload = latestMemberRef.current;
       try {
         await props.onSaved();
+        const refreshedMember = latestMemberRef.current;
+        if (refreshedMember !== memberBeforeReload) {
+          setChecked(refreshedMember.pinStreamingCardChatEnabled === true);
+        }
+        lastAppliedMemberRef.current = refreshedMember;
       } catch (error) {
+        lastAppliedMemberRef.current = latestMemberRef.current;
         const message = error instanceof Error ? error.message : String(error);
         setStatus(tr('groups.pinStreamingCardRefreshFailed', { error: message }));
         setStatusTone('warn');
@@ -1178,6 +1195,15 @@ export function ManageDialog(props: {
   const inChat = (chat.memberBots ?? []).filter(member => member.inChat);
   const ownerAppId = typeof chat.ownerId === 'string' ? chat.ownerId : '';
   const [leaveSelection, setLeaveSelection] = useState<Set<string>>(() => new Set());
+  const inChatIdsRef = useRef(new Set(inChat.map(member => member.larkAppId)));
+  inChatIdsRef.current = new Set(inChat.map(member => member.larkAppId));
+
+  useEffect(() => {
+    setLeaveSelection(current => {
+      const next = new Set([...current].filter(appId => inChatIdsRef.current.has(appId)));
+      return next.size === current.size ? current : next;
+    });
+  }, [chat.chatId, chat.memberBots]);
 
   function toggleLeave(appId: string, checked: boolean): void {
     setLeaveSelection(cur => {
@@ -1189,9 +1215,11 @@ export function ManageDialog(props: {
   }
 
   async function leaveSelected(): Promise<void> {
-    const checked = [...leaveSelection];
-    if (checked.length === 0) { toast('至少选一个机器人', { kind: 'warning' }); return; }
-    if (!await confirm({ title: '退出群聊', message: `确定让 ${checked.length} 个机器人退出群聊？该 bot 在此群的会话会一并关闭。`, danger: true })) return;
+    const selected = [...leaveSelection];
+    if (selected.length === 0) { toast('至少选一个机器人', { kind: 'warning' }); return; }
+    if (!await confirm({ title: '退出群聊', message: `确定让 ${selected.length} 个机器人退出群聊？该 bot 在此群的会话会一并关闭。`, danger: true })) return;
+    const checked = selected.filter(appId => inChatIdsRef.current.has(appId));
+    if (checked.length === 0) return;
     try {
       const r = await fetch(`/api/groups/${encodeURIComponent(chat.chatId)}/leave`, {
         method: 'POST',
@@ -1432,6 +1460,7 @@ function GroupsPage() {
   const timersRef = useRef<Set<number>>(new Set());
   const delayResolversRef = useRef<Map<number, () => void>>(new Map());
   const roleContextRunRef = useRef(0);
+  const reloadGroupsRunRef = useRef(0);
   const [snapshot, setSnapshotState] = useState<GroupsSnapshot>(emptyGroupsSnapshot);
   const [roleContext, setRoleContext] = useState<RoleProfileContext>(() => emptyRoleContext());
   const [filters, setFilters] = useState<GroupFilters>({ q: '', missingOnly: false });
@@ -1481,8 +1510,9 @@ function GroupsPage() {
   }, []);
 
   const reloadGroups = useCallback(async (options?: { force?: boolean }): Promise<GroupsSnapshot> => {
+    const runId = ++reloadGroupsRunRef.current;
     const next = await fetchGroupsSnapshot({ force: options?.force });
-    if (!mountedRef.current) return next;
+    if (!mountedRef.current || runId !== reloadGroupsRunRef.current) return next;
     setSnapshot(next);
     setLoadError(null);
     void refreshRoleProfileContext(next);
