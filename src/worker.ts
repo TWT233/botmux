@@ -16014,14 +16014,15 @@ async function spawnCli(
     stopSessionMcpGatewayHost();
     const exitedTurnId = currentBotmuxTurnId;
     const exitedDispatchAttempt = currentBotmuxDispatchAttempt;
-    // Fail closed as soon as this CLI generation ends. The Node worker may
-    // stay alive for auto-restart/crash diagnostics, but an old sandbox relay
-    // token or explicit IM origin must not remain usable in that interval.
+    // Fail closed for the ended backend generation's live-send authority. The
+    // Node worker may stay alive for daemon-driven crash recovery, so its
+    // generation-scoped policy authority remains valid until killCli() performs
+    // an actual worker teardown.
     completeManagedTurnOriginRevocation(
       sandboxRelayCapability,
       exitedTurnId,
       exitedDispatchAttempt,
-      { revokePolicy: !intentionalRestart },
+      { revokePolicy: false },
     );
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
     if (lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal) {
