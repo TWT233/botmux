@@ -272,6 +272,8 @@ describe('detachedRestartEnv', () => {
     const inherited = {
       WEB_HOST: '127.0.0.1',
       WEB_EXTERNAL_HOST: '10.255.64.131',
+      WEB_EXTERNAL_PORT: '9000',
+      BOTMUX_WEB_PROXY_BASE_PORT: '8800',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: '10.255.64.131',
       BOTMUX_DASHBOARD_HOST: '127.0.0.1',
       BOTMUX_DASHBOARD_PORT: '7991',
