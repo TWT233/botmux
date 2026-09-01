@@ -4,8 +4,8 @@ import { DAEMON_ENV_KEYS, resolveDaemonEnv } from '../src/cli/daemon-lifecycle-e
 import { DASHBOARD_H5_ENV_KEYS, DASHBOARD_H5_ENV_PREFIX } from '../src/utils/child-env.js';
 
 /**
- * Every key resolves to '' unless a source sets it, except the dashboard bind
- * host whose historical default lands in resolveDaemonEnv itself. Built from
+ * Every key resolves to '' unless a source sets it, except the terminal and
+ * dashboard bind hosts whose historical defaults land in resolveDaemonEnv. Built from
  * DAEMON_ENV_KEYS so the exact-shape assertions below keep working (and keep
  * being exact) as the list grows.
  */
@@ -40,11 +40,15 @@ describe('resolveDaemonEnv()', () => {
       BOTMUX_SESSION_ID: 'session-1',
       WEB_HOST: '127.0.0.1',
       WEB_EXTERNAL_HOST: 'stale.example.com',
+      WEB_EXTERNAL_PORT: '9000',
+      BOTMUX_WEB_PROXY_BASE_PORT: '8800',
       BOTMUX_DASHBOARD_HOST: '0.0.0.0',
       BOTMUX_DASHBOARD_PORT: '7891',
     }, [
       'WEB_HOST=0.0.0.0',
       'WEB_EXTERNAL_HOST=relay.example.com',
+      'WEB_EXTERNAL_PORT=9100',
+      'BOTMUX_WEB_PROXY_BASE_PORT=8900',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',
@@ -57,6 +61,8 @@ describe('resolveDaemonEnv()', () => {
     ].join('\n'))).toEqual(expected({
       WEB_HOST: '0.0.0.0',
       WEB_EXTERNAL_HOST: 'relay.example.com',
+      WEB_EXTERNAL_PORT: '9100',
+      BOTMUX_WEB_PROXY_BASE_PORT: '8900',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: 'dashboard.example.com',
       BOTMUX_DASHBOARD_HOST: '127.0.0.1',
       BOTMUX_DASHBOARD_PORT: '7991',
@@ -70,6 +76,8 @@ describe('resolveDaemonEnv()', () => {
     expect(resolveDaemonEnv({
       WEB_HOST: '127.0.0.2',
       WEB_EXTERNAL_HOST: 'shell.example.com',
+      WEB_EXTERNAL_PORT: '9200',
+      BOTMUX_WEB_PROXY_BASE_PORT: '8200',
       BOTMUX_DASHBOARD_HOST: '127.0.0.2',
       BOTMUX_DASHBOARD_PORT: '7992',
       BOTMUX_DAEMON_IPC_BASE_PORT: '7993',
@@ -78,6 +86,8 @@ describe('resolveDaemonEnv()', () => {
     }, [
       'WEB_HOST=0.0.0.0',
       'WEB_EXTERNAL_HOST=file.example.com',
+      'WEB_EXTERNAL_PORT=9100',
+      'BOTMUX_WEB_PROXY_BASE_PORT=8900',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',
@@ -87,6 +97,8 @@ describe('resolveDaemonEnv()', () => {
     ].join('\n'))).toEqual(expected({
       WEB_HOST: '127.0.0.2',
       WEB_EXTERNAL_HOST: 'shell.example.com',
+      WEB_EXTERNAL_PORT: '9200',
+      BOTMUX_WEB_PROXY_BASE_PORT: '8200',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: 'dashboard.example.com',
       BOTMUX_DASHBOARD_HOST: '127.0.0.2',
       BOTMUX_DASHBOARD_PORT: '7992',
@@ -100,6 +112,8 @@ describe('resolveDaemonEnv()', () => {
     expect(resolveDaemonEnv({
       WEB_HOST: '',
       WEB_EXTERNAL_HOST: '',
+      WEB_EXTERNAL_PORT: '',
+      BOTMUX_WEB_PROXY_BASE_PORT: '   ',
       BOTMUX_DASHBOARD_EXTERNAL_HOST: '   ',
       BOTMUX_DASHBOARD_HOST: '',
       BOTMUX_DASHBOARD_PORT: '   ',
@@ -109,6 +123,8 @@ describe('resolveDaemonEnv()', () => {
     }, [
       'WEB_HOST=0.0.0.0',
       'WEB_EXTERNAL_HOST=file.example.com',
+      'WEB_EXTERNAL_PORT=9100',
+      'BOTMUX_WEB_PROXY_BASE_PORT=8900',
       'BOTMUX_DASHBOARD_EXTERNAL_HOST=dashboard.example.com',
       'BOTMUX_DASHBOARD_HOST=127.0.0.1',
       'BOTMUX_DASHBOARD_PORT=7991',

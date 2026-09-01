@@ -363,6 +363,8 @@ export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env
   for (const key of [
     'WEB_HOST',
     'WEB_EXTERNAL_HOST',
+    'WEB_EXTERNAL_PORT',
+    'BOTMUX_WEB_PROXY_BASE_PORT',
     'BOTMUX_DASHBOARD_EXTERNAL_HOST',
     'BOTMUX_DASHBOARD_HOST',
     'BOTMUX_DASHBOARD_PORT',
