@@ -2616,6 +2616,7 @@ async function reconcileRestoredStreamingCardPinsForRequest(
       .map(ds => [ds.session.sessionId, ds] as const),
   );
   const byChat = new Map<string, Array<{
+    ds: DaemonSession;
     owner: StreamingCardOwner;
     currentId?: string;
     frozenIds: string[];
@@ -2627,6 +2628,7 @@ async function reconcileRestoredStreamingCardPinsForRequest(
     if (!ds) continue;
     const entries = byChat.get(candidate.chatId) ?? [];
     entries.push({
+      ds,
       owner: { larkAppId, sessionId },
       currentId: candidate.currentId,
       frozenIds: candidate.frozenIds,
@@ -2650,15 +2652,7 @@ async function reconcileRestoredStreamingCardPinsForRequest(
         const provenFrozen = entry.frozenIds.filter(id => provenIds.has(id));
         if (entry.enabled) {
           if (!entry.currentId || !isRealStreamingCardId(entry.currentId)) return;
-          const pinned = await pinStreamingCardIfEnabled(
-            liveSessions.get(entry.owner.sessionId ?? '') ?? ({
-              larkAppId,
-              chatId,
-              streamCardId: entry.currentId,
-              session: { sessionId: entry.owner.sessionId ?? '', status: 'active' },
-            } as DaemonSession),
-            entry.currentId,
-          );
+          const pinned = await pinStreamingCardIfEnabled(entry.ds, entry.currentId);
           if (!pinned || provenFrozen.length === 0) return;
           for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
           await unpinStreamingCardIds(larkAppId, provenFrozen, entry.owner);
