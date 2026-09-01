@@ -2174,11 +2174,13 @@ function trackPinStreamingCardTask(task: Promise<void>): void {
 }
 
 function drainStreamingCardMutationPermitWaiters(): void {
-  const next = streamingCardMutationPermitWaiters[0];
-  if (!next || activeStreamingCardMutations + next.count > BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) return;
-  streamingCardMutationPermitWaiters.shift();
-  activeStreamingCardMutations += next.count;
-  next.resolve(makeStreamingCardMutationPermitRelease(next.count));
+  while (true) {
+    const next = streamingCardMutationPermitWaiters[0];
+    if (!next || activeStreamingCardMutations + next.count > BOT_STREAMING_CARD_RECONCILE_BATCH_SIZE) return;
+    streamingCardMutationPermitWaiters.shift();
+    activeStreamingCardMutations += next.count;
+    next.resolve(makeStreamingCardMutationPermitRelease(next.count));
+  }
 }
 
 function makeStreamingCardMutationPermitRelease(count: number): () => void {

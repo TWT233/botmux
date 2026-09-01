@@ -536,6 +536,44 @@ describe('streaming-card pin policy', () => {
     expect(pinMessageMock).toHaveBeenCalledTimes(50);
   });
 
+  it('admits every queued Pin that fits after a 20-permit Unpin wave releases', async () => {
+    const cleanupSessions = Array.from({ length: 20 }, (_, index) =>
+      makeDs(`om_cleanup_wave_${index}`, undefined, `pin-cleanup-wave-${index}`, `om_cleanup_wave_root_${index}`));
+    const firstPin = makeDs('om_waiting_pin_1', undefined, 'pin-waiting-1', 'om_waiting_root_1');
+    firstPin.larkAppId = 'app-pin-waiting';
+    const secondPin = makeDs('om_waiting_pin_2', undefined, 'pin-waiting-2', 'om_waiting_root_2');
+    secondPin.larkAppId = 'app-pin-waiting';
+    setActiveSessionsRegistry(new Map(
+      [...cleanupSessions, firstPin, secondPin].map(ds => [activeSessionKey(ds), ds]),
+    ));
+    getBotMock.mockImplementation((larkAppId: string) => ({
+      config: { larkAppId, cliId: 'claude-code', pinStreamingCard: true },
+    }) as any);
+    const releaseUnpins = deferred<void>();
+    unpinMessageMock.mockImplementation(async (_appId: string, messageId: string) => {
+      await releaseUnpins.promise;
+      remotelySameAppPinIds.delete(messageId);
+      return true;
+    });
+    const releasePins = deferred<void>();
+    pinMessageMock.mockImplementation(async (appId: string, messageId: string) => {
+      await releasePins.promise;
+      return sameAppPin(appId, messageId);
+    });
+
+    reconcileBotStreamingCardPins('app-pin', false);
+    await vi.waitFor(() => expect(unpinMessageMock).toHaveBeenCalledTimes(20));
+    const firstPending = pinStreamingCardIfEnabled(firstPin, firstPin.streamCardId!);
+    const secondPending = pinStreamingCardIfEnabled(secondPin, secondPin.streamCardId!);
+    expect(pinMessageMock).not.toHaveBeenCalled();
+
+    releaseUnpins.resolve();
+    await vi.waitFor(() => expect(pinMessageMock).toHaveBeenCalledTimes(2));
+    releasePins.resolve();
+    await expect(Promise.all([firstPending, secondPending])).resolves.toEqual([true, true]);
+    await __testOnly_waitForPinStreamingCardIdle();
+  });
+
   it('bounds same-chat bot-wide cleanup to at most 20 concurrent Unpins', async () => {
     const sessions = Array.from({ length: 45 }, (_, index) =>
       makeDs(`om_cleanup_${index}`, undefined, `pin-cleanup-${index}`, `om_cleanup_root_${index}`));
