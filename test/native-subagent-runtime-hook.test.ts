@@ -247,9 +247,17 @@ const spawnPayload = {
 
 describe('native-subagent-runtime-hook CLI', () => {
   afterEach(() => { capturedRequests = []; });
-  it('is a no-op for unrelated tools and malformed or oversized stdin', async () => {
+  it('is a no-op for unrelated tools without contacting the policy server', async () => {
+    const result = await runHook(JSON.stringify({ ...spawnPayload, tool_name: 'Bash' }));
+
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe('');
+    expect(result.stderr).toBe('');
+    expect(capturedRequests).toHaveLength(0);
+  });
+
+  it('is a no-op for malformed or oversized stdin', async () => {
     for (const input of [
-      JSON.stringify({ ...spawnPayload, tool_name: 'Bash' }),
       '{bad json',
       JSON.stringify({ ...spawnPayload, padding: 'secret-never-echo'.repeat(100_000) }),
     ]) {
