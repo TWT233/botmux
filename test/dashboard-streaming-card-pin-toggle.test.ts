@@ -111,11 +111,15 @@ describe('group manage streaming-card pin rows', () => {
     if (key === 'groups.pinStreamingCardDisabled') return 'This chat does not pin the live card.';
     if (key === 'groups.pinStreamingCardSaving') return 'Saving…';
     if (key === 'groups.pinStreamingCardSaved') return 'Saved';
-    if (key === 'groups.pinStreamingCardSaveFailed') return `Save failed: ${String(vars?.error ?? '')}`;
+    if (key === 'groups.pinStreamingCardSaveFailed') {
+      return `Save failed: ${String(Object.prototype.hasOwnProperty.call(vars ?? {}, 'error') ? vars?.error : '{error}')}`;
+    }
     if (key === 'groups.pinStreamingCard') return 'Pin current live card';
     if (key === 'groups.pinStreamingCardDescription') return 'Only affects the current public live card for this chat.';
     if (key === 'groups.pinStreamingCardHelp') return 'Uses the exact group-level override route.';
-    if (key === 'groups.pinStreamingCardRefreshFailed') return `Saved, but refresh failed: ${String(vars?.error ?? '')}`;
+    if (key === 'groups.pinStreamingCardRefreshFailed') {
+      return `Saved, but refresh failed: ${String(Object.prototype.hasOwnProperty.call(vars ?? {}, 'error') ? vars?.error : '{error}')}`;
+    }
     if (key === 'groups.oncall') return 'Oncall Mode';
     if (key === 'groups.oncallHelp') return 'Oncall help';
     if (key === 'groups.leaveTitle') return 'Select Bots to Leave';
@@ -183,6 +187,10 @@ describe('group manage streaming-card pin rows', () => {
       }),
     );
     expect(onReloadGroups).toHaveBeenCalledWith({ force: true });
+    const status = renderer.root.findByProps({ 'data-pin-status': 'cli_a' });
+    expect(status.children.join('')).toBe('Saved');
+    expect(String(status.props.className ?? '')).toContain('hint-ok');
+    expect(String(status.props.className ?? '')).not.toContain('hint-warn-inline');
   });
 
   it('disables the row while saving and rolls the toggle back when the save fails', async () => {
@@ -233,7 +241,10 @@ describe('group manage streaming-card pin rows', () => {
 
     expect(renderer.root.findByProps({ 'data-action': 'toggle-pin-streaming-card-group', 'data-app-id': 'cli_a' }).props.checked).toBe(false);
     expect(renderer.root.findByProps({ 'data-action': 'toggle-pin-streaming-card-group', 'data-app-id': 'cli_a' }).props.disabled).toBe(false);
-    expect(renderer.root.findByProps({ 'data-pin-status': 'cli_a' }).children.join('')).toContain('write_failed');
+    const status = renderer.root.findByProps({ 'data-pin-status': 'cli_a' });
+    expect(status.children.join('')).toContain('write_failed');
+    expect(String(status.props.className ?? '')).toContain('hint-warn-inline');
+    expect(String(status.props.className ?? '')).not.toContain('hint-ok');
     expect(onReloadGroups).not.toHaveBeenCalled();
   });
 

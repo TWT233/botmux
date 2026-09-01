@@ -1093,6 +1093,7 @@ function GroupPinStreamingCardRow(props: {
   const [checked, setChecked] = useState(initialChecked);
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState('');
+  const [statusTone, setStatusTone] = useState<'ok' | 'warn' | 'muted'>('muted');
 
   useEffect(() => {
     setChecked(member.pinStreamingCardChatEnabled === true);
@@ -1112,24 +1113,29 @@ function GroupPinStreamingCardRow(props: {
     setChecked(nextChecked);
     setSaving(true);
     setStatus(tr('groups.pinStreamingCardSaving'));
+    setStatusTone('warn');
     try {
       const res = await setGroupPinStreamingCard(chat.chatId, member.larkAppId, nextChecked);
       if (!res.ok) {
         setChecked(previous);
         setStatus(tr('groups.pinStreamingCardSaveFailed', { error: responseErrorText(res) }));
+        setStatusTone('warn');
         return;
       }
       setStatus(tr('groups.pinStreamingCardSaved'));
+      setStatusTone('ok');
       try {
         await props.onSaved();
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         setStatus(tr('groups.pinStreamingCardRefreshFailed', { error: message }));
+        setStatusTone('warn');
       }
     } catch (error) {
       setChecked(previous);
       const message = error instanceof Error ? error.message : String(error);
       setStatus(tr('groups.pinStreamingCardSaveFailed', { error: message }));
+      setStatusTone('warn');
     } finally {
       setSaving(false);
     }
@@ -1152,15 +1158,7 @@ function GroupPinStreamingCardRow(props: {
         detailTone={detailTone}
         detailAttrs={{ 'data-pin-master-state': masterEnabled ? 'on' : 'off' }}
         status={status}
-        statusTone={
-          status.startsWith(tr('groups.pinStreamingCardRefreshFailed'))
-            ? 'warn'
-            : status.startsWith(tr('groups.pinStreamingCardSaved'))
-              ? 'ok'
-              : status
-                ? 'warn'
-                : 'muted'
-        }
+        statusTone={statusTone}
         statusAttrs={{ 'data-pin-status': member.larkAppId }}
         dataAction="toggle-pin-streaming-card-group"
         dataAppId={member.larkAppId}
