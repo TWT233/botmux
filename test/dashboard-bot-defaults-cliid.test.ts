@@ -137,6 +137,24 @@ describe('Codex-compatible runtime editor', () => {
     return { renderer, root: renderer.root, patchBot };
   }
 
+  async function flushEffects(cycles = 1): Promise<void> {
+    for (let i = 0; i < cycles; i += 1) {
+      await act(async () => {
+        await new Promise<void>(resolve => queueMicrotask(resolve));
+      });
+    }
+  }
+
+  async function waitForObserved<T>(read: () => T, done: (value: T) => boolean, tries = 20): Promise<T> {
+    let last = read();
+    for (let i = 0; i < tries; i += 1) {
+      if (done(last)) return last;
+      await flushEffects();
+      last = read();
+    }
+    throw new Error(`condition not reached: ${JSON.stringify(last)}`);
+  }
+
   it('defaults old payloads to Official Codex and keeps wrapper or non-Codex selections unchanged', () => {
     const official = renderAgent({ cliId: 'codex' });
     expect(official.root.findByProps({ 'data-input': 'agentRuntimeMode' }).props.value).toBe('official');
@@ -532,55 +550,115 @@ describe('Codex-compatible runtime editor', () => {
 
   it('does not erase a valid loaded native custom effort during initial model hydration', async () => {
     const previousFetch = globalThis.fetch;
-    let releaseModels!: () => void;
-    const modelsReady = new Promise<void>(resolve => { releaseModels = resolve; });
     (globalThis as any).fetch = vi.fn(async (_url: string, _init?: any) => {
       if (String(_url).includes('/api/cli-options/models')) {
-        await modelsReady;
         return { ok: true, status: 200, json: async () => ({ models: ['DeepSeek-V4-Pro'], source: 'live' }) } as any;
       }
       throw new Error('save should not be attempted');
     });
     try {
-      const { root } = renderAgent({
-        cliId: 'traex',
-        agentSelectionKey: 'traex',
-        nativeSubagentRuntime: {
-          model: { mode: 'custom', value: 'DeepSeek-V4-Pro' },
-          reasoningEffort: { mode: 'custom', value: 'high' },
-        },
+      let renderer!: TestRenderer.ReactTestRenderer;
+      const patchBot = vi.fn();
+      act(() => {
+        renderer = TestRenderer.create(React.createElement(BotAgentSection, {
+          bot: { larkAppId: 'cli_runtime', cliId: 'traex', agentSelectionKey: 'traex', model: '' },
+          sessionFallback: 'codex',
+          cliState,
+          patchBot,
+        }));
+      });
+      await flushEffects(2);
+
+      act(() => {
+        renderer.update(React.createElement(BotAgentSection, {
+          bot: {
+            larkAppId: 'cli_runtime',
+            cliId: 'traex',
+            agentSelectionKey: 'traex',
+            model: '',
+            nativeSubagentRuntime: {
+              model: { mode: 'custom', value: 'DeepSeek-V4-Pro' },
+              reasoningEffort: { mode: 'custom', value: 'high' },
+            },
+          },
+          sessionFallback: 'codex',
+          cliState,
+          patchBot,
+        }));
       });
 
-      await act(async () => {
-        releaseModels();
-        await Promise.resolve();
-        await Promise.resolve();
-      });
+      const root = renderer.root;
+      await waitForObserved(
+        () => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value,
+        value => value === 'custom',
+      );
+      const effortValue = await waitForObserved(
+        () => root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.value,
+        value => value === 'high',
+      );
 
       expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('custom');
-      expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffort' }).props.value).toBe('high');
+      expect(effortValue).toBe('high');
     } finally {
       (globalThis as any).fetch = previousFetch;
     }
   });
 
   it('resets native custom effort to pass-through when the custom model no longer allows it', async () => {
-    const { root } = renderAgent({
-      cliId: 'traex',
-      agentSelectionKey: 'traex',
-      nativeSubagentRuntime: {
-        model: { mode: 'custom', value: 'GPT-5.6-Sol' },
-        reasoningEffort: { mode: 'custom', value: 'ultra' },
-      },
+    const previousFetch = globalThis.fetch;
+    const requests: any[] = [];
+    (globalThis as any).fetch = vi.fn(async (_url: string, init?: any) => {
+      if (String(_url).includes('/api/cli-options/models')) {
+        return { ok: true, status: 200, json: async () => ({ models: ['GPT-5.6-Sol', 'DeepSeek-V4-Pro'], source: 'live' }) } as any;
+      }
+      const body = JSON.parse(init?.body ?? '{}');
+      requests.push(body);
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          ok: true,
+          cliId: body.cliId,
+          model: body.model ?? '',
+          reasoningEffort: body.reasoningEffort ?? '',
+          selectionKey: body.cliId,
+          nativeSubagentRuntime: body.nativeSubagentRuntime ?? null,
+        }),
+      } as any;
     });
+    try {
+      const { root } = renderAgent({
+        cliId: 'traex',
+        agentSelectionKey: 'traex',
+        nativeSubagentRuntime: {
+          model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+          reasoningEffort: { mode: 'custom', value: 'ultra' },
+        },
+      });
 
-    await act(async () => {
-      root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.onChange({ currentTarget: { value: 'DeepSeek-V4-Pro' } });
-      await Promise.resolve();
-    });
+      act(() => root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.onChange({ currentTarget: { value: 'DeepSeek-V4-Pro' } }));
 
-    expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
-    expect(root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
+      await waitForObserved(
+        () => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value,
+        value => value === 'passthrough',
+      );
+
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await flushEffects(2);
+      });
+
+      expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
+      expect(root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
+      expect(requests).toHaveLength(1);
+      expect(requests[0]).toMatchObject({
+        cliId: 'traex',
+        nativeSubagentRuntime: { model: { mode: 'custom', value: 'DeepSeek-V4-Pro' } },
+      });
+      expect(requests[0].nativeSubagentRuntime).not.toHaveProperty('reasoningEffort');
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
   });
 
   it('does not let hidden native draft validation block saving another cli', async () => {
@@ -606,9 +684,13 @@ describe('Codex-compatible runtime editor', () => {
 
       await act(async () => {
         root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
-        await Promise.resolve();
-        await Promise.resolve();
+        await flushEffects(2);
       });
+
+      await waitForObserved(
+        () => root.findByProps({ 'data-agent-status': '' }).children.join(''),
+        text => text.includes('已保存'),
+      );
 
       expect(requests).toEqual([{ cliId: 'codex', model: '', reasoningEffort: '', cliRuntime: null }]);
       expect(root.findByProps({ 'data-agent-status': '' }).children.join('')).toContain('已保存');
