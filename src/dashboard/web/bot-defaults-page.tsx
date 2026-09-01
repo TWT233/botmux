@@ -2236,14 +2236,16 @@ export function BotAgentSection(props: {
       turnTimeoutField = parsed; // number (minutes→ms) or '' (clear)
     }
     const trimmedNativeModel = nativeModel.trim();
-    const nextNativePolicyErrors: NativePolicyErrors = {
-      model: nativeModelMode === 'custom' && !trimmedNativeModel ? tr('botDefaults.nativeSubagentModelRequired') : null,
-      effort: nativeEffortMode === 'custom' && !nativeEffort ? tr('botDefaults.nativeSubagentReasoningEffortRequired') : null,
-    };
-    if (nextNativePolicyErrors.model || nextNativePolicyErrors.effort) {
-      setNativePolicyErrors(nextNativePolicyErrors);
-      setAgentStatus({ text: `✗ ${tr('botDefaults.nativeSubagentIncomplete')}` });
-      return;
+    if (cliKey === 'traex') {
+      const nextNativePolicyErrors: NativePolicyErrors = {
+        model: nativeModelMode === 'custom' && !trimmedNativeModel ? tr('botDefaults.nativeSubagentModelRequired') : null,
+        effort: nativeEffortMode === 'custom' && !nativeEffort ? tr('botDefaults.nativeSubagentReasoningEffortRequired') : null,
+      };
+      if (nextNativePolicyErrors.model || nextNativePolicyErrors.effort) {
+        setNativePolicyErrors(nextNativePolicyErrors);
+        setAgentStatus({ text: `✗ ${tr('botDefaults.nativeSubagentIncomplete')}` });
+        return;
+      }
     }
     setAgentBusy(true);
     try {
@@ -2504,13 +2506,19 @@ export function BotAgentSection(props: {
     }
   }, [nativeEffort, nativeEffortMode, nativePolicyErrors.effort]);
   useEffect(() => {
-    if (nativeEffortMode === 'custom' && nativeEffort && !nativeReasoningEffortOptions.includes(nativeEffort)) {
+    if (
+      cliKey === 'traex'
+      && nativePolicyTouched
+      && nativeEffortMode === 'custom'
+      && nativeEffort
+      && !nativeReasoningEffortOptions.includes(nativeEffort)
+    ) {
       setNativeEffortMode('passthrough');
       setNativeEffort('');
       setNativePolicyTouched(true);
       setNativePolicyErrors(current => ({ ...current, effort: null }));
     }
-  }, [nativeEffort, nativeEffortMode, nativeReasoningEffortOptions]);
+  }, [cliKey, nativeEffort, nativeEffortMode, nativePolicyTouched, nativeReasoningEffortOptions]);
   // Old dashboard payloads can omit agentSelectionKey while still carrying a
   // legacy wrapperCli. Keep the custom-runtime editor hidden until the user
   // explicitly selects bare Codex; structured runtimes and wrappers cannot mix.
