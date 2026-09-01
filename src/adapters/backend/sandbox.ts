@@ -31,7 +31,6 @@ import {
   MCP_GATEWAY_REQUIRED_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../../core/plugins/mcp/environment.js';
-import { resolveStableBotmuxWrapperPath } from '../../core/botmux-wrapper.js';
 
 /** Verify (and best-effort auto-install) bubblewrap so the user needn't
  *  pre-install. Installs via the system package manager when the daemon can
@@ -665,12 +664,8 @@ export function prepareDirectSandbox(opts: {
   cliArgs: string[];
   /** Absolute Botmux command paths already persisted in CLI MCP configs.
    * Bind the worker-generated relay shim at those exact paths so a stale or
-   * tampered host wrapper cannot replace the trusted gateway entry. The stable
-   * daemon-written wrapper is excluded because native hooks must execute it. */
+   * tampered host wrapper cannot replace the trusted gateway entry. */
   trustedBotmuxCommandPaths?: readonly string[];
-  /** Test seam for the stable wrapper exclusion; production resolves it from
-   * the same environment used by the daemon writer. */
-  stableBotmuxWrapperPath?: string;
   /** Worker-owned Unix socket for the credential-bearing MCP Gateway. */
   mcpGatewaySocketPath?: string;
   /** CANONICAL lark-cli data root (the parent of the frozen keystore dir, i.e.
