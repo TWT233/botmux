@@ -167,6 +167,29 @@ describe('plugin MCP Gateway', () => {
     }
   });
 
+  it('omits undefined frozen environment entries from downstream plugin processes', async () => {
+    installFixturePlugin('plugin-a', 'alpha');
+    const frozenManifest = refreshSessionMcpRuntimeManifest({
+      sessionId: 'undefined-frozen-env',
+      pluginIds: ['plugin-a'],
+      dataDir: join(home, '.botmux', 'data'),
+    });
+    const gateway = new PluginMcpGateway(undefined, process.env, {
+      manifest: frozenManifest,
+      frozenSessionEnv: { FROZEN_SESSION_ENV: undefined },
+    });
+    const client = new Client({ name: 'gateway-undefined-env-test', version: '1.0.0' });
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    await Promise.all([gateway.connect(serverTransport), client.connect(clientTransport)]);
+    try {
+      const result = await client.callTool({ name: 'echo', arguments: {} });
+      expect((result.content[0] as { text: string }).text).toContain(':frozen=:owner=');
+    } finally {
+      await client.close();
+      await gateway.close();
+    }
+  });
+
   it('isolates a failed downstream server', async () => {
     const connectSpy = vi.spyOn(Client.prototype, 'connect');
     installFixturePlugin('plugin-a', 'alpha');

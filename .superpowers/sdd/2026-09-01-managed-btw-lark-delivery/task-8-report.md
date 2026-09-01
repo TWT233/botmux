@@ -78,3 +78,39 @@ git diff --check
 
 The focused selector passed: 4 files / 64 tests.  The fresh build and
 TypeScript check passed; `git diff --check` produced no output.
+
+## Fix round 2/5: tighten MCP SDK environment type boundary
+
+### RED evidence
+
+- The integration controller reported `TS2322` at the MCP SDK stdio transport:
+  `ProcessEnv` permits `undefined`, while the SDK requires
+  `Record<string, string>`.  The local pre-fix exact compiler command completed
+  with exit 0 and no output, so the durable fix makes the stricter boundary
+  explicit instead of depending on the local compiler's inference.
+- A real plugin fixture regression covers a frozen environment entry whose
+  value is `undefined`; the downstream process must observe an omitted value,
+  never the literal string `undefined`.
+
+### Green behavior
+
+- Gateway stdio launch now converts its composed environment to
+  `Record<string, string>` immediately before entering the MCP SDK, eliding
+  only `undefined` entries.  Frozen environment, descriptor, session, and
+  owner precedence are unchanged.
+
+### Final command results
+
+```text
+./node_modules/.bin/vitest run --project unit test/plugin-mcp-gateway.test.ts -t 'omits undefined frozen environment|keeps non-managed gateways'
+exit 0 — 2 tests passed
+
+./node_modules/.bin/tsc --noEmit --pretty false
+exit 0 — no output
+
+bun run build
+exit 0 — public-domain and embedded-asset audits passed
+
+git diff --check
+exit 0 — no output
+```
