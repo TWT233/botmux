@@ -23,7 +23,7 @@
  */
 
 import { describe, it, expect, afterEach } from 'vitest';
-import { resolveCliSpawn } from '../src/core/self-spawn.js';
+import { resolveCliSpawn, resolveEntrySpawn } from '../src/core/self-spawn.js';
 
 const REAL_ARGV1 = process.argv[1];
 
@@ -63,5 +63,20 @@ describe('resolveCliSpawn', () => {
     expect(resolveCliSpawn('/x/cli.js', []).args).toEqual(['/x/cli.js']);
     asCompiledBinary();
     expect(resolveCliSpawn('/x/cli.js', []).args).toEqual([]);
+  });
+});
+
+describe('resolveEntrySpawn("btw-runtime")', () => {
+  it('uses the Node dist entry in ordinary source installs', () => {
+    const { command, args } = resolveEntrySpawn('btw-runtime', '/opt/botmux/dist');
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual(['/opt/botmux/dist/index-btw-runtime.js']);
+  });
+
+  it('uses the hidden subcommand in the compiled binary', () => {
+    asCompiledBinary();
+    const { command, args } = resolveEntrySpawn('btw-runtime', '/ignored/dist');
+    expect(command).toBe(process.execPath);
+    expect(args).toEqual(['__btw-runtime']);
   });
 });

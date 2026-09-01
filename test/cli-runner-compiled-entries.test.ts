@@ -37,7 +37,7 @@ import { describe, it, expect, afterEach } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { RUNNER_ENTRIES, runnerArgv0, type BotmuxEntry } from '../src/core/self-spawn.js';
+import { RUNNER_ENTRIES, resolveEntrySpawn, runnerArgv0, type BotmuxEntry } from '../src/core/self-spawn.js';
 import { createCodexAppAdapter } from '../src/adapters/cli/codex-app.js';
 import { createDshAdapter } from '../src/adapters/cli/dsh.js';
 import { createMiraAdapter } from '../src/adapters/cli/mira.js';
@@ -93,6 +93,14 @@ describe('CLI-adapter runners — compiled binary form', () => {
     // Guards the reverse error: RUNNER_ENTRIES must not quietly grow to include
     // fleet entries, whose launch path is resolveEntrySpawn, not this one.
     expect([...RUNNER_ENTRIES]).toEqual(['codex-app-runner', 'dsh-runner', 'mira-runner', 'mir-runner']);
+  });
+
+  it('wires the btw-runtime fleet entry through resolveEntrySpawn and cli static dispatch', () => {
+    const cliSource = readFileSync(resolve(REPO_ROOT, 'src', 'cli.ts'), 'utf-8');
+    asCompiledBinary();
+    expect(resolveEntrySpawn('btw-runtime', '/ignored/dist').args).toEqual(['__btw-runtime']);
+    expect(cliSource).toContain(`__entrySubcommand === 'btw-runtime'`);
+    expect(cliSource).toContain(`await import('./index-btw-runtime.js')`);
   });
 });
 
