@@ -29,7 +29,7 @@ import { persistStreamCardState, rememberLastCliInput } from './session-manager.
 import { spawnWorker, isStandaloneBinary, WORKER_ENTRY_SUBCOMMAND } from './self-spawn.js';
 import { resolveSessionLaunchModel } from './session-model.js';
 import { fallbackTurnId, frozenReplyContextForTurn, isSubstituteTurn, pickTurnReplyTarget, rehomeReplyTargetState, replyTargetKey } from './reply-target.js';
-import { updateMessage, deleteMessage, pinMessage, unpinMessage, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, getMessageChatId, MessageWithdrawnError } from '../im/lark/client.js';
+import { updateMessage, deleteMessage, pinMessage, unpinMessage, listChatPins, sendEphemeralCard, sendUserMessage, addReaction, removeReaction, getMessageChatId, MessageWithdrawnError } from '../im/lark/client.js';
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildTuiPromptFailedCard, buildRelayedFrozenCard, buildTurnFailedCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { codexServiceTierBadge } from '../services/codex-service-tier.js';
 import { cliModelSupportsReasoningEffort, isConfigurableReasoningCliId } from '../services/codex-reasoning-effort.js';
@@ -2414,6 +2414,12 @@ type PendingBotStreamingCardReconcileRequest = {
   enabled: boolean;
   chatId?: string;
   authoritativeCleanupBySession: Map<string, { chatId: string; ids: string[] }>;
+  restoreCandidatesBySession?: Map<string, {
+    chatId: string;
+    currentId?: string;
+    frozenIds: string[];
+    enabled: boolean;
+  }>;
 };
 
 type PendingBotStreamingCardReconcile = {
@@ -2446,7 +2452,7 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
     while (true) {
       const request = state.pending.shift();
       if (!request) break;
-      const { enabled, chatId, authoritativeCleanupBySession } = request;
+      const { enabled, chatId, authoritativeCleanupBySession, restoreCandidatesBySession } = request;
       // An on->off transition grants authority over the exact card IDs visible
       // at that transition.  This work must not depend on a later active-registry
       // lookup: close/removal can happen while an earlier reconcile request is
@@ -2469,6 +2475,13 @@ async function drainBotStreamingCardReconcileQueue(larkAppId: string): Promise<v
             /* captured cleanup remains fail-open */
           }
         }));
+      }
+      if (restoreCandidatesBySession) {
+        await reconcileRestoredStreamingCardPinsForRequest(
+          larkAppId,
+          restoreCandidatesBySession,
+        );
+        continue;
       }
       const sessions = snapshotBotStreamingCardReconcileSessions(larkAppId);
       const targetSessions = chatId === undefined
@@ -2530,6 +2543,140 @@ function snapshotAuthoritativeCleanupIdsForBotWideOff(
   );
 }
 
+function snapshotRestoreCandidatesForBot(
+  larkAppId: string,
+): Map<string, {
+  chatId: string;
+  currentId?: string;
+  frozenIds: string[];
+  enabled: boolean;
+}> {
+  return new Map(
+    snapshotBotStreamingCardReconcileSessions(larkAppId)
+      .filter(ds => retainsLarkStreamingCardTransport(ds))
+      .map((ds) => {
+        const currentId = isRealStreamingCardId(ds.streamCardId) ? ds.streamCardId : undefined;
+        const frozenIds = snapshotStreamingCardIds(ds).filter(id => id !== currentId);
+        return [ds.session.sessionId, {
+          chatId: ds.chatId,
+          currentId,
+          frozenIds,
+          enabled: pinStreamingCardEnabledFor(ds.larkAppId, ds.chatId),
+        }];
+      }),
+  );
+}
+
+function sameAppRemoteProofIds(
+  larkAppId: string,
+  candidateIds: ReadonlySet<string>,
+  remotePins: Awaited<ReturnType<typeof listChatPins>>,
+): Set<string> {
+  let botOpenId: string | undefined;
+  try {
+    botOpenId = getBot(larkAppId).botOpenId;
+  } catch {
+    botOpenId = undefined;
+  }
+  if (!botOpenId) return new Set();
+  const proven = new Set<string>();
+  for (const pin of remotePins) {
+    if (pin.operatorIdType !== 'open_id' || pin.operatorId !== botOpenId) continue;
+    if (!candidateIds.has(pin.messageId)) continue;
+    proven.add(pin.messageId);
+  }
+  return proven;
+}
+
+async function reconcileRestoredStreamingCardPinsForRequest(
+  larkAppId: string,
+  restoreCandidatesBySession: Map<string, {
+    chatId: string;
+    currentId?: string;
+    frozenIds: string[];
+    enabled: boolean;
+  }>,
+): Promise<void> {
+  if (restoreCandidatesBySession.size === 0) return;
+  const liveSessions = new Map(
+    snapshotBotStreamingCardReconcileSessions(larkAppId)
+      .map(ds => [ds.session.sessionId, ds] as const),
+  );
+  const byChat = new Map<string, Array<{
+    owner: StreamingCardOwner;
+    currentId?: string;
+    frozenIds: string[];
+    enabled: boolean;
+  }>>();
+  for (const [sessionId, candidate] of restoreCandidatesBySession) {
+    if (!retainsLarkStreamingCardTransportFor(larkAppId, candidate.chatId)) continue;
+    const ds = liveSessions.get(sessionId);
+    if (!ds) continue;
+    const entries = byChat.get(candidate.chatId) ?? [];
+    entries.push({
+      owner: { larkAppId, sessionId },
+      currentId: candidate.currentId,
+      frozenIds: candidate.frozenIds,
+      enabled: candidate.enabled,
+    });
+    byChat.set(candidate.chatId, entries);
+  }
+  for (const [chatId, entries] of byChat) {
+    try {
+      const localCandidateIds = new Set(
+        entries.flatMap(entry => [
+          ...(entry.currentId ? [entry.currentId] : []),
+          ...entry.frozenIds,
+        ]).filter(isRealStreamingCardId),
+      );
+      if (localCandidateIds.size === 0) continue;
+      const remotePins = await listChatPins(larkAppId, chatId);
+      const provenIds = sameAppRemoteProofIds(larkAppId, localCandidateIds, remotePins);
+      if (provenIds.size === 0) continue;
+      await Promise.allSettled(entries.map(async (entry) => {
+        const provenCurrent = entry.currentId && provenIds.has(entry.currentId)
+          ? entry.currentId
+          : undefined;
+        const provenFrozen = entry.frozenIds.filter(id => provenIds.has(id));
+        if (entry.enabled) {
+          if (!provenCurrent) return;
+          rememberOwnedStreamingCard(entry.owner, provenCurrent);
+          const pinned = await queueStreamingCardMessageMutation(larkAppId, provenCurrent, async () => {
+            try {
+              const ok = await pinMessage(larkAppId, provenCurrent);
+              if (!ok) return false;
+              rememberOwnedStreamingCard(entry.owner, provenCurrent);
+              return true;
+            } catch {
+              return false;
+            }
+          });
+          if (!pinned || provenFrozen.length === 0) return;
+          await unpinStreamingCardIds(larkAppId, provenFrozen, entry.owner);
+          return;
+        }
+        if (provenCurrent) rememberOwnedStreamingCard(entry.owner, provenCurrent);
+        for (const frozenId of provenFrozen) rememberOwnedStreamingCard(entry.owner, frozenId);
+        // Maintainer intent: bot-wide OFF still excludes chats that had already
+        // opted out from the authoritative local snapshot, but a restart-time
+        // remote same-app proof may retry cleanup strictly inside those
+        // enqueue-time local candidates. This adds authorization only; it must
+        // never expand cleanup beyond the locally captured ids.
+        await unpinStreamingCardIds(
+          larkAppId,
+          [
+            ...(provenCurrent ? [provenCurrent] : []),
+            ...provenFrozen,
+          ],
+          entry.owner,
+        );
+      }));
+    } catch {
+      /* one chat's remote proof failure must not block other chats */
+    }
+  }
+}
+
 /** Fire-and-forget bot-wide reconciliation so configuration mutation remains
  * responsive even when Lark Pin APIs are slow or unavailable. */
 export function reconcileBotStreamingCardPins(
@@ -2551,6 +2698,28 @@ export function reconcileBotStreamingCardPins(
     chatId,
     authoritativeCleanupBySession,
   };
+  if (state) {
+    state.pending.push(request);
+    if (!state.running) trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
+    return;
+  }
+  pendingBotStreamingCardReconciles.set(larkAppId, {
+    pending: [request],
+    running: false,
+  });
+  trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
+}
+
+/** Queue restart-time streaming-card provenance recovery behind the same
+ * per-bot FIFO used by config-driven reconciliation. Remote discovery may only
+ * authorize work within the enqueue-time local candidate set captured here. */
+export function reconcileRestoredStreamingCardPins(larkAppId: string): void {
+  const request: PendingBotStreamingCardReconcileRequest = {
+    enabled: false,
+    authoritativeCleanupBySession: new Map<string, { chatId: string; ids: string[] }>(),
+    restoreCandidatesBySession: snapshotRestoreCandidatesForBot(larkAppId),
+  };
+  const state = pendingBotStreamingCardReconciles.get(larkAppId);
   if (state) {
     state.pending.push(request);
     if (!state.running) trackPinStreamingCardTask(drainBotStreamingCardReconcileQueue(larkAppId));
