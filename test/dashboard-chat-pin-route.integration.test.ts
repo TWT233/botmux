@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { once } from 'node:events';
-import { createServer as createNetServer } from 'node:net';
 import { join, resolve } from 'node:path';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -9,6 +8,7 @@ import type { ChildProcess } from 'node:child_process';
 
 import { spawnTsScript } from './helpers/ts-runner.js';
 import { loadOrCreatePersistedToken } from '../src/dashboard/auth.js';
+import { loopbackFetch, type LoopbackFetchInit } from '../src/core/loopback-fetch.js';
 
 const DASHBOARD_ENTRY = resolve('src/index-dashboard.ts');
 
@@ -31,55 +31,70 @@ async function closeServer(server: Server | undefined): Promise<void> {
   await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 }
 
-async function waitForFile(path: string, timeoutMs = 10_000): Promise<string> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      return readFileSync(path, 'utf8').trim();
-    } catch {
-      await new Promise(resolveSleep => setTimeout(resolveSleep, 50));
-    }
+type LoopbackResponse = {
+  status: number;
+  bodyText: string;
+};
+
+async function requestLoopback(
+  url: string,
+  init: LoopbackFetchInit = {},
+): Promise<LoopbackResponse> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  timeout.unref();
+  try {
+    const response = await loopbackFetch(url, { ...init, signal: controller.signal });
+    return { status: response.status, bodyText: await response.text() };
+  } finally {
+    clearTimeout(timeout);
   }
-  throw new Error(`timeout waiting for file ${path}`);
 }
 
-async function reservePort(): Promise<number> {
-  const server = createNetServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = (server.address() as import('node:net').AddressInfo).port;
-  await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-  return port;
-}
-
-async function waitForDashboard(base: string, child: ChildProcess, logs: () => string, timeoutMs = 15_000): Promise<void> {
+async function waitForDashboardPort(
+  portPath: string,
+  child: ChildProcess,
+  logs: () => string,
+  timeoutMs = 15_000,
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`dashboard exited early\n${logs()}`);
     }
     try {
-      const response = await fetch(`${base}/__health`);
-      if (response.ok) return;
+      const port = Number(readFileSync(portPath, 'utf8').trim());
+      if (Number.isInteger(port) && port > 0 && port <= 65_535) {
+        const response = await requestLoopback(`http://127.0.0.1:${port}/__health`);
+        if (response.status === 200) return port;
+      }
     } catch {
       // still booting
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  throw new Error(`timeout waiting for dashboard health\n${logs()}`);
+  throw new Error(`timeout waiting for dashboard port/health\n${logs()}`);
 }
 
 async function stopChild(child: ChildProcess | undefined): Promise<void> {
-  if (!child) return;
-  if (child.exitCode !== null || child.signalCode !== null) return;
+  if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closePromise = once(child, 'close');
   child.kill('SIGTERM');
-  await Promise.race([
-    once(child, 'close'),
-    new Promise(resolveTimeout => setTimeout(resolveTimeout, 10_000)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill('SIGKILL');
-    await once(child, 'close');
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      closePromise.then(() => 'closed' as const),
+      new Promise<'timeout'>(resolveTimeout => {
+        timeout = setTimeout(() => resolveTimeout('timeout'), 10_000);
+        timeout.unref();
+      }),
+    ]);
+    if (outcome === 'timeout' && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await closePromise;
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -105,7 +120,6 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
     const homeDir = join(rootDir, 'home');
     const botmuxDir = join(homeDir, '.botmux');
     const dataDir = join(botmuxDir, 'data');
-    const dashboardPort = await reservePort();
     const botsConfigPath = join(botmuxDir, 'bots.json');
     const registryDir = join(dataDir, 'dashboard-daemons');
     mkdirSync(registryDir, { recursive: true });
@@ -203,7 +217,9 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
         USERPROFILE: homeDir,
         SESSION_DATA_DIR: dataDir,
         BOTS_CONFIG: botsConfigPath,
-        BOTMUX_DASHBOARD_PORT: String(dashboardPort),
+        // Let the dashboard's real listenWithProbe own selection and publish
+        // the exact bound port to the isolated HOME; no reserve/release race.
+        BOTMUX_DASHBOARD_PORT: '7891',
         BOTMUX_DASHBOARD_HOST: '127.0.0.1',
         BOTMUX_DASHBOARD_PUBLIC_READONLY: 'false',
       },
@@ -217,14 +233,18 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
 
     const tokenPath = join(botmuxDir, '.dashboard-token');
     const dashboardToken = loadOrCreatePersistedToken(tokenPath);
+    const dashboardPort = await waitForDashboardPort(
+      join(botmuxDir, '.dashboard-port'),
+      dashboardChild,
+      () => `${stdout}\n${stderr}`,
+    );
     const base = `http://127.0.0.1:${dashboardPort}`;
-    await waitForDashboard(base, dashboardChild, () => `${stdout}\n${stderr}`);
 
-    const firstGroups = await fetch(`${base}/api/groups`, {
+    const firstGroups = await requestLoopback(`${base}/api/groups`, {
       headers: { cookie: `botmux_dashboard_token=${dashboardToken}` },
     });
     expect(firstGroups.status, stderr).toBe(200);
-    const firstGroupsPayload = await firstGroups.json() as {
+    const firstGroupsPayload = JSON.parse(firstGroups.bodyText) as {
       chats: Array<{
         chatId: string;
         name: string;
@@ -250,7 +270,7 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
     expect(absentBot).not.toHaveProperty('pinStreamingCardChatEnabled');
     expect(absentBot).not.toHaveProperty('pinStreamingCardEffectiveEnabled');
 
-    const writeResponse = await fetch(
+    const writeResponse = await requestLoopback(
       `${base}/api/groups/${encodeURIComponent('oc topic/with slash')}/pin-streaming-card/${encodeURIComponent('cli test-app')}`,
       {
         method: 'PUT',
@@ -262,7 +282,12 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
       },
     );
     expect(writeResponse.status, stderr).toBe(202);
-    expect(await writeResponse.json()).toEqual({ ok: true, enabled: false, changed: true, source: 'fake-daemon' });
+    expect(JSON.parse(writeResponse.bodyText)).toEqual({
+      ok: true,
+      enabled: false,
+      changed: true,
+      source: 'fake-daemon',
+    });
 
     expect(fakePinWrites).toHaveLength(1);
     expect(fakePinWrites[0]).toMatchObject({
@@ -272,11 +297,11 @@ describe('dashboard real HTTP route · PUT /api/groups/:chatId/pin-streaming-car
     });
     expect(String(fakePinWrites[0].headers['content-type'])).toContain('application/json');
 
-    const secondGroups = await fetch(`${base}/api/groups`, {
+    const secondGroups = await requestLoopback(`${base}/api/groups`, {
       headers: { cookie: `botmux_dashboard_token=${dashboardToken}` },
     });
     expect(secondGroups.status, stderr).toBe(200);
-    const secondGroupsPayload = await secondGroups.json() as {
+    const secondGroupsPayload = JSON.parse(secondGroups.bodyText) as {
       chats: Array<{
         chatId: string;
         name: string;
