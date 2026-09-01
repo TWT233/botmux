@@ -722,6 +722,71 @@ describe('btw operation store', () => {
       name.startsWith(`${validDiagnosticName}.corrupt.`))).toBe(false);
   });
 
+  it('preserves exact legacy 24-hex terminal-conflict sidecars while still quarantining malformed lookalikes', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const input = makeBtwPrepareInput();
+    const scope = makeBtwScope();
+    const opId = store.prepareBtw({
+      ...input,
+      requestId: 'om_request_legacy_terminal_conflict',
+    }).operation.btwOpId;
+    const recordPath = store.pathFor(scope, opId);
+    const partitionDir = dirname(recordPath);
+
+    const legacyDiagnosticPath = join(
+      partitionDir,
+      `${opId}.terminal-conflict.0123456789abcdef01234567.json`,
+    );
+    const legacyDiagnosticBytes = `${JSON.stringify({
+      schemaVersion: 1,
+      kind: 'btw_terminal_conflict',
+      btwOpId: opId,
+      scope,
+      existingExecution: {
+        state: 'completed',
+        nativeTurnId: deriveBtwIdentifiers(scope, 'om_request_legacy_terminal_conflict').nativeTurnId,
+        attempt: 1,
+        submissionEpoch: input.parent.runtimeEpoch,
+        frameState: 'acknowledged',
+        answer: 'legacy terminal answer',
+      },
+      incomingTerminal: {
+        status: 'failed',
+        errorCode: 'BTW_LEGACY_CONFLICT',
+        message: 'legacy conflict marker',
+      },
+      detectedAt: FIXED_NOW,
+    }, null, 2)}\n`;
+    writeFileSync(legacyDiagnosticPath, legacyDiagnosticBytes);
+
+    const malformedMarkerPath = join(partitionDir, 'junk.terminal-conflict.ignore.json');
+    writeFileSync(malformedMarkerPath, JSON.stringify({
+      fake: true,
+      why: 'legacy compatibility must not exempt malformed lookalikes',
+    }, null, 2));
+
+    const later = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_after_legacy_terminal_conflict',
+    });
+    expect(later.kind).toBe('created');
+    expect(readFileSync(legacyDiagnosticPath, 'utf8')).toBe(legacyDiagnosticBytes);
+    expect(readdirSync(partitionDir).some(name =>
+      name.startsWith('junk.terminal-conflict.ignore.corrupt.'))).toBe(true);
+    expect(existsSync(malformedMarkerPath)).toBe(false);
+
+    const afterList = readFileSync(legacyDiagnosticPath, 'utf8');
+    void store.listExecutableBtwOperations(input.parent.runtimeEpoch);
+    void store.reconcileBtwOperations({
+      runtimeEpoch: input.parent.runtimeEpoch,
+      liveSessionIds: new Set([scope.botmuxSessionId]),
+    });
+    expect(readFileSync(legacyDiagnosticPath, 'utf8')).toBe(afterList);
+    expect(readdirSync(partitionDir).some(name =>
+      name.startsWith(`${basenameWithoutJson(legacyDiagnosticPath)}.corrupt.`))).toBe(false);
+  });
+
   it('reconciles old epochs and dead sessions without reviving terminal records', () => {
     const dataDir = newDataDir();
     const store = createStore(dataDir);
