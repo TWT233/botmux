@@ -214,43 +214,94 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
 });
 
 describe('readFleetDaemonEnvFile', () => {
-  it('distinguishes an absent optional .env from a read failure', () => {
-    const readTextFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
-    const statFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
+  const errno = (code: string): NodeJS.ErrnoException => Object.assign(new Error(code), { code });
 
-    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({ status: 'missing' });
-    expect(readTextFile).toHaveBeenCalledOnce();
-  });
+  it('loads a replacement that appears during the bounded ENOENT quiet period', () => {
+    let readAttempt = 0;
+    const readTextFile = vi.fn(() => {
+      readAttempt += 1;
+      if (readAttempt < 3) throw errno('ENOENT');
+      return 'WEB_HOST=127.0.0.1';
+    });
+    const statFile = vi.fn(() => { throw errno('ENOENT'); });
+    const waits: number[] = [];
 
-  it('loads a file that appears immediately after an initial ENOENT probe', () => {
-    const readTextFile = vi.fn(() => 'WEB_HOST=127.0.0.1');
-    const statFile = vi.fn(() => { throw Object.assign(new Error('ENOENT'), { code: 'ENOENT' }); });
-
-    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({
       status: 'loaded',
       text: 'WEB_HOST=127.0.0.1',
     });
+    expect(waits).toEqual([10, 25]);
+    expect(readTextFile).toHaveBeenCalledTimes(3);
+    expect(statFile).toHaveBeenCalledTimes(2);
+  });
+
+  it('classifies stable all-ENOENT rounds as missing after the injected finite window', () => {
+    const readTextFile = vi.fn(() => { throw errno('ENOENT'); });
+    const statFile = vi.fn(() => { throw errno('ENOENT'); });
+    const waits: number[] = [];
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
+      retryDelaysMs: [4, 9],
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({ status: 'missing' });
+    expect(waits).toEqual([4, 9]);
+    expect(readTextFile).toHaveBeenCalledTimes(3);
+    expect(statFile).toHaveBeenCalledTimes(3);
+  });
+
+  it('does not classify the file as missing when any ENOENT round observes it present', () => {
+    const readTextFile = vi.fn(() => { throw errno('ENOENT'); });
+    const statFile = vi.fn()
+      .mockImplementationOnce(() => ({}))
+      .mockImplementation(() => { throw errno('ENOENT'); });
+    const waits: number[] = [];
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({ status: 'failed' });
+    expect(waits).toEqual([10, 25]);
+    expect(readTextFile).toHaveBeenCalledTimes(3);
+    expect(statFile).toHaveBeenCalledTimes(3);
+  });
+
+  it('reports a non-ENOENT read error immediately without probing or waiting', () => {
+    const readTextFile = vi.fn(() => { throw errno('EACCES'); });
+    const statFile = vi.fn(() => ({}));
+    const waits: number[] = [];
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({ status: 'failed' });
+    expect(statFile).not.toHaveBeenCalled();
+    expect(waits).toEqual([]);
+  });
+
+  it('reports a non-ENOENT presence-probe error immediately without waiting', () => {
+    const readTextFile = vi.fn(() => { throw errno('ENOENT'); });
+    const statFile = vi.fn(() => { throw errno('EIO'); });
+    const waits: number[] = [];
+
+    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({ status: 'failed' });
     expect(readTextFile).toHaveBeenCalledOnce();
+    expect(statFile).toHaveBeenCalledOnce();
+    expect(waits).toEqual([]);
   });
 
-  it.each(['EACCES', 'EIO'])('reports a %s stat error as a read failure', (code) => {
-    const readTextFile = vi.fn(() => 'unreachable');
-    const statFile = vi.fn(() => { throw Object.assign(new Error(code), { code }); });
+  it('returns an immediately loaded file without an initial stat or wait', () => {
+    const statFile = vi.fn(() => ({}));
+    const waits: number[] = [];
 
-    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile)).toEqual({ status: 'failed' });
-    expect(readTextFile).not.toHaveBeenCalled();
-  });
-
-  it.each(['ENOENT', 'EISDIR', 'EACCES'])('reports %s after a successful stat as a read failure', (code) => {
-    const readTextFile = vi.fn(() => { throw Object.assign(new Error(code), { code }); });
-
-    expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, () => ({}))).toEqual({ status: 'failed' });
-  });
-
-  it('returns the loaded file text', () => {
-    expect(readFleetDaemonEnvFile('/fake/.env', () => 'WEB_HOST=127.0.0.1', () => ({}))).toEqual({
+    expect(readFleetDaemonEnvFile('/fake/.env', () => 'WEB_HOST=127.0.0.1', statFile, {
+      sleep: delayMs => waits.push(delayMs),
+    })).toEqual({
       status: 'loaded',
       text: 'WEB_HOST=127.0.0.1',
     });
+    expect(statFile).not.toHaveBeenCalled();
+    expect(waits).toEqual([]);
   });
 });

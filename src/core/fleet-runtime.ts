@@ -63,36 +63,48 @@ export type FleetDaemonEnvFileRead =
   | { status: 'missing' }
   | { status: 'failed' };
 
+export interface FleetDaemonEnvFileReadOptions {
+  retryDelaysMs?: readonly number[];
+  sleep?: (delayMs: number) => void;
+}
+
+const DEFAULT_ENV_FILE_RETRY_DELAYS_MS = [10, 25] as const;
+
+/**
+ * Read the optional fleet .env without mistaking an unlink-to-rename update for
+ * deletion. The first read happens immediately; only ENOENT enters a finite
+ * synchronous quiet period (35ms by default, over two waits). Stable ENOENT
+ * across every round is missing, while observed presence or any other error is
+ * a read failure so callers retain their inherited snapshot.
+ */
 export function readFleetDaemonEnvFile(
   envFilePath = ENV_FILE,
   readTextFile: (path: string) => string = path => readFileSync(path, 'utf-8'),
   statFile: (path: string) => unknown = path => statSync(path),
+  options: FleetDaemonEnvFileReadOptions = {},
 ): FleetDaemonEnvFileRead {
-  try {
-    statFile(envFilePath);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== 'ENOENT') return { status: 'failed' };
-    // Confirm absence with a real read. This closes the replacement race where
-    // stat observes the gap between unlink and rename but the file is already
-    // back by the time we can consume it. Only two consecutive ENOENT results
-    // represent an authoritative removal.
+  const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_ENV_FILE_RETRY_DELAYS_MS;
+  const sleep = options.sleep ?? sleepSyncMs;
+  let observedPresence = false;
+
+  for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
       return { status: 'loaded', text: readTextFile(envFilePath) };
     } catch (readError) {
-      return (readError as NodeJS.ErrnoException).code === 'ENOENT'
-        ? { status: 'missing' }
-        : { status: 'failed' };
+      if ((readError as NodeJS.ErrnoException).code !== 'ENOENT') return { status: 'failed' };
     }
+
+    try {
+      statFile(envFilePath);
+      observedPresence = true;
+    } catch (statError) {
+      if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') return { status: 'failed' };
+    }
+
+    if (attempt < retryDelaysMs.length) sleep(retryDelaysMs[attempt]);
   }
-  try {
-    return { status: 'loaded', text: readTextFile(envFilePath) };
-  } catch {
-    // Match dotenv's historical lifecycle behavior: an unreadable or
-    // transiently replaced optional .env file must not prevent fleet recovery.
-    // Keep this distinct from a confirmed missing file: the former preserves
-    // the inherited snapshot, while the latter represents removed config.
-    return { status: 'failed' };
-  }
+
+  return observedPresence ? { status: 'failed' } : { status: 'missing' };
 }
 
 export function resolveFleetDaemonEnv(
