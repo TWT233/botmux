@@ -532,7 +532,7 @@ describe('postFreshStreamingCard', () => {
       return value;
     });
 
-    await drainPinQueue();
+    await vi.waitFor(() => expect(pinMessageMock).toHaveBeenCalledWith(APP_ID, 'om_fresh_card'));
 
     expect(typeof resolvePin).toBe('function');
     expect(settled).toBe(true);

@@ -18,7 +18,7 @@
 - Recovery discovery and immediate pre-delete validation are separate lists; Feishu's unconditional Unpin leaves a residual post-list API race.
 - Startup/configuration remain non-blocking and fail-open.
 - apiOnly/HTTP virtual/no-transport paths make zero Pin API calls.
-- Reuse existing per-bot FIFO, per-message queues, and batch size 20.
+- Reuse existing per-bot FIFO and per-message queues; cap actual Pin/Unpin mutations at 20 process-wide, with destructive cleanup re-proven in waves of at most 20.
 - Use TDD and commit/push each independently reviewable task.
 
 ---

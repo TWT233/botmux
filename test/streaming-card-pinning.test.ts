@@ -153,7 +153,7 @@ describe('streaming-card pin policy', () => {
     const ds = makeDs(); activate(ds);
     let resolvePin!: (value: ReturnType<typeof sameAppPin>) => void; pinMessageMock.mockImplementation(() => new Promise(resolve => { resolvePin = resolve; }));
     const pending = pinStreamingCardIfEnabled(ds, 'om_current');
-    await drainMicrotasks(1);
+    await vi.waitFor(() => expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current'));
     ds.streamCardId = 'om_new'; resolvePin(sameAppPin('app-pin', 'om_current'));
     expect(await pending).toBe(false);
     expect(pinMessageMock).toHaveBeenCalledWith('app-pin', 'om_current');
@@ -493,6 +493,74 @@ describe('streaming-card pin policy', () => {
     expect(observedBeforeRelease).toBeGreaterThan(0);
     expect(observedBeforeRelease).toBeLessThanOrEqual(20);
     expect(pinMessageMock).toHaveBeenCalledTimes(45);
+  });
+
+  it('bounds Pin mutations to at most 20 across concurrent bot queues', async () => {
+    const firstBot = Array.from({ length: 25 }, (_, index) =>
+      makeDs(`om_first_bot_${index}`, undefined, `pin-first-bot-${index}`, `om_first_root_${index}`));
+    const secondBot = Array.from({ length: 25 }, (_, index) => {
+      const ds = makeDs(
+        `om_second_bot_${index}`,
+        undefined,
+        `pin-second-bot-${index}`,
+        `om_second_root_${index}`,
+      );
+      ds.larkAppId = 'app-pin-second';
+      return ds;
+    });
+    setActiveSessionsRegistry(new Map(
+      [...firstBot, ...secondBot].map(ds => [activeSessionKey(ds), ds]),
+    ));
+    getBotMock.mockImplementation((larkAppId: string) => ({
+      config: { larkAppId, cliId: 'claude-code', pinStreamingCard: true },
+    }) as any);
+    const releasePins = deferred<void>();
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    pinMessageMock.mockImplementation(async (appId: string, messageId: string) => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await releasePins.promise;
+      concurrent -= 1;
+      return sameAppPin(appId, messageId);
+    });
+
+    reconcileBotStreamingCardPins('app-pin', true);
+    reconcileBotStreamingCardPins('app-pin-second', true);
+    await vi.waitFor(() => expect(pinMessageMock.mock.calls.length).toBeGreaterThanOrEqual(20));
+    const observedBeforeRelease = maxConcurrent;
+    releasePins.resolve();
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(observedBeforeRelease).toBeLessThanOrEqual(20);
+    expect(pinMessageMock).toHaveBeenCalledTimes(50);
+  });
+
+  it('bounds same-chat bot-wide cleanup to at most 20 concurrent Unpins', async () => {
+    const sessions = Array.from({ length: 45 }, (_, index) =>
+      makeDs(`om_cleanup_${index}`, undefined, `pin-cleanup-${index}`, `om_cleanup_root_${index}`));
+    setActiveSessionsRegistry(new Map(sessions.map(ds => [activeSessionKey(ds), ds])));
+    const releaseUnpins = deferred<void>();
+    let concurrent = 0;
+    let maxConcurrent = 0;
+    unpinMessageMock.mockImplementation(async (_appId: string, messageId: string) => {
+      concurrent += 1;
+      maxConcurrent = Math.max(maxConcurrent, concurrent);
+      await releaseUnpins.promise;
+      concurrent -= 1;
+      remotelySameAppPinIds.delete(messageId);
+      return true;
+    });
+
+    reconcileBotStreamingCardPins('app-pin', false);
+    await vi.waitFor(() => expect(unpinMessageMock.mock.calls.length).toBeGreaterThanOrEqual(20));
+    const observedBeforeRelease = maxConcurrent;
+    releaseUnpins.resolve();
+    await __testOnly_waitForPinStreamingCardIdle();
+
+    expect(observedBeforeRelease).toBeLessThanOrEqual(20);
+    expect(unpinMessageMock).toHaveBeenCalledTimes(45);
+    expect(listChatPinsMock.mock.calls.length).toBeGreaterThanOrEqual(3);
   });
 
   it('bounds same-chat restored entries to at most 20 concurrent Pin creates', async () => {

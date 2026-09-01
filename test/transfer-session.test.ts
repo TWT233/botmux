@@ -95,6 +95,7 @@ import {
   __testOnly_resetPinStreamingCardReconcileQueue,
   __testOnly_waitForPinStreamingCardIdle,
   pinStreamingCardIfEnabled,
+  reconcileStreamingCardPins,
   reconcileRestoredStreamingCardPins,
   setActiveSessionsRegistry,
   setActiveSessionIfActive,
@@ -1598,6 +1599,14 @@ describe('transferSession', () => {
 
     releaseUnpin.resolve(false);
     await __testOnly_waitForPinStreamingCardIdle();
+
+    listChatPinsMock.mockClear();
+    unpinMessageMock.mockClear();
+    unpinMessageMock.mockResolvedValue(true);
+    await reconcileStreamingCardPins(ds, false);
+
+    expect(listChatPinsMock).toHaveBeenCalledWith('cli_app_test', 'oc_source');
+    expect(unpinMessageMock).toHaveBeenCalledWith('cli_app_test', 'om_old_card');
   });
 
   it('revalidates a process-owned Pin and preserves a human replacement on transfer', async () => {

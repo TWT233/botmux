@@ -86,9 +86,12 @@ describe('startup streaming-card Pin recovery helper', () => {
 describe('startup restore phase wiring for restored streaming-card Pin recovery', () => {
   it('waits for restore, then marks ready without waiting for the Pin recovery task', async () => {
     const restoreGate = deferred<void>();
+    const recoveryGate = deferred<void>();
     const events: string[] = [];
-    reconcileRestoredStreamingCardPinsMock.mockImplementation((appId: string) => {
+    reconcileRestoredStreamingCardPinsMock.mockImplementation(async (appId: string) => {
       events.push(`pin:${appId}`);
+      await recoveryGate.promise;
+      events.push(`pin:done:${appId}`);
     });
     await Promise.resolve();
     vi.clearAllMocks();
@@ -115,6 +118,10 @@ describe('startup restore phase wiring for restored streaming-card Pin recovery'
     expect(reconcileRestoredStreamingCardPinsMock).toHaveBeenCalledTimes(1);
     expect(reconcileRestoredStreamingCardPinsMock).toHaveBeenCalledWith('app-pin');
     expect(events).toEqual(['restore:start', 'restore:done', 'ready', 'pin:app-pin']);
+
+    recoveryGate.resolve();
+    await Promise.resolve();
+    expect(events).toEqual(['restore:start', 'restore:done', 'ready', 'pin:app-pin', 'pin:done:app-pin']);
   });
 
   it('keeps the startDaemon call site after restore as a supplemental source lock', () => {

@@ -63,6 +63,13 @@ Recovery therefore lists once for discovery and again immediately before any
 destructive cleanup. Feishu exposes no conditional Unpin, so ownership can still
 change after that final list response and before deletion; this residual API race
 cannot be eliminated client-side.
+Actual Pin and Unpin mutations share a process-wide 20-permit limiter. Destructive
+cleanup also advances in waves of at most 20 and takes a new list proof only after
+that wave reaches the head of its per-message queues, so delayed later waves never
+reuse stale proof.
+Process ownership retains the chat where provenance was established. If transfer
+source cleanup fails, a later cleanup retries its fresh proof in that source chat
+rather than incorrectly looking for the old message in the destination chat.
 
 ## Safety and verification
 
