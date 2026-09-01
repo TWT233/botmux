@@ -182,6 +182,48 @@ describe('listChatPins pagination contract', () => {
     });
   });
 
+  it('preserves every remote record and raw string provenance fields verbatim', async () => {
+    setListPinsImpl('list_verbatim', async () => ({
+      code: 0,
+      data: {
+        items: [
+          {
+            message_id: '',
+            chat_id: '  oc_chat  ',
+            operator_id: '  ou_blank  ',
+            operator_id_type: ' open_id ',
+            create_time: ' 1700000000000 ',
+          },
+          {
+            message_id: '  om_spaced  ',
+            chat_id: '',
+            operator_id: ' ',
+            operator_id_type: '',
+            create_time: '',
+          },
+        ],
+        has_more: false,
+      },
+    }));
+
+    await expect(listChatPins('list_verbatim', 'oc_chat')).resolves.toEqual([
+      {
+        messageId: '',
+        chatId: '  oc_chat  ',
+        operatorId: '  ou_blank  ',
+        operatorIdType: ' open_id ',
+        createTime: ' 1700000000000 ',
+      },
+      {
+        messageId: '  om_spaced  ',
+        chatId: '',
+        operatorId: ' ',
+        operatorIdType: '',
+        createTime: '',
+      },
+    ]);
+  });
+
   it('throws on non-zero code or missing code', async () => {
     setListPinsImpl('list_bad_code', async () => ({ code: 230001, msg: 'fail' }));
     setListPinsImpl('list_missing_code', async () => ({ data: { items: [] } }));
@@ -205,7 +247,31 @@ describe('listChatPins pagination contract', () => {
       },
     }));
 
-    await expect(listChatPins('list_missing_token', 'oc_chat')).rejects.toThrow(/page token/i);
+    await expect(listChatPins('list_missing_token', 'oc_chat')).rejects.toThrow(/malformed pagination/i);
+  });
+
+  it('throws when has_more is true but next page token is empty or has surrounding whitespace', async () => {
+    setListPinsImpl('list_bad_whitespace_token', vi.fn()
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: '',
+        },
+      }));
+    setListPinsImpl('list_surrounded_whitespace_token', vi.fn()
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: ' next-token ',
+        },
+      }));
+
+    await expect(listChatPins('list_bad_whitespace_token', 'oc_chat')).rejects.toThrow(/malformed pagination/i);
+    await expect(listChatPins('list_surrounded_whitespace_token', 'oc_chat')).rejects.toThrow(/malformed pagination/i);
   });
 
   it('throws when the server repeats a page token', async () => {
@@ -229,5 +295,35 @@ describe('listChatPins pagination contract', () => {
     setListPinsImpl('list_dup_token', list);
 
     await expect(listChatPins('list_dup_token', 'oc_chat')).rejects.toThrow(/repeated page token/i);
+  });
+
+  it('treats raw opaque page tokens as exact values for follow-up requests and duplicate detection', async () => {
+    const list = vi.fn()
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: 'opaque-token',
+        },
+      })
+      .mockResolvedValueOnce({
+        code: 0,
+        data: {
+          items: [],
+          has_more: true,
+          page_token: 'opaque-token',
+        },
+      });
+    setListPinsImpl('list_exact_token', list);
+
+    await expect(listChatPins('list_exact_token', 'oc_chat')).rejects.toThrow(/repeated page token/i);
+    expect(list).toHaveBeenNthCalledWith(2, {
+      params: {
+        chat_id: 'oc_chat',
+        page_size: 100,
+        page_token: 'opaque-token',
+      },
+    });
   });
 });

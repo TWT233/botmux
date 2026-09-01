@@ -1003,10 +1003,8 @@ export async function listChatPins(larkAppId: string, chatId: string): Promise<L
     }
 
     for (const item of res.data?.items ?? []) {
-      const messageId = typeof item?.message_id === 'string' ? item.message_id.trim() : '';
-      if (!messageId) continue;
       out.push({
-        messageId,
+        messageId: typeof item?.message_id === 'string' ? item.message_id : '',
         chatId: typeof item?.chat_id === 'string' ? item.chat_id : undefined,
         operatorId: typeof item?.operator_id === 'string' ? item.operator_id : undefined,
         operatorIdType: typeof item?.operator_id_type === 'string' ? item.operator_id_type : undefined,
@@ -1015,9 +1013,9 @@ export async function listChatPins(larkAppId: string, chatId: string): Promise<L
     }
 
     if (res.data?.has_more !== true) break;
-    const nextPageToken = typeof res.data?.page_token === 'string' ? res.data.page_token.trim() : '';
-    if (!nextPageToken) {
-      throw new Error(`Failed to list chat pins for ${chatId}: missing next page token`);
+    const nextPageToken = res.data?.page_token;
+    if (typeof nextPageToken !== 'string' || nextPageToken.length === 0 || nextPageToken.trim() !== nextPageToken) {
+      throw new Error(`Failed to list chat pins for ${chatId}: malformed pagination token`);
     }
     if (seenPageTokens.has(nextPageToken)) {
       throw new Error(`Failed to list chat pins for ${chatId}: repeated page token ${nextPageToken}`);
