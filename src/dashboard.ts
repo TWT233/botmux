@@ -205,6 +205,7 @@ import {
   claimRestartLease,
   clearRestartIntent,
   clearRestartLease,
+  clearRestartLeaseLocked,
   hasActiveRestartLease,
   writeManualIntentIfAbsent,
   writeRestartIntent,
@@ -4620,7 +4621,9 @@ const server = createServer(async (req, res) => {
         }
         return;
       } catch (error) {
-        if (leaseId) clearRestartLease(leaseId);
+        if (leaseId && !clearRestartLeaseLocked(leaseId)) {
+          logger.warn('[dashboard] rollback lease cleanup deferred because the update lock is busy');
+        }
         if (!acquired) return jsonRes(res, 409, { ok: false, error: 'update_in_flight' });
         if (!res.headersSent) {
           return jsonRes(res, 500, {
@@ -4729,7 +4732,9 @@ const server = createServer(async (req, res) => {
             const child = spawnDetachedRestart('dashboard', activePackageRoot, leaseId!);
             if (!child.pid) throw new Error('restart driver did not start');
           } catch (error) {
-            clearRestartLease(leaseId!);
+            if (!clearRestartLeaseLocked(leaseId!)) {
+              logger.warn('[dashboard] restart lease cleanup deferred because the update lock is busy');
+            }
             logger.error(`[dashboard] restart launch failed: ${error instanceof Error ? error.message : error}`);
           }
         };

@@ -18,6 +18,7 @@ import {
   scrubWorkflowWorkerEnv,
   stripDashboardH5Env,
 } from './utils/child-env.js';
+import { scrubDetachedRestartEnvRefresh } from './core/restart-env-refresh.js';
 
 installStdioEpipeGuard();
 
@@ -50,6 +51,7 @@ scrubClaudeSessionMarkerEnv(process.env);
 scrubWorkflowWorkerEnv(process.env);
 scrubInvokerTerminalEnv(process.env);
 process.env.TERM = 'xterm-256color';
+scrubDetachedRestartEnvRefresh(process.env);
 
 async function main(): Promise<void> {
   const { FleetSupervisor } = await import('./core/fleet-supervisor.js');

@@ -1,10 +1,10 @@
 import { parse } from 'dotenv';
 
 // Settings pinned into the environment used to launch the fleet supervisor.
-// A detached restart carries the previous snapshot only as a fallback for an
-// unreadable ~/.botmux/.env. Its one-shot refresh marker makes a successfully
-// read (or confirmed absent) file authoritative before the new supervisor is
-// spawned.
+// A detached sender resolves the persisted file before launch and carries the
+// allowlisted snapshot in ordinary lifecycle keys, which both old and new
+// receivers understand. A new receiver authenticates that fallback by binding
+// the restart lease, then re-reads the file so loaded/missing remains current.
 //
 // This resolved block is SHARED: the same values land in the env of the
 // supervisor, dashboard, and every bot daemon. Only non-secret settings belong

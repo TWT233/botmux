@@ -68,6 +68,10 @@ describe('startFleetViaSupervisor restart environment', () => {
 
   it('does not carry the one-shot refresh marker into the supervisor', async () => {
     vi.stubEnv('BOTMUX_INTERNAL_REFRESH_DAEMON_ENV', '1');
+    vi.stubEnv('BOTMUX_INTERNAL_RESTART_ENV_FALLBACK', JSON.stringify({
+      version: 1,
+      env: { WEB_HOST: '127.0.0.1' },
+    }));
     const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
 
     expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({
@@ -76,6 +80,7 @@ describe('startFleetViaSupervisor restart environment', () => {
     });
     const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
     expect(options.env.BOTMUX_INTERNAL_REFRESH_DAEMON_ENV).toBeUndefined();
+    expect(options.env.BOTMUX_INTERNAL_RESTART_ENV_FALLBACK).toBeUndefined();
   });
 
   it('does not load persisted H5 settings into the supervisor spawn environment', async () => {
@@ -115,14 +120,22 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
 
-  it('preserves the inherited lifecycle snapshot when the persisted .env cannot be read', async () => {
+  it('uses the explicit fallback snapshot when the persisted .env cannot be read', async () => {
     const envPath = join(home, '.botmux', '.env');
     rmSync(envPath);
     mkdirSync(envPath); // deterministic EISDIR from readFileSync on Linux
     delete process.env.BOTMUX_SESSION_ID;
     const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
 
-    expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({ action: 'started', supervisorPid: 4321 });
+    expect(startFleetViaSupervisor({
+      refreshPersistedEnv: true,
+      readFailureFallback: {
+        WEB_HOST: '127.0.0.1',
+        WEB_EXTERNAL_PORT: '9000',
+        BOTMUX_WEB_PROXY_BASE_PORT: '8800',
+        BOTMUX_WORKER_HTTP_HOST: '127.0.0.3',
+      },
+    })).toMatchObject({ action: 'started', supervisorPid: 4321 });
     expect(io.spawn).toHaveBeenCalledOnce();
     const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
     expect(options.env.WEB_HOST).toBe('127.0.0.1');
@@ -130,5 +143,6 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.BOTMUX_WEB_PROXY_BASE_PORT).toBe('8800');
     expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('127.0.0.3');
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
+    expect(options.env.BOTMUX_INTERNAL_RESTART_ENV_FALLBACK).toBeUndefined();
   });
 });

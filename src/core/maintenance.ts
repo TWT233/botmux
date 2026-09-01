@@ -58,8 +58,19 @@ import {
   type UpdateStrategy,
 } from './binary-self-update.js';
 import { globalWrapperPath } from '../utils/local-dev-update.js';
-import { DETACHED_RESTART_ENV_REFRESH } from './restart-env-refresh.js';
-export { DETACHED_RESTART_ENV_REFRESH, consumeDetachedRestartEnvRefresh } from './restart-env-refresh.js';
+import {
+  captureDetachedRestartEnvFallback,
+  scrubDetachedRestartEnvRefresh,
+  type RestartEnvFallback,
+} from './restart-env-refresh.js';
+import { DAEMON_ENV_KEYS } from '../cli/daemon-lifecycle-env.js';
+import { bindRestartLeaseTo } from '../services/restart-intent-store.js';
+import { readFleetDaemonEnvFile, resolveFleetDaemonEnv, type FleetDaemonEnvFileRead } from './fleet-runtime.js';
+export {
+  DETACHED_RESTART_ENV_FALLBACK,
+  DETACHED_RESTART_ENV_REFRESH,
+  consumeDetachedRestartEnvRefresh,
+} from './restart-env-refresh.js';
 
 export interface MaintenanceState {
   /** Local date the auto-update run was last handled (fired or skipped). */
@@ -337,7 +348,10 @@ export function buildRestartLauncher(
   return { cmd: node, args: entryArgs };
 }
 
-export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
+export function detachedRestartEnv(
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+  envFileRead: FleetDaemonEnvFileRead = readFleetDaemonEnvFile(),
+): NodeJS.ProcessEnv {
   const env = { ...inheritedEnv };
   // Defense in depth for dashboard/daemon processes resurrected from a stale
   // managed-runtime snapshot. `botmux restart` checks workflow mode before
@@ -352,12 +366,70 @@ export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env
   // the family from .env itself. This is credential hygiene, separate from the
   // non-secret lifecycle snapshot retained below.
   stripDashboardH5Env(env);
-  // The dashboard/daemon snapshot may outlive a ~/.botmux/.env edit. Mark the
-  // fresh CLI so it treats the persisted file as authoritative. Keep the old
-  // lifecycle values as a fallback when that file exists but cannot be read;
-  // cmdRestart consumes the marker before any async work or child process.
-  env[DETACHED_RESTART_ENV_REFRESH] = '1';
+  // Resolve the persisted lifecycle snapshot before the cross-version handoff.
+  // Old receivers only understand ordinary env keys. New receivers authenticate
+  // this same allowlisted snapshot by successfully binding the restart lease.
+  const snapshot = resolveFleetDaemonEnv(inheritedEnv, envFileRead, {
+    refreshPersistedEnv: true,
+    readFailureFallback: captureDetachedRestartEnvFallback(inheritedEnv),
+  });
+  for (const key of DAEMON_ENV_KEYS) env[key] = snapshot[key];
+  // A lease-authenticated new receiver captures this allowlisted outer snapshot
+  // before deleting it. A legacy receiver uses the same keys directly. Do not
+  // send newer one-shot fields: an old supervisor would persist unknown fields
+  // into its long-lived children. Scrub stale copies inherited from an older
+  // intermediate fleet instead.
+  scrubDetachedRestartEnvRefresh(env);
   return env;
+}
+
+export interface RestartDriverContext {
+  refreshPersistedEnv: boolean;
+  readFailureFallback?: RestartEnvFallback;
+}
+
+/**
+ * Validate a detached restart handoff before granting refresh semantics. Old
+ * senders may know no marker or payload, so a successfully bound lease is the
+ * stable cross-version identity signal. The allowlisted outer snapshot is the
+ * fallback understood by both old and new receivers.
+ */
+export function prepareRestartDriverContext(
+  env: NodeJS.ProcessEnv = process.env,
+  pid = process.pid,
+  nowMs = Date.now(),
+): RestartDriverContext {
+  const restartLeaseId = env.BOTMUX_RESTART_LEASE_ID;
+  const restartLeaseDir = env.BOTMUX_RESTART_LEASE_DIR;
+  const outerFallback = captureDetachedRestartEnvFallback(env);
+  scrubDetachedRestartEnvRefresh(env);
+  delete env.BOTMUX_RESTART_LEASE_ID;
+  delete env.BOTMUX_RESTART_LEASE_DIR;
+
+  let leaseBound = false;
+  if (restartLeaseDir && !restartLeaseId) {
+    throw new Error('restart driver lease id is missing');
+  }
+  if (restartLeaseId) {
+    if (!restartLeaseDir) throw new Error('restart driver lease directory is missing');
+    withFileLockSync(globalInstallUpdateLockTargetIn(restartLeaseDir), () => {
+      leaseBound = bindRestartLeaseTo(restartLeaseDir, restartLeaseId, pid, nowMs);
+    });
+    if (!leaseBound) throw new Error('failed to bind restart driver lease');
+  }
+
+  if (leaseBound) {
+    for (const key of DAEMON_ENV_KEYS) delete env[key];
+    return {
+      refreshPersistedEnv: true,
+      readFailureFallback: outerFallback,
+    };
+  }
+  const sessionRefresh = Boolean(env.BOTMUX_SESSION_ID?.trim());
+  return {
+    refreshPersistedEnv: sessionRefresh,
+    ...(sessionRefresh ? { readFailureFallback: captureDetachedRestartEnvFallback(env) } : {}),
+  };
 }
 
 function setsidAvailable(): boolean {
@@ -506,7 +578,7 @@ export function spawnDetachedRestart(
     detached: true,
     stdio: fd !== undefined ? ['ignore', fd, fd] : 'ignore',
     env: {
-      ...detachedRestartEnv(),
+      ...detachedRestartEnv(process.env),
       ...(restartLeaseId ? {
         BOTMUX_RESTART_LEASE_ID: restartLeaseId,
         BOTMUX_RESTART_LEASE_DIR: config.session.dataDir,

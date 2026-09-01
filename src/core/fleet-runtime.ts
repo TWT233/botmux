@@ -21,6 +21,7 @@ import { FLEET_GRACEFUL_EXIT_CODE } from './fleet-supervisor-policy.js';
 import { botProcessName } from '../setup/bot-config-editor.js';
 import { resolveDaemonEnv } from '../cli/daemon-lifecycle-env.js';
 import { scrubDetachedRestartEnvRefresh } from './restart-env-refresh.js';
+import type { RestartEnvFallback } from './restart-env-refresh.js';
 import { stripDashboardH5Env } from '../utils/child-env.js';
 
 const CONFIG_DIR = join(homedir(), '.botmux');
@@ -74,9 +75,11 @@ const DEFAULT_ENV_FILE_RETRY_DELAYS_MS = [10, 25] as const;
 /**
  * Read the optional fleet .env without mistaking an unlink-to-rename update for
  * deletion. The first read happens immediately; only ENOENT enters a finite
- * synchronous quiet period (35ms by default, over two waits). Stable ENOENT
- * across every round is missing, while observed presence or any other error is
- * a read failure so callers retain their inherited snapshot.
+ * synchronous quiet period that may recover a replacement which appears while
+ * we wait. Exhausting that period is still uncertain: elapsed time is not a
+ * writer barrier, so an external unlink-to-rename update may remain in flight.
+ * Without an explicit deletion signal we fail safe and let callers retain their
+ * authenticated fallback snapshot.
  */
 export function readFleetDaemonEnvFile(
   envFilePath = ENV_FILE,
@@ -86,7 +89,6 @@ export function readFleetDaemonEnvFile(
 ): FleetDaemonEnvFileRead {
   const retryDelaysMs = options.retryDelaysMs ?? DEFAULT_ENV_FILE_RETRY_DELAYS_MS;
   const sleep = options.sleep ?? sleepSyncMs;
-  let observedPresence = false;
 
   for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
     try {
@@ -97,7 +99,6 @@ export function readFleetDaemonEnvFile(
 
     try {
       statFile(envFilePath);
-      observedPresence = true;
     } catch (statError) {
       if ((statError as NodeJS.ErrnoException).code !== 'ENOENT') return { status: 'failed' };
     }
@@ -105,13 +106,13 @@ export function readFleetDaemonEnvFile(
     if (attempt < retryDelaysMs.length) sleep(retryDelaysMs[attempt]);
   }
 
-  return observedPresence ? { status: 'failed' } : { status: 'missing' };
+  return { status: 'failed' };
 }
 
 export function resolveFleetDaemonEnv(
   inheritedEnv: NodeJS.ProcessEnv = process.env,
   envFile: FleetDaemonEnvFileRead | string | undefined = readFleetDaemonEnvFile(),
-  refreshPersistedEnv = Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim()),
+  options: boolean | StartFleetOptions = Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim()),
 ): NodeJS.ProcessEnv {
   // A restart invoked inside a managed session inherits the old daemon's
   // settings. Resolve the persisted lifecycle snapshot before spawning the
@@ -120,10 +121,22 @@ export function resolveFleetDaemonEnv(
   const envFileRead: FleetDaemonEnvFileRead = typeof envFile === 'string'
     ? { status: 'loaded', text: envFile }
     : envFile ?? { status: 'missing' };
+  const refreshPersistedEnv = typeof options === 'boolean'
+    ? options
+    : options.refreshPersistedEnv ?? Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim());
+  const inferredSessionRefresh = typeof options !== 'boolean'
+    && options.refreshPersistedEnv === undefined
+    && Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim());
+  const readFailureFallback = typeof options === 'boolean'
+    ? (options ? inheritedEnv : undefined)
+    : options.readFailureFallback ?? (inferredSessionRefresh ? inheritedEnv : undefined);
+  const lifecycleSource = envFileRead.status === 'failed' && refreshPersistedEnv
+    ? readFailureFallback ?? {}
+    : inheritedEnv;
   const env: NodeJS.ProcessEnv = {
     ...inheritedEnv,
     ...resolveDaemonEnv(
-      inheritedEnv,
+      lifecycleSource,
       envFileRead.status === 'loaded' ? envFileRead.text : undefined,
       envFileRead.status === 'failed' ? false : refreshPersistedEnv,
     ),
@@ -253,6 +266,7 @@ export interface StartFleetResult {
  */
 export interface StartFleetOptions {
   refreshPersistedEnv?: boolean;
+  readFailureFallback?: RestartEnvFallback;
 }
 
 export function startFleetViaSupervisor(options: StartFleetOptions = {}): StartFleetResult {
@@ -270,7 +284,7 @@ export function startFleetViaSupervisor(options: StartFleetOptions = {}): StartF
     cwd: CONFIG_DIR,
     detached: true,
     stdio: ['ignore', out, err],
-    env: resolveFleetDaemonEnv(process.env, readFleetDaemonEnvFile(), options.refreshPersistedEnv),
+    env: resolveFleetDaemonEnv(process.env, readFleetDaemonEnvFile(), options),
   });
   child.unref();
   return { action: 'started', supervisorPid: child.pid ?? 0, botCount: bots.length };
@@ -327,7 +341,10 @@ export interface RestartFleetOptions extends StartFleetOptions {
 
 export function restartFleet(options: RestartFleetOptions = {}): RestartFleetResult {
   const stop = stopFleet(options.timeoutMs);
-  const start = startFleetViaSupervisor({ refreshPersistedEnv: options.refreshPersistedEnv });
+  const start = startFleetViaSupervisor({
+    refreshPersistedEnv: options.refreshPersistedEnv,
+    readFailureFallback: options.readFailureFallback,
+  });
   return { stop, start };
 }
 

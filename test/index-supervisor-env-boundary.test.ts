@@ -7,6 +7,8 @@ const H5_PREFIX = 'BOTMUX_DASHBOARD_FEISHU_H5_';
 const FUTURE_H5_KEY = `${H5_PREFIX}FUTURE_ENTRY_TEST`;
 const DOTENV_ONLY_KEY = 'BOTMUX_SUPERVISOR_DOTENV_ONLY_TEST';
 const KEEP_KEY = 'BOTMUX_SUPERVISOR_ENTRY_KEEP_TEST';
+const RESTART_MARKER = 'BOTMUX_INTERNAL_REFRESH_DAEMON_ENV';
+const RESTART_FALLBACK = 'BOTMUX_INTERNAL_RESTART_ENV_FALLBACK';
 
 const boundary = vi.hoisted(() => ({
   envAtFleetModuleLoad: undefined as NodeJS.ProcessEnv | undefined,
@@ -69,6 +71,8 @@ afterEach(() => {
     FUTURE_H5_KEY,
     DOTENV_ONLY_KEY,
     KEEP_KEY,
+    RESTART_MARKER,
+    RESTART_FALLBACK,
   ]) delete process.env[key];
 });
 
@@ -87,6 +91,8 @@ describe('index-supervisor environment boundary', () => {
       vi.stubEnv('HOME', home);
       vi.stubEnv('BOTMUX_DASHBOARD_FEISHU_H5_APP_ID', 'inherited-app-id');
       vi.stubEnv(FUTURE_H5_KEY, 'inherited-future-secret');
+      vi.stubEnv(RESTART_MARKER, '1');
+      vi.stubEnv(RESTART_FALLBACK, '{"version":1}');
       vi.stubEnv(KEEP_KEY, 'keep');
       boundary.envAtFleetModuleLoad = undefined;
       boundary.envAtFleetStart = undefined;
@@ -98,6 +104,8 @@ describe('index-supervisor environment boundary', () => {
       const observed = boundary.envAtFleetModuleLoad!;
       expect(Object.keys(observed).filter(key => key.startsWith(H5_PREFIX))).toEqual([]);
       expect(observed[DOTENV_ONLY_KEY]).toBeUndefined();
+      expect(observed[RESTART_MARKER]).toBeUndefined();
+      expect(observed[RESTART_FALLBACK]).toBeUndefined();
       expect(observed[KEEP_KEY]).toBe('keep');
     } finally {
       vi.unstubAllEnvs();

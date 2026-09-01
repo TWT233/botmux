@@ -170,7 +170,21 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
     expect(env.WEB_HOST).toBe('10.9.9.9');
   });
 
-  it('preserves an inherited restart snapshot when .env cannot be read', () => {
+  it('uses only the authenticated detached fallback when .env cannot be read', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: 'must-not-win',
+      WEB_EXTERNAL_PORT: '9999',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'failed' }, {
+      refreshPersistedEnv: true,
+      readFailureFallback: { WEB_HOST: '127.0.0.1', WEB_EXTERNAL_PORT: '9000' },
+    });
+
+    expect(env.WEB_HOST).toBe('127.0.0.1');
+    expect(env.WEB_EXTERNAL_PORT).toBe('9000');
+  });
+
+  it('preserves the legacy boolean refresh fallback on read failure', () => {
     const env = resolveFleetDaemonEnv({
       WEB_HOST: '127.0.0.1',
       WEB_EXTERNAL_PORT: '9000',
@@ -179,6 +193,54 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
 
     expect(env.WEB_HOST).toBe('127.0.0.1');
     expect(env.WEB_EXTERNAL_PORT).toBe('9000');
+  });
+
+  it('preserves an inferred session refresh fallback on read failure', () => {
+    const env = resolveFleetDaemonEnv({
+      BOTMUX_SESSION_ID: 'session-1',
+      WEB_HOST: '127.0.0.1',
+      WEB_EXTERNAL_PORT: '9000',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'failed' }, {});
+
+    expect(env.WEB_HOST).toBe('127.0.0.1');
+    expect(env.WEB_EXTERNAL_PORT).toBe('9000');
+  });
+
+  it('ignores the fallback snapshot when .env is loaded', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: 'inherited',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'loaded', text: 'WEB_HOST=10.9.9.9' }, {
+      refreshPersistedEnv: true,
+      readFailureFallback: { WEB_HOST: 'fallback' },
+    });
+
+    expect(env.WEB_HOST).toBe('10.9.9.9');
+  });
+
+  it('ignores the fallback snapshot when .env is confirmed missing', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: 'inherited',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'missing' }, {
+      refreshPersistedEnv: true,
+      readFailureFallback: { WEB_HOST: 'fallback', WEB_EXTERNAL_PORT: '9000' },
+    });
+
+    expect(env.WEB_HOST).toBe('0.0.0.0');
+    expect(env.WEB_EXTERNAL_PORT).toBe('');
+  });
+
+  it('fails closed on read failure when no validated fallback exists', () => {
+    const env = resolveFleetDaemonEnv({
+      WEB_HOST: 'untrusted-inherited',
+      WEB_EXTERNAL_PORT: '9999',
+      SESSION_DATA_DIR: '/custom/data/root',
+    }, { status: 'failed' }, { refreshPersistedEnv: true });
+
+    expect(env.WEB_HOST).toBe('0.0.0.0');
+    expect(env.WEB_EXTERNAL_PORT).toBe('');
   });
 
   it('keeps the resolved snapshot stable when the supervisor parses a changed file again', () => {
@@ -201,7 +263,10 @@ describe('resolveFleetDaemonEnv (migration: SESSION_DATA_DIR must survive pm2→
     const first = resolveFleetDaemonEnv({
       WEB_HOST: '127.0.0.1',
       SESSION_DATA_DIR: '/custom/data/root',
-    }, { status: 'failed' }, true);
+    }, { status: 'failed' }, {
+      refreshPersistedEnv: true,
+      readFailureFallback: { WEB_HOST: '127.0.0.1' },
+    });
     const second = resolveFleetDaemonEnv(
       first,
       'WEB_HOST=192.0.2.10\nWEB_EXTERNAL_PORT=9200',
@@ -237,7 +302,7 @@ describe('readFleetDaemonEnvFile', () => {
     expect(statFile).toHaveBeenCalledTimes(2);
   });
 
-  it('classifies stable all-ENOENT rounds as missing after the injected finite window', () => {
+  it('keeps uninterrupted ENOENT uncertain when no writer barrier can confirm deletion', () => {
     const readTextFile = vi.fn(() => { throw errno('ENOENT'); });
     const statFile = vi.fn(() => { throw errno('ENOENT'); });
     const waits: number[] = [];
@@ -245,7 +310,7 @@ describe('readFleetDaemonEnvFile', () => {
     expect(readFleetDaemonEnvFile('/fake/.env', readTextFile, statFile, {
       retryDelaysMs: [4, 9],
       sleep: delayMs => waits.push(delayMs),
-    })).toEqual({ status: 'missing' });
+    })).toEqual({ status: 'failed' });
     expect(waits).toEqual([4, 9]);
     expect(readTextFile).toHaveBeenCalledTimes(3);
     expect(statFile).toHaveBeenCalledTimes(3);
