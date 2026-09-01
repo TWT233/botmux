@@ -120,7 +120,7 @@ Ran 13 tests across 1 file. [292.00ms]
 ## Commit
 
 - Commit message: `feat(card): 封装群内 Pin 来源分页查询`
-- Commit SHA: `PENDING`
+- Commit SHA: `840bc817`
 
 ## Concerns
 
