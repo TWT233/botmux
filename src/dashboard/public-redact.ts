@@ -55,9 +55,6 @@ export function redactGroupsForPublic(chats: unknown[]): unknown[] {
           larkAppId: m.larkAppId,
           botName: m.botName,
           inChat: m.inChat,
-          pinStreamingCardMasterEnabled: m.pinStreamingCardMasterEnabled,
-          pinStreamingCardChatEnabled: m.pinStreamingCardChatEnabled,
-          pinStreamingCardEffectiveEnabled: m.pinStreamingCardEffectiveEnabled,
         };
       });
     }

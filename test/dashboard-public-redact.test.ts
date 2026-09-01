@@ -92,35 +92,25 @@ describe('redactGroupsForPublic', () => {
             larkAppId: 'cli_a',
             botName: 'Claude',
             inChat: true,
-            pinStreamingCardMasterEnabled: true,
-            pinStreamingCardChatEnabled: false,
-            pinStreamingCardEffectiveEnabled: false,
           },
           {
             larkAppId: 'cli_b',
             botName: 'Codex',
             inChat: false,
-            pinStreamingCardMasterEnabled: false,
-            pinStreamingCardChatEnabled: true,
-            pinStreamingCardEffectiveEnabled: false,
           },
         ],
       },
     ]);
   });
 
-  it('keeps per-chat pin-streaming booleans for anonymous visitors while still stripping private config fields', () => {
+  it('drops pin-streaming-card booleans for anonymous visitors while still stripping private config fields', () => {
     const [out] = redactGroupsForPublic(sampleChats()) as any[];
-    expect(out.memberBots[0]).toMatchObject({
-      pinStreamingCardMasterEnabled: true,
-      pinStreamingCardChatEnabled: false,
-      pinStreamingCardEffectiveEnabled: false,
-    });
-    expect(out.memberBots[1]).toMatchObject({
-      pinStreamingCardMasterEnabled: false,
-      pinStreamingCardChatEnabled: true,
-      pinStreamingCardEffectiveEnabled: false,
-    });
+    expect(out.memberBots[0]).not.toHaveProperty('pinStreamingCardMasterEnabled');
+    expect(out.memberBots[0]).not.toHaveProperty('pinStreamingCardChatEnabled');
+    expect(out.memberBots[0]).not.toHaveProperty('pinStreamingCardEffectiveEnabled');
+    expect(out.memberBots[1]).not.toHaveProperty('pinStreamingCardMasterEnabled');
+    expect(out.memberBots[1]).not.toHaveProperty('pinStreamingCardChatEnabled');
+    expect(out.memberBots[1]).not.toHaveProperty('pinStreamingCardEffectiveEnabled');
     expect(out.memberBots[0]).not.toHaveProperty('oncallChat');
     expect(out.memberBots[0]).not.toHaveProperty('hasRole');
   });
