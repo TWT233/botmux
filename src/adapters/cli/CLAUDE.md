@@ -23,3 +23,11 @@
 ⚠️ 注意与「读隔离/重定向」的交互：claude 家族 + codex 若 `supportsReadIsolation`，沙盒开启时 CLI 数据会被重定向到 BOT_HOME（`CLAUDE_CONFIG_DIR`/`CODEX_HOME`），此时 worker 会把落在**宿主原数据根之内**的 `authPaths` 丢弃（见 `authPathsSurvivingCliDataRedirect`）——避免把 CLI 根本不读的宿主目录（如整个 `~/.codex` 的 history/sessions）暴露进沙盒；落在数据根之外的登录源（如 Seed/Relay 的 `~/.local/share/bytedcli`）才保留。新增声明 `authPaths` 的 claude 家族适配器需想清这条。
 
 验证手段：用 `prepareDirectSandbox` 生成真实 bwrap argv + `node-pty` 拉起真 CLI 跑 ≥90s，观察是否崩、并核对写入是否落到真实目录（见 `test/sandbox.test.ts` 的 symlink 回归用例）。
+
+## Managed BTW 适配器检查清单
+
+- 实现必须绑定到可跨 daemon/worker 重启存活的 runtime，不能依赖主会话 worker 生命周期。
+- 只有同时提供 `nativeBtw`、`persistentRuntime`、`structuredTerminal`、`stableParentThread` 四项能力时，才能声明支持 managed BTW。
+- terminal 必须返回结构化的完整答案或明确失败/取消结果，不能靠终端文本猜测完成状态。
+- BTW 原生 turn 必须拒绝工具执行，避免旁问修改工作区或外部状态。
+- 新适配器必须通过 `test/btw-contract.test.ts`。

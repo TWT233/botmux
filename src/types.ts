@@ -533,6 +533,8 @@ export interface Session {
    * accepted so daemon restarts and replacement workers invalidate receipts
    * emitted by an earlier lifetime. */
   workerGeneration?: number;
+  /** Durable locator and notification cursor for the session's managed BTW runtime. */
+  btwRuntime?: import('./features/btw/types.js').BtwSessionAttachmentState;
   /** True once a substitute-mode control card has been DM'd to the owner(s). Persisted to avoid re-sends on worker restart or daemon recovery. */
   substituteControlCardSent?: boolean;
   /** Bounded exact destination captured at inbound turn start. Codex App copies
@@ -1140,6 +1142,37 @@ export interface PendingRepoSetup {
 }
 
 /** Messages sent from Daemon to Worker */
+export interface BtwCursorCommitRequest {
+  type: 'btw_notification_cursor_commit';
+  requestId: string;
+  sessionId: string;
+  workerGeneration: number;
+  runtimeEpoch: string;
+  fromSeq: number;
+  throughSeq: number;
+}
+
+export interface BtwCursorCommitAck {
+  type: 'btw_notification_cursor_persisted';
+  requestId: string;
+  sessionId: string;
+  workerGeneration: number;
+  runtimeEpoch: string;
+  fromSeq: number;
+  throughSeq: number;
+  ok: boolean;
+  persistedSeq?: number;
+  error?:
+    | 'stale_worker_generation'
+    | 'session_mismatch'
+    | 'runtime_epoch_mismatch'
+    | 'cursor_invalid_range'
+    | 'cursor_regression'
+    | 'cursor_overlap'
+    | 'cursor_gap'
+    | 'session_store_write_failed';
+}
+
 type DaemonToWorkerBase =
   | { type: 'init'; sessionId: string; chatId: string; chatType?: 'group' | 'p2p'; rootMessageId: string; workingDir: string; cliId: string; cliRuntime?: import('./adapters/cli/runtime.js').CliRuntimeSnapshot; cliPathOverride?: string; wrapperCli?: string; launchShell?: string; model?: string; turnTimeoutMs?: number; dshRuntime?: 'official' | 'tui'; reasoningEffort?: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'; disableCliBypass?: boolean; codexBrowser?: import('./core/codex-browser-config.js').CodexBrowserConfig; codexRpcInput?: boolean; codexAuthSync?: import('./services/codex-auth-sync.js').CodexAuthSyncMode; existingAppServerEndpoint?: string; startupCommands?: string[]; env?: Record<string, string>; replyStyle?: import('./im/lark/reply-card-style.js').ReplyStyleConfig; sandbox?: boolean; sandboxPaths?: { readWrite?: string[]; readOnly?: string[]; deny?: string[] }; sandboxHidePaths?: string[]; sandboxReadonlyPaths?: string[]; sandboxNetwork?: boolean; readIsolation?: boolean; readDenyExtraPaths?: string[]; daemonBootId?: string; backendType: BackendType; persistentBackendTarget?: PersistentBackendTarget; backendConfig?: RiffBackendConfig | MojoConfig; riffParentTaskId?: string; riffRepoDirs?: string[]; deferredScheduleRun?: Session['deferredScheduleRun']; nativeSessionTitle?: string; nativeSessionTitlePrompt?: string; prompt: string; promptCodexAppInput?: CodexAppTurnInput; queuedActivationToken?: string; resume?: boolean; forkSession?: boolean; cliSessionId?: string; originalSessionId?: string; ownerOpenId?: string; webPort?: number; larkAppId: string; larkAppSecret: string; apiOnly?: boolean; loadedBotsConfigPath?: string; loadedBotsConfigProvenance?: import('./core/config-dir.js').BotsConfigProvenance; brand?: 'feishu' | 'lark'; botName?: string; botOpenId?: string; locale?: 'zh' | 'en'; turnId?: string; replyTurnId?: string; dispatchAttempt?: number; atMostOnce?: boolean; codexAppDispatchId?: string; codexAppSteerable?: true; codexAppRecoveredDispatches?: CodexAppDispatchLedgerEntry[]; codexAppGenerationCommits?: CodexAppGenerationCommit[]; vcMeetingImTurnOrigin?: VcMeetingImTurnOrigin; trustedCaller?: TrustedCaller; pluginBindings?: string[]; skillPolicy?: BotSkillPolicy; skillPluginDir?: string; skillReadonlyRoots?: string[]; adoptMode?: boolean; adoptSource?: 'tmux' | 'herdr' | 'zellij'; adoptTmuxTarget?: string; adoptZellijSession?: string; adoptZellijPaneId?: string; adoptHerdrSessionName?: string; adoptHerdrTarget?: string; adoptHerdrPaneId?: string; adoptPaneCols?: number; adoptPaneRows?: number; bridgeJsonlPath?: string; adoptCliPid?: number; adoptCwd?: string; adoptRestoredFromMetadata?: boolean; runnerBuildId?: string; persistedRunnerBuildId?: string; restartAttemptId?: string }
   /** `model` rides along on every turn for the SAME reason the restart IPC carries
@@ -1233,11 +1266,17 @@ type DaemonToWorkerBase =
   // source = SessionStart 的 startup/resume/… 。
   | { type: 'session_ready'; source?: string; requestId?: string };
 
-export type DaemonToWorker = DaemonToWorkerBase extends infer Message
-  ? Message extends { type: 'init' }
-    ? Message & { feedback?: import('./services/feedback-policy.js').FeedbackPolicy }
-    : Message
-  : never;
+export type DaemonToWorker =
+  | (DaemonToWorkerBase extends infer Message
+    ? Message extends { type: 'init' }
+      ? Message & {
+          feedback?: import('./services/feedback-policy.js').FeedbackPolicy;
+          btwRuntime?: import('./features/btw/types.js').BtwSessionAttachmentState;
+          workerGeneration?: number;
+        }
+      : Message
+    : never)
+  | BtwCursorCommitAck;
 
 /** One node of the native CoT (thinking process) message, in transcript
  *  order. `thinking` renders as a reasoning paragraph; `tool_call` /
@@ -1250,6 +1289,7 @@ export type CotEntry =
 
 /** Messages sent from Worker to Daemon */
 export type WorkerToDaemon =
+  | BtwCursorCommitRequest
   | {
       type: 'ready';
       /** Bound Web Terminal port, or 0 when the worker is ready but this
