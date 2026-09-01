@@ -57,12 +57,14 @@ vi.mock('../src/services/project-scanner.js', () => ({
 }));
 
 const forkWorkerMock = vi.fn();
+const prepareManagedTraeLaunchMock = vi.fn(async () => {});
 const sendWorkerInputMock = vi.fn();
 const closeWorkerSessionMock = vi.fn(async () => ({ ok: true, outcome: 'closed', alreadyClosed: false }));
 const runAutoWorktreeCommitMock = vi.fn(async () => {});
 let activeRegistryMock: Map<string, DaemonSession> | null = null;
 vi.mock('../src/core/worker-pool.js', () => ({
   forkWorker: (...a: any[]) => forkWorkerMock(...a),
+  prepareManagedTraeLaunch: (...a: any[]) => prepareManagedTraeLaunchMock(...a),
   sendWorkerInput: (...a: any[]) => sendWorkerInputMock(...a),
   forkAdoptWorker: vi.fn(),
   adoptSandboxBlocked: vi.fn((botCfg, session) => botCfg?.sandbox === true || botCfg?.readIsolation === true || session?.sandbox === true || process.env.BOTMUX_SANDBOX === '1'),
@@ -151,6 +153,8 @@ beforeEach(() => {
   store.clear();
   sessionSeq = 0;
   forkWorkerMock.mockClear();
+  prepareManagedTraeLaunchMock.mockReset();
+  prepareManagedTraeLaunchMock.mockResolvedValue(undefined);
   sendMessageMock.mockClear();
   uploadImageMock.mockClear();
   replyMessageMock.mockClear();
@@ -747,6 +751,43 @@ describe('spawnDashboardSession — backlog (待办池) parks without starting t
 });
 
 describe('spawnDashboardSession — in_progress starts immediately', () => {
+  it('keeps the opening reservation and waits for managed Trae preparation before any worker can spawn', async () => {
+    vi.mocked(getBot).mockReturnValue({
+      config: {
+        cliId: 'traex', cliPathOverride: undefined, defaultWorkingDir: '/tmp',
+        codexRpcInput: true, backendType: 'tmux',
+      },
+      botName: 'TestBot', botOpenId: 'ou_bot',
+    } as any);
+    let releasePrepare!: () => void;
+    prepareManagedTraeLaunchMock.mockImplementationOnce(async (ds: DaemonSession) => {
+      await new Promise<void>(resolve => { releasePrepare = resolve; });
+      ds.session.btwRuntime = {
+        socket: '/tmp/btw.sock', epoch: 'epoch-1', protocolVersion: 1, buildId: 'build-1',
+        configHash: 'frozen-profile-1', notificationCursor: 0,
+      };
+    });
+
+    const active = new Map<string, DaemonSession>();
+    const spawning = spawnDashboardSession(active, undefined, {
+      larkAppId: APP, chatId: CHAT, content: '必须先持久化再启动', column: 'in_progress', role: 'solo',
+    });
+
+    await vi.waitFor(() => expect(prepareManagedTraeLaunchMock).toHaveBeenCalledTimes(1));
+    const reserved = active.get(sessionKey(CHAT, APP));
+    expect(reserved?.initialStartPending).toBe(true);
+    expect(forkWorkerMock).not.toHaveBeenCalled();
+
+    releasePrepare();
+    await expect(spawning).resolves.toMatchObject({ ok: true });
+    expect(forkWorkerMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        session: expect.objectContaining({ btwRuntime: expect.objectContaining({ epoch: 'epoch-1' }) }),
+      }),
+      expect.anything(),
+    );
+  });
+
   it('forks the worker with a botmux-wrapped prompt carrying the content; not queued', async () => {
     const active = new Map<string, DaemonSession>();
     const r = await spawnDashboardSession(active, undefined, {

@@ -20,6 +20,7 @@ import type {
   PrepareBtwInput,
   PrepareBtwResult,
 } from './types.js';
+import type { AttachedBtwRuntimeSession, BtwFirstTurnResult, BtwRuntimeNotification, FrozenBtwSessionProfile } from './runtime-protocol.js';
 
 interface ClientInit {
   descriptor: BtwRuntimeDescriptor;
@@ -185,6 +186,14 @@ function isQuiesceResult(value: unknown): boolean {
 
 function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unknown): boolean {
   switch (commandType) {
+    case 'ensure_session': return isRecord(value) && isRecord(value.attachment) && isRecord(value.capabilities);
+    case 'attach_session': return isRecord(value) && isRecord(value.attachment);
+    case 'detach_session':
+    case 'ack_events':
+    case 'set_thread_name': return isRecord(value) && value.done === true;
+    case 'submit_first_turn': return isRecord(value) && (value.outcome === 'accepted' || value.outcome === 'not-sent' || value.outcome === 'ambiguous');
+    case 'submit_main_turn': return isRecord(value) && typeof value.nativeTurnId === 'string';
+    case 'read_thread_metadata': return isRecord(value);
     case 'prepare_btw': return isRecord(value) && (value.kind === 'created' || value.kind === 'duplicate') && isOperation(value.operation);
     case 'record_initial_card_attempt':
     case 'record_card':
@@ -257,16 +266,22 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return BtwProjectionWakeSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, larkAppId);
   }
 
-  ensureSession(): Promise<never> { throw new Error('Task 6 does not implement ensureSession'); }
-  attachSession(): Promise<never> { throw new Error('Task 6 does not implement attachSession'); }
-  detachSession(): Promise<never> { throw new Error('Task 6 does not implement detachSession'); }
+  async ensureSession(profile: FrozenBtwSessionProfile) {
+    return await this.request<any>({ type: 'ensure_session', profile });
+  }
+  async attachSession(input: { sessionId: string; cursor: number }): Promise<AttachedBtwRuntimeSession> {
+    const subscription = new BtwSessionNotificationSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, input);
+    const attachment = await subscription.ready;
+    return { attachment, notifications: subscription, detach: async () => { await subscription.return(); await this.detachSession(input.sessionId); } };
+  }
+  async detachSession(sessionId: string): Promise<void> { await this.request({ type: 'detach_session', sessionId }); }
   quiesceSession(): Promise<never> { throw new Error('Task 6 does not implement quiesceSession'); }
   closeSession(): Promise<never> { throw new Error('Task 6 does not implement closeSession'); }
-  submitFirstTurn(): Promise<never> { throw new Error('Task 6 does not implement submitFirstTurn'); }
-  submitMainTurn(): Promise<never> { throw new Error('Task 6 does not implement submitMainTurn'); }
-  readThreadMetadata(): Promise<never> { throw new Error('Task 6 does not implement readThreadMetadata'); }
-  setThreadName(): Promise<never> { throw new Error('Task 6 does not implement setThreadName'); }
-  ackEvents(): Promise<never> { throw new Error('Task 6 does not implement ackEvents'); }
+  async submitFirstTurn(sessionId: string, content: string, identity: any): Promise<BtwFirstTurnResult> { return await this.request({ type: 'submit_first_turn', sessionId, content, identity }); }
+  async submitMainTurn(sessionId: string, content: string, identity: any): Promise<{ nativeTurnId: string }> { return await this.request({ type: 'submit_main_turn', sessionId, content, identity }); }
+  async readThreadMetadata(sessionId: string, timeoutMs?: number) { return await this.request<{ name?: string; preview?: string; updatedAt?: number }>({ type: 'read_thread_metadata', sessionId, timeoutMs }); }
+  async setThreadName(sessionId: string, name: string): Promise<void> { await this.request({ type: 'set_thread_name', sessionId, name }); }
+  async ackEvents(sessionId: string, seq: number): Promise<void> { await this.request({ type: 'ack_events', sessionId, seq }); }
   answerUserInput(): Promise<never> { throw new Error('Task 6 does not implement answerUserInput'); }
   quiesceApp(): Promise<never> { throw new Error('Task 6 does not implement quiesceApp'); }
   closeApp(): Promise<never> { throw new Error('Task 6 does not implement closeApp'); }
@@ -325,6 +340,70 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
 export interface BtwProjectionWakeSubscription extends AsyncIterable<{ kind: 'btw_projection_wake' }> {
   /** Resolves only after the server accepted the authenticated subscription. */
   readonly ready: Promise<void>;
+}
+
+class BtwSessionNotificationSubscription implements AsyncIterable<BtwRuntimeNotification>, AsyncIterator<BtwRuntimeNotification> {
+  private readonly values: BtwRuntimeNotification[] = [];
+  private waiting?: { resolve(value: IteratorResult<BtwRuntimeNotification>): void; reject(error: Error): void };
+  private socket?: Socket;
+  private closed = false;
+  private buffer = Buffer.alloc(0);
+  readonly ready: Promise<import('./runtime-protocol.js').BtwRuntimeAttachment>;
+
+  constructor(
+    createSocket: () => Promise<Socket>, descriptor: BtwRuntimeDescriptor,
+    private readonly input: { sessionId: string; cursor: number },
+  ) {
+    this.ready = (async () => {
+      const socket = this.socket = await createSocket();
+      const requestId = randomRequestId();
+      socket.write(`${JSON.stringify({ requestId, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, runtimeEpoch: descriptor.epoch, command: { type: 'attach_session', ...input } } satisfies BtwRuntimeEnvelope)}\n`);
+      const reply = JSON.parse(await readLine(socket)) as BtwRuntimeFrame;
+      if (reply.kind !== 'reply' || !reply.ok || reply.requestId !== requestId || reply.commandType !== 'attach_session') {
+        throw new Error('btw session attachment was not acknowledged');
+      }
+      socket.on('data', this.onData);
+      socket.once('error', error => this.fail(error));
+      socket.once('close', () => this.fail(new Error('btw session attachment closed')));
+      return reply.result.attachment;
+    })().catch(error => { this.fail(error instanceof Error ? error : new Error(String(error))); throw error; });
+  }
+
+  [Symbol.asyncIterator](): AsyncIterator<BtwRuntimeNotification> { return this; }
+  next(): Promise<IteratorResult<BtwRuntimeNotification>> {
+    if (this.values.length) return Promise.resolve({ done: false, value: this.values.shift()! });
+    if (this.closed) return Promise.resolve({ done: true, value: undefined });
+    return new Promise((resolve, reject) => { this.waiting = { resolve, reject }; });
+  }
+  async return(): Promise<IteratorResult<BtwRuntimeNotification>> {
+    this.closed = true;
+    this.socket?.destroy();
+    this.waiting?.resolve({ done: true, value: undefined });
+    return { done: true, value: undefined };
+  }
+  private readonly onData = (chunk: Buffer | string): void => {
+    this.buffer = Buffer.concat([this.buffer, typeof chunk === 'string' ? Buffer.from(chunk) : chunk]);
+    while (true) {
+      const newline = this.buffer.indexOf(0x0a);
+      if (newline < 0) return;
+      const line = this.buffer.subarray(0, newline).toString('utf8');
+      this.buffer = this.buffer.subarray(newline + 1);
+      try {
+        const frame = JSON.parse(line) as BtwRuntimeFrame;
+        if (frame.kind === 'session_notification' && frame.notification.sessionId === this.input.sessionId) this.push(frame.notification);
+      } catch { this.fail(new Error('invalid btw session notification')); }
+    }
+  };
+  private push(value: BtwRuntimeNotification): void {
+    if (this.waiting) { const waiting = this.waiting; this.waiting = undefined; waiting.resolve({ done: false, value }); }
+    else this.values.push(value);
+  }
+  private fail(error: Error): void {
+    if (this.closed) return;
+    this.closed = true;
+    const waiting = this.waiting; this.waiting = undefined;
+    waiting?.reject(error);
+  }
 }
 
 class BtwProjectionWakeSubscriptionImpl implements BtwProjectionWakeSubscription {

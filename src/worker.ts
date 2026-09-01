@@ -12,7 +12,7 @@
  *   6. On 'close', kills CLI and exits
  *   7. On 'restart', kills CLI and re-spawns with --resume
  */
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { accessSync, chmodSync, mkdirSync, writeFileSync, unlinkSync, rmdirSync, existsSync, statSync, lstatSync, readdirSync, readlinkSync, readFileSync, realpathSync, copyFileSync, watch as fsWatch, createWriteStream, openSync, closeSync, fstatSync, constants as fsConstants, type FSWatcher, type WriteStream } from 'node:fs';
 import { atomicWriteFileSync } from './utils/atomic-write.js';
 import { join, basename, dirname, delimiter, relative } from 'node:path';
@@ -428,6 +428,11 @@ import {
   type CodexRpcTurnIdentity,
   type CodexRpcTurnTerminal,
 } from './codex-rpc-engine.js';
+import { PersistentTraeRpcProxy } from './codex-rpc-session.js';
+import { isPersistentTraeRpcColdStart } from './codex-rpc-lifecycle.js';
+import { connectBtwRuntime } from './features/btw/runtime-client.js';
+import { ManagedTraeNotificationBridge } from './features/btw/managed-notification-bridge.js';
+import type { AttachedBtwRuntimeSession, BtwRuntimeNotification } from './features/btw/runtime-protocol.js';
 import {
   beginRuntimeWriteCycle,
   isCliBackendGenerationCurrent,
@@ -542,6 +547,163 @@ let remoteWsUrl: string | undefined;
 let remoteThreadId: string | undefined;
 let rpcDialogDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let rpcEnginePidMarker: string | null = null;
+// Scheme B: this state is separate from codexRpcEngine.  The local engine keeps
+// its synchronous owned-process lifecycle; a managed Trae attachment owns only
+// a runtime subscription and must detach without synthesizing a local terminal.
+let managedTraeAttachment: {
+  runtimeEpoch: string;
+  workerGeneration: number;
+  subscription: AttachedBtwRuntimeSession;
+  proxy: PersistentTraeRpcProxy;
+  close: () => void;
+  bridge: ManagedTraeNotificationBridge;
+} | undefined;
+
+type ManagedTraeTurn = {
+  identity: CodexRpcTurnIdentity;
+  attachment: NonNullable<typeof managedTraeAttachment>;
+};
+
+const managedTraeTurnsAwaitingSubmit = new Map<string, ManagedTraeTurn>();
+const managedTraeTurnsActive = new Map<string, ManagedTraeTurn>();
+const pendingManagedTraeTerminals = new Map<string, CodexRpcTurnTerminal>();
+
+function managedTraeTurnKey(identity: CodexRpcTurnIdentity): string {
+  return `${identity.turnId}|${identity.dispatchAttempt ?? ''}`;
+}
+
+async function detachManagedTraeAttachment(): Promise<void> {
+  const attachment = managedTraeAttachment;
+  managedTraeAttachment = undefined;
+  if (!attachment) return;
+  await attachment.bridge.stop();
+  await attachment.proxy.stop().catch(() => undefined);
+  attachment.close();
+  for (const [key, turn] of managedTraeTurnsAwaitingSubmit) {
+    if (turn.attachment === attachment) managedTraeTurnsAwaitingSubmit.delete(key);
+  }
+  for (const [key, turn] of managedTraeTurnsActive) {
+    if (turn.attachment === attachment) managedTraeTurnsActive.delete(key);
+  }
+}
+
+async function attachManagedTraeRuntime(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise<void> {
+  if (!isPersistentTraeRpcColdStart(cfg, { sandboxForced: sandboxEnabled() }) || !cfg.btwRuntime || !cfg.workerGeneration) return;
+  const runtime = await connectBtwRuntime({ dataDir: config.session.dataDir, expectedEpoch: cfg.btwRuntime.epoch });
+  const subscription = await runtime.client.attachSession({ sessionId: cfg.sessionId, cursor: cfg.btwRuntime.notificationCursor });
+  const proxy = new PersistentTraeRpcProxy({
+    runtime: runtime.client,
+    sessionId: cfg.sessionId,
+    appServerUrl: subscription.attachment.appServerUrl,
+    nativeThreadId: subscription.attachment.nativeThreadId,
+    // The proxy owns detach_session. Close only the subscriber first so this
+    // worker never issues a duplicate detach command during teardown.
+    closeSubscription: async () => {
+      const iterator = subscription.notifications[Symbol.asyncIterator]();
+      await iterator.return?.();
+    },
+  });
+  const attachment = {
+    runtimeEpoch: cfg.btwRuntime.epoch,
+    workerGeneration: cfg.workerGeneration,
+    subscription,
+    proxy,
+    close: runtime.close,
+    bridge: undefined as unknown as ManagedTraeNotificationBridge,
+  };
+  attachment.bridge = new ManagedTraeNotificationBridge({
+    sessionId: cfg.sessionId,
+    workerGeneration: attachment.workerGeneration,
+    runtimeEpoch: attachment.runtimeEpoch,
+    cursor: cfg.btwRuntime.notificationCursor,
+    notifications: subscription.notifications,
+    apply: notification => applyManagedTraeNotification(notification),
+    requestCommit: request => send(request),
+    ackEvents: throughSeq => runtime.client.ackEvents(cfg.sessionId, throughSeq),
+    detach: () => detachManagedTraeAttachment(),
+    requestId: () => randomUUID(),
+  });
+  managedTraeAttachment = attachment;
+  remoteWsUrl = proxy.wsUrl;
+  remoteThreadId = proxy.activeThreadId;
+  void consumeManagedTraeNotifications(attachment);
+}
+
+async function consumeManagedTraeNotifications(
+  attachment: NonNullable<typeof managedTraeAttachment>,
+): Promise<void> {
+  try {
+    await attachment.bridge.run();
+  } catch (error) {
+    if (managedTraeAttachment === attachment) {
+      log(`Managed Trae attachment closed: ${error instanceof Error ? error.message : String(error)}`);
+      void detachManagedTraeAttachment();
+    }
+  }
+}
+
+/** Apply only worker-owned presentation/terminal facts. Cursor advancement is
+ * controlled by ManagedTraeNotificationBridge after this function resolves. */
+async function applyManagedTraeNotification(notification: BtwRuntimeNotification): Promise<void> {
+  if (notification.kind === 'main_event') {
+    if (notification.payload.type === 'cot' && currentBotmuxTurnId) {
+      observeCotEntries(notification.payload.entries, {
+        turnId: currentBotmuxTurnId, dispatchAttempt: currentBotmuxDispatchAttempt,
+      });
+    }
+    return;
+  }
+  if (notification.kind === 'main_terminal') {
+    const terminal = notification.payload;
+    const key = managedTraeTurnKey(terminal.identity);
+    if (managedTraeTurnsAwaitingSubmit.has(key)) {
+      // The app-server may publish turn/completed in the same socket read as
+      // submit_main_turn's reply. Keep it exact until the submit continuation
+      // marks this identity active.
+      pendingManagedTraeTerminals.set(key, terminal);
+      return;
+    }
+    settleManagedTraeTerminal(terminal);
+    return;
+  }
+  if (notification.kind === 'request_user_input') {
+    failManagedTraeTurns('managed_trae_request_user_input');
+    throw new Error('managed Trae request_user_input requires an explicit worker interruption path');
+  }
+  failManagedTraeTurns(notification.payload.errorCode);
+  throw new Error(`managed Trae app-server died: ${notification.payload.errorCode}`);
+}
+
+function activateManagedTraeTurn(identity: CodexRpcTurnIdentity, attachment: NonNullable<typeof managedTraeAttachment>): void {
+  const key = managedTraeTurnKey(identity);
+  managedTraeTurnsAwaitingSubmit.delete(key);
+  if (managedTraeAttachment !== attachment) return;
+  managedTraeTurnsActive.set(key, { identity, attachment });
+  const terminal = pendingManagedTraeTerminals.get(key);
+  if (!terminal) return;
+  pendingManagedTraeTerminals.delete(key);
+  settleManagedTraeTerminal(terminal);
+}
+
+function settleManagedTraeTerminal(terminal: CodexRpcTurnTerminal): void {
+  const key = managedTraeTurnKey(terminal.identity);
+  if (!managedTraeTurnsActive.has(key)) return;
+  managedTraeTurnsActive.delete(key);
+  const status: TurnTerminalStatus = terminal.status === 'completed' ? 'completed'
+    : terminal.status === 'failed' ? 'failed' : 'ambiguous';
+  emitTurnTerminal(terminal.identity.turnId, status, terminal.errorCode, terminal.identity.dispatchAttempt);
+  idleDetector?.fireIdle();
+}
+
+function failManagedTraeTurns(errorCode: string): void {
+  const active = [...managedTraeTurnsActive.values()];
+  managedTraeTurnsActive.clear();
+  managedTraeTurnsAwaitingSubmit.clear();
+  pendingManagedTraeTerminals.clear();
+  for (const turn of active) {
+    emitTurnTerminal(turn.identity.turnId, 'ambiguous', errorCode, turn.identity.dispatchAttempt);
+  }
+}
 const piInitialPromptCleanupPaths: string[] = [];
 const piInitialPromptCleanupDirs: string[] = [];
 let piInitialPromptReadonlyRoots: string[] = [];
@@ -11215,11 +11377,13 @@ async function flushPending(): Promise<void> {
       const writeBackend = backend;
       const writeAdapter = cliAdapter;
       const writeRpcEngine = codexRpcEngine;
+      const writeManagedTraeAttachment = managedTraeAttachment;
       const writeContinuationIsCurrent = (): boolean => (
         cliSpawnGeneration === writeGeneration
         && backend === writeBackend
         && cliAdapter === writeAdapter
         && codexRpcEngine === writeRpcEngine
+        && managedTraeAttachment === writeManagedTraeAttachment
         && !cliRestartInProgress
       );
       const durableWrite = item.dispatchAttempt !== undefined;
@@ -11247,7 +11411,7 @@ async function flushPending(): Promise<void> {
         // in-flight and must not participate in restart replay. RPC mode is
         // excluded: the app-server owns an accepted turn independently of the
         // viewer pane, so replaying it after a pane restart could run it twice.
-        if (!writeRpcEngine) {
+        if (!writeRpcEngine && !writeManagedTraeAttachment) {
           inflightInputs.onWrite(item);
           stuckDetector?.arm();
         }
@@ -11263,7 +11427,7 @@ async function flushPending(): Promise<void> {
             item.turnId,
             item.dispatchAttempt,
           );
-        } else if (codexBridgeActive && !writeRpcEngine) {
+        } else if (codexBridgeActive && !writeRpcEngine && !writeManagedTraeAttachment) {
           bridgeTurnId = codexBridgeMarkPendingTurn(logicalMsg, item.turnId, item.dispatchAttempt);
           if (bridgeTurnId) {
             codexBridgeQueue.beginSubmitVerification(bridgeTurnId, undefined, item.dispatchAttempt);
@@ -11366,8 +11530,28 @@ async function flushPending(): Promise<void> {
       let result: Awaited<ReturnType<typeof writeAdapter.writeInput>> | undefined;
       let rpcTurnIdentity: CodexRpcTurnIdentity | undefined;
       let rpcTurnGeneration: RpcTurnGeneration | undefined;
+      let managedTraeTurnIdentity: CodexRpcTurnIdentity | undefined;
       try {
-        if (writeRpcEngine) {
+        if (writeManagedTraeAttachment) {
+          managedTraeTurnIdentity = {
+            turnId: item.turnId ?? `managed-trae-${randomBytes(8).toString('hex')}`,
+            ...(item.dispatchAttempt !== undefined ? { dispatchAttempt: item.dispatchAttempt } : {}),
+          };
+          const managedKey = managedTraeTurnKey(managedTraeTurnIdentity);
+          managedTraeTurnsAwaitingSubmit.set(managedKey, {
+            identity: managedTraeTurnIdentity, attachment: writeManagedTraeAttachment,
+          });
+          await runAfterAmbiguousSubmissionWrites(writeBackend, async () => {
+            prepareNormalWrite();
+            await writeManagedTraeAttachment.proxy.sendTurn(msg, managedTraeTurnIdentity!);
+          });
+          if (!writeContinuationIsCurrent()) {
+            log(`Managed Trae submit continuation became stale turn=${managedTraeTurnIdentity.turnId}`);
+            break;
+          }
+          result = { submitted: true };
+          activateManagedTraeTurn(managedTraeTurnIdentity, writeManagedTraeAttachment);
+        } else if (writeRpcEngine) {
           rpcTurnIdentity = {
             turnId: item.turnId ?? `codex-rpc-${randomBytes(8).toString('hex')}`,
             ...(item.dispatchAttempt !== undefined
@@ -11504,6 +11688,17 @@ async function flushPending(): Promise<void> {
           } else {
             handleStaleWriteContinuation('write_generation_changed_after_error');
           }
+          break;
+        }
+        if (managedTraeTurnIdentity && writeManagedTraeAttachment) {
+          const key = managedTraeTurnKey(managedTraeTurnIdentity);
+          managedTraeTurnsAwaitingSubmit.delete(key);
+          // A post-dispatch error is ambiguous by contract; the runtime retains
+          // the durable owner, so detach rather than retry through the PTY.
+          if (item.turnId) {
+            emitTurnTerminal(item.turnId, 'ambiguous', 'managed_trae_submit_unknown', item.dispatchAttempt);
+          }
+          void detachManagedTraeAttachment();
           break;
         }
         if (rpcTurnIdentity && rpcTurnGeneration && writeRpcEngine) {
@@ -16243,6 +16438,9 @@ function killCli(opts: {
   currentCliCredentialIsolated = false;
   stopNativeSessionTitleSync();
   stopSessionMcpGatewayHost();
+  // Scheme B keeps this orthogonal to local RPC ownership. The managed runtime
+  // stays alive; worker teardown merely closes its observer and detaches.
+  void detachManagedTraeAttachment();
   stopCodexRpcEngine();
   cleanupCodexAppControlBootstrap();
   stopCodexAppControlChannel();
@@ -16448,7 +16646,12 @@ async function restartCliProcess(
             // (a fresh port), not the dead prior one. engageCodexRpc only sets
             // remote* on success, else spawnCli falls back to paste.
             let rpcPluginGenerationPrepared = false;
-            if (codexRpcEligible(restartCfg, { sandboxForced: sandboxEnabled() })) {
+            if (isPersistentTraeRpcColdStart(restartCfg, { sandboxForced: sandboxEnabled() })) {
+              await attachManagedTraeRuntime(restartCfg);
+              if (!managedTraeAttachment) {
+                throw new Error('managed Trae runtime could not reattach after worker restart');
+              }
+            } else if (codexRpcEligible(restartCfg, { sandboxForced: sandboxEnabled() })) {
               const adapter = createCliAdapterSync(restartCfg.cliId as CliId, restartCfg.cliPathOverride);
               await prepareCliPluginGenerationAndGateway(restartCfg, adapter);
               rpcPluginGenerationPrepared = true;
@@ -18413,24 +18616,59 @@ process.on('message', async (raw: unknown) => {
         // against the CURRENT app-server (a fresh port each incarnation).
         const rpcBackendType = msg.backendType ?? config.daemon.backendType;
         let rpcPluginGenerationPrepared = false;
-        const rpcDecision = await orchestrateCodexRpcInit(msg, {
-          paneInfo: (sid) => persistentPaneInfo(rpcBackendType, sid),
-          paneIsRemote: (name) => paneRunsRemoteTui(name, {}, msg.cliRuntime?.executable),
-          prepare: async () => {
-            const adapter = createCliAdapterSync(msg.cliId as CliId, msg.cliPathOverride);
-            await prepareCliPluginGenerationAndGateway(msg, adapter);
-            rpcPluginGenerationPrepared = true;
-          },
-          engage: () => engageCodexRpc(msg),
-          killVerify: (name) => killPersistentSessionVerified(
-            rpcBackendType as PersistentBackendType,
-            name,
-            msg.sessionId,
-          ),
-          teardownEngine: () => stopCodexRpcEngine(),
-          log: (m) => log(m),
-          notify: (m) => send({ type: 'user_notify', message: m, turnId: msg.turnId }),
-        }, { sandboxForced: sandboxEnabled() });
+        const managedTrae = isPersistentTraeRpcColdStart(msg, { sandboxForced: sandboxEnabled() });
+        let managedTraeInitialQueued = true;
+        if (managedTrae) {
+          await attachManagedTraeRuntime(msg);
+          if (!managedTraeAttachment) {
+            throw new Error('persisted managed Trae runtime attachment could not be established');
+          }
+          if (!msg.resume && msg.prompt) {
+            const identity: CodexRpcTurnIdentity = {
+              turnId: msg.turnId ?? `managed-trae-first-${randomBytes(8).toString('hex')}`,
+              ...(msg.dispatchAttempt !== undefined ? { dispatchAttempt: msg.dispatchAttempt } : {}),
+            };
+            const key = managedTraeTurnKey(identity);
+            managedTraeTurnsAwaitingSubmit.set(key, { identity, attachment: managedTraeAttachment });
+            const first = await managedTraeAttachment.proxy.sendFirstTurn(msg.prompt, identity, async () => false);
+            if (first.outcome === 'accepted') {
+              activateManagedTraeTurn(identity, managedTraeAttachment);
+            } else {
+              managedTraeTurnsAwaitingSubmit.delete(key);
+              if (first.outcome === 'ambiguous') {
+                send({
+                  type: 'user_notify', turnId: identity.turnId,
+                  ...(identity.dispatchAttempt !== undefined ? { dispatchAttempt: identity.dispatchAttempt } : {}),
+                  message: 'Trae 首条消息已发出但未获得可验证确认；为避免重复执行，未自动重发。',
+                });
+              }
+            }
+            // An explicitly unsent first frame is safe to deliver through the
+            // normal managed main-turn path. Accepted and ambiguous outcomes
+            // own the initial prompt boundary and must never be resent.
+            managedTraeInitialQueued = first.outcome === 'not-sent';
+          }
+        }
+        const rpcDecision = managedTrae
+          ? { engaged: false, queuePrompt: managedTraeInitialQueued, abortSpawn: false }
+          : await orchestrateCodexRpcInit(msg, {
+            paneInfo: (sid) => persistentPaneInfo(rpcBackendType, sid),
+            paneIsRemote: (name) => paneRunsRemoteTui(name, {}, msg.cliRuntime?.executable),
+            prepare: async () => {
+              const adapter = createCliAdapterSync(msg.cliId as CliId, msg.cliPathOverride);
+              await prepareCliPluginGenerationAndGateway(msg, adapter);
+              rpcPluginGenerationPrepared = true;
+            },
+            engage: () => engageCodexRpc(msg),
+            killVerify: (name) => killPersistentSessionVerified(
+              rpcBackendType as PersistentBackendType,
+              name,
+              msg.sessionId,
+            ),
+            teardownEngine: () => stopCodexRpcEngine(),
+            log: (m) => log(m),
+            notify: (m) => send({ type: 'user_notify', message: m, turnId: msg.turnId }),
+          }, { sandboxForced: sandboxEnabled() });
         if (rpcDecision.engaged) log(`Codex RPC resume: pane bound to ${remoteWsUrl}`);
         if (rpcDecision.abortSpawn) {
           // Stale --remote pane couldn't be replaced — refuse to attach it. Abort
@@ -18502,7 +18740,7 @@ process.on('message', async (raw: unknown) => {
         let initialInputCommitted = false;
         if (shouldQueueInitialPrompt({
           hasPrompt: !!msg.prompt,
-          rpcEngineActive: !!codexRpcEngine,
+          rpcEngineActive: !!codexRpcEngine || !!managedTraeAttachment,
           queuePrompt: rpcDecision.queuePrompt,
           passesInitialPromptViaArgs: cliAdapter?.passesInitialPromptViaArgs === true,
           deferInitialPrompt,
@@ -18594,6 +18832,13 @@ process.on('message', async (raw: unknown) => {
       if (!msg.ok) {
         log(`Daemon rejected Codex App dispatch persistence: ${msg.error ?? 'unknown error'}`);
       }
+      break;
+    }
+
+    case 'btw_notification_cursor_persisted': {
+      const attachment = managedTraeAttachment;
+      if (!attachment) break;
+      attachment.bridge.onCursorPersisted(msg);
       break;
     }
 
@@ -19612,6 +19857,7 @@ process.on('message', async (raw: unknown) => {
       log('Suspend requested');
       stopScreenshotLoop();
       stopBridgeWatcher();
+      await detachManagedTraeAttachment();
       // A parked crash diagnostic shell has backend===null, so the
       // destroySession/kill below is a no-op and would otherwise leak the
       // bmx-diag-<sid> session. Tear it down explicitly. (The session then

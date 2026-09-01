@@ -12,7 +12,7 @@ import * as sessionStore from '../services/session-store.js';
 import * as messageQueue from '../services/message-queue.js';
 import { downloadMessageResource, listChatBotMembers, UserTokenMissingError } from '../im/lark/client.js';
 import { logger } from '../utils/logger.js';
-import { forkWorker, sendWorkerInput, promoteQueuedActivationTail, forkAdoptWorker, adoptSandboxBlocked, killStalePids, sweepDeadPidMarkers, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, setActiveSessionIfActive, isDisposableCommandScratch, isRelayableRealSession, closeSession, getActiveSessionsRegistry, suspendWorker, withActiveSessionKeyLock, isSessionTransferring, deferUntilSessionTransferSettled, ensureOrdinaryTurnRecoveryAttached } from './worker-pool.js';
+import { forkWorker, prepareManagedTraeLaunch, sendWorkerInput, promoteQueuedActivationTail, forkAdoptWorker, adoptSandboxBlocked, killStalePids, sweepDeadPidMarkers, getCurrentCliVersion, restoreUsageLimitRuntimeState, setActiveSessionSafe, setActiveSessionIfActive, isDisposableCommandScratch, isRelayableRealSession, closeSession, getActiveSessionsRegistry, suspendWorker, withActiveSessionKeyLock, isSessionTransferring, deferUntilSessionTransferSettled, ensureOrdinaryTurnRecoveryAttached } from './worker-pool.js';
 import { createCliAdapterSync } from '../adapters/cli/registry.js';
 import type { CliAdapter } from '../adapters/cli/types.js';
 import { botHomePath } from '../adapters/cli/read-isolation.js';
@@ -3817,6 +3817,10 @@ async function forkOrShowRepoCard(
   ensureSessionWhiteboard(ds);
   const prompt = buildPrompt();
   rememberLastCliInput(ds, userContent, prompt);
+  // Scheme C: persist the eligible fresh Trae runtime attachment before the
+  // synchronous worker launch. initialStartPending remains held through this
+  // await, so concurrent routing cannot replace this opening owner.
+  await prepareManagedTraeLaunch(ds);
   forkWorker(ds, prompt);
   // forkWorker pre-accept is synchronous. Keep the reservation and all input
   // buffers intact if it throws; only expose the normal worker state after it
