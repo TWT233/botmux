@@ -166,6 +166,32 @@ describe('resolveDaemonEnv()', () => {
       BOTMUX_WORKER_HOST: '',
     }));
   });
+
+  it.each([
+    {
+      name: 'keeps an inherited legacy alias ahead of the persisted legacy alias for a shell start',
+      inherited: { BOTMUX_WORKER_HOST: '::2' },
+      file: 'BOTMUX_WORKER_HOST=::1',
+      want: '::2',
+    },
+    {
+      name: 'lets an empty persisted canonical key shadow an inherited legacy alias for a shell start',
+      inherited: { BOTMUX_WORKER_HOST: '::2' },
+      file: 'BOTMUX_WORKER_HTTP_HOST=\nBOTMUX_WORKER_HOST=::1',
+      want: '0.0.0.0',
+    },
+    {
+      name: 'lets an empty persisted canonical key shadow the persisted legacy alias for a session restart',
+      inherited: { BOTMUX_SESSION_ID: 'session-1', BOTMUX_WORKER_HOST: '::2' },
+      file: 'BOTMUX_WORKER_HTTP_HOST=\nBOTMUX_WORKER_HOST=::1',
+      want: '0.0.0.0',
+    },
+  ])('$name', ({ inherited, file, want }) => {
+    const resolved = resolveDaemonEnv(inherited, file);
+
+    expect(resolved.BOTMUX_WORKER_HTTP_HOST).toBe(want);
+    expect(resolved.BOTMUX_WORKER_HOST).toBe('');
+  });
 });
 
 describe('DAEMON_ENV_KEYS carries only non-secret fleet settings', () => {
