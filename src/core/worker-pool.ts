@@ -12458,7 +12458,15 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Ignored claude_exit from stale worker generation`);
           break;
         }
-        ds.managedTurnOrigin = undefined;
+        ds.managedTurnOrigin = ds.managedTurnOrigin?.policyCapability
+          ? {
+              capability: randomBytes(32).toString('hex'),
+              ...(ds.managedTurnOrigin.originChannelId
+                ? { originChannelId: ds.managedTurnOrigin.originChannelId }
+                : {}),
+              policyCapability: ds.managedTurnOrigin.policyCapability,
+            }
+          : undefined;
         // The worker/CLI generation ended. Disable an outstanding stuck-warning
         // card before any replacement worker can be attached; otherwise a late
         // click could inject its keys into the replacement CLI.
