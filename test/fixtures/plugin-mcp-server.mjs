@@ -42,7 +42,7 @@ server.setRequestHandler(ListToolsRequestSchema, request => request.params?.curs
 server.setRequestHandler(CallToolRequestSchema, request => ({
   content: [{
     type: 'text',
-    text: `${serverName}:${request.params.name}:${JSON.stringify(request.params.arguments ?? {})}:meta=${JSON.stringify(request.params._meta ?? {})}:session=${process.env.BOTMUX_SESSION_ID || ''}:token=${process.env.PRIVATE_MCP_TOKEN || ''}`,
+    text: `${serverName}:${request.params.name}:${JSON.stringify(request.params.arguments ?? {})}:meta=${JSON.stringify(request.params._meta ?? {})}:session=${process.env.BOTMUX_SESSION_ID || ''}:token=${process.env.PRIVATE_MCP_TOKEN || ''}:frozen=${process.env.FROZEN_SESSION_ENV || ''}:owner=${process.env.BOTMUX_OWNER_OPEN_ID || ''}:legacyOwner=${process.env.__OWNER_OPEN_ID || ''}`,
   }],
 }));
 

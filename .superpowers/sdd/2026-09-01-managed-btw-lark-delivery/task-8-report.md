@@ -39,3 +39,42 @@ The focused selector passed: 4 files / 61 tests.  TypeScript checking, the
 final Bun build (including public-domain and embedded-asset audits), and the
 whitespace check all passed.  Test-created fake App Server processes under this
 task worktree were terminated after verification.
+
+## Fix round 1/5: freeze runtime MCP process environment
+
+### RED evidence
+
+- A managed-runtime relay test started the runtime with ambient owner/env
+  values, then ensured a profile with `FROZEN_SESSION_ENV=first-generation`
+  and `ownerOpenId=ou_frozen_owner`.  After attachment replacement, the real
+  plugin fixture returned `frozen=` and descriptor-supplied owner values.
+- An ownerless managed profile likewise allowed descriptor-supplied owner values
+  into the real downstream plugin process.
+- A generic gateway regression showed that blindly forwarding the gateway's
+  constructor env would change existing non-managed gateway behavior.
+
+### Green behavior
+
+- The runtime passes its already-sanitized, owner-final session env explicitly
+  to the runtime-owned MCP host.  The host snapshots it into the Gateway.
+- Only this explicit frozen-host path contributes that session env to stdio
+  plugin subprocesses.  It applies the frozen owner after descriptor env, or
+  deletes both owner channels for an ownerless session.
+- Generic and omitted-manifest gateway callers retain their inherited default
+  environment behavior.
+
+### Verification
+
+```sh
+bun run build
+./node_modules/.bin/vitest run --project unit \
+  test/btw-runtime-support-continuity.test.ts \
+  test/plugin-mcp-gateway.test.ts \
+  test/ask-resume-restart.test.ts \
+  test/traex-worker-bridge-wiring.test.ts
+./node_modules/.bin/tsc --noEmit
+git diff --check
+```
+
+The focused selector passed: 4 files / 64 tests.  The fresh build and
+TypeScript check passed; `git diff --check` produced no output.
