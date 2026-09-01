@@ -10,7 +10,7 @@ interface BtwCardView {
 
 function operationView(operation: BtwOperation, locale: Locale): BtwCardView {
   const failure = operation.projection.deliveryFailure;
-  if (failure?.kind === 'visible_fallback') {
+  if (failure) {
     return {
       statusKey: 'btw.card.delivery_failed',
       template: 'red',

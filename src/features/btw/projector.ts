@@ -151,16 +151,17 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
       } else {
         await send(target.larkAppId, target.chatId, content, 'text', operation.projection.reminderUuid);
       }
-      await options.runtime.ackProjection(
-        operationScope(operation), operation.btwOpId, expected, { kind: 'reminder_sent' },
-      );
     } catch (error) {
       const classified = classifyProviderError(error);
-      const outcome: BtwProjectionProviderOutcome = classified.responseKnown
+      const outcome: BtwProjectionProviderOutcome = classified.kind === 'retryable' && classified.responseKnown
         ? { kind: 'reminder_definitely_unsent', retryAt: retryAt(now(), operation.projection.reminderAttempt) }
         : { kind: 'reminder_unknown' };
       await options.runtime.ackProjection(operationScope(operation), operation.btwOpId, expected, outcome);
+      return;
     }
+    await options.runtime.ackProjection(
+      operationScope(operation), operation.btwOpId, expected, { kind: 'reminder_sent' },
+    );
   }
 
   async function handleProjection(item: BtwProjectionItem): Promise<void> {
@@ -192,11 +193,19 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
 
     if (
       operation.card.replacementState === 'pending'
+      && operation.card.replacementForRevision !== item.projectionRevision
+    ) {
+      await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'withdrawn' });
+      return;
+    }
+
+    if (
+      operation.card.replacementState === 'pending'
       && operation.card.replacementForRevision === item.projectionRevision
     ) {
+      let messageId: string;
       try {
-        const messageId = await createAtFrozenTarget(operation, cardJson, operation.card.replacementUuid);
-        await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'replacement_created', messageId });
+        messageId = await createAtFrozenTarget(operation, cardJson, operation.card.replacementUuid);
       } catch (error) {
         const classified = classifyProviderError(error);
         if (classified.kind === 'retryable') {
@@ -209,7 +218,9 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
             kind: 'provider_permanent', errorCode: classified.errorCode, message: classified.message,
           });
         }
+        return;
       }
+      await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'replacement_created', messageId });
       return;
     }
 
@@ -220,7 +231,6 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
 
     try {
       await update(operation.replyTarget.larkAppId, targetMessageId, cardJson);
-      await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'patched' });
     } catch (error) {
       if (error instanceof MessageWithdrawnError && operation.card.replacementState === 'none') {
         await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'withdrawn' });
@@ -239,19 +249,20 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
           message: classified.message,
         });
       }
+      return;
     }
+    await options.runtime.ackProjection(scope, operation.btwOpId, expected, { kind: 'patched' });
   }
 
   return {
     ensureInitialCard(operation): Promise<InitialCardResult> {
       return singleFlight(operation, async () => {
         const locale = resolveLocale(operation.replyTarget.larkAppId);
+        let messageId: string;
         try {
-          const messageId = await createAtFrozenTarget(
+          messageId = await createAtFrozenTarget(
             operation, buildBtwCard(operation, locale), operation.card.createUuid,
           );
-          const recorded = await options.runtime.recordCard(operationScope(operation), operation.btwOpId, messageId);
-          return { kind: 'recorded', operation: recorded };
         } catch (error) {
           const classified = classifyProviderError(error);
           const outcome: BtwInitialCardAttemptOutcome = {
@@ -265,6 +276,8 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
           );
           return { kind: outcome.kind === 'unknown' ? 'unknown' : 'pending', operation: recorded };
         }
+        const recorded = await options.runtime.recordCard(operationScope(operation), operation.btwOpId, messageId);
+        return { kind: 'recorded', operation: recorded };
       });
     },
 
