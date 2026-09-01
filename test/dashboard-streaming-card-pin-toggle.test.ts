@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardBehaviorSection } from '../src/dashboard/web/bot-defaults-page.js';
 import { ManageDialog, renderGroupsPage } from '../src/dashboard/web/groups-page.js';
 import type { GroupChat } from '../src/dashboard/web/groups.js';
-import { primeGroupsSnapshotCache } from '../src/dashboard/web/groups-api.js';
+import { fetchGroupsSnapshot, primeGroupsSnapshotCache } from '../src/dashboard/web/groups-api.js';
 import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -379,8 +379,122 @@ describe('group manage streaming-card pin rows', () => {
       .toContain('会置顶');
     expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
       && node.children.join('').includes('later_manual_failed'))).toHaveLength(0);
+    await expect(fetchGroupsSnapshot()).resolves.toEqual({ chats: [savedChat], bots: [] });
 
     act(() => renderer.unmount());
+  });
+
+  it('clears a later manual refresh error when an earlier create poll succeeds', async () => {
+    const bot = { larkAppId: 'cli_a', botName: 'Claude' };
+    primeGroupsSnapshotCache({ chats: [], bots: [bot] });
+    const createResponse = deferred<any>();
+    const pollingResponse = deferred<any>();
+    const manualResponse = deferred<any>();
+    const refreshRequests = [deferred<void>(), deferred<void>()];
+    const pollDelayProcessed = deferred<void>();
+    let refreshCount = 0;
+    const nativeDocument = (globalThis as any).document;
+    const nativeWindow = (globalThis as any).window;
+    const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const hostClearTimeout = globalThis.clearTimeout.bind(globalThis);
+    let releasePollDelay: (() => void) | undefined;
+    (globalThis as any).document = {
+      addEventListener() {},
+      removeEventListener() {},
+      getElementById() { return null; },
+    };
+    (globalThis as any).window = {
+      setTimeout(callback: () => void, ms?: number) {
+        if (ms === 600 && !releasePollDelay) {
+          releasePollDelay = () => {
+            callback();
+            queueMicrotask(() => pollDelayProcessed.resolve());
+          };
+          return 92;
+        }
+        return hostSetTimeout(callback, ms);
+      },
+      clearTimeout: hostClearTimeout,
+      setInterval: globalThis.setInterval.bind(globalThis),
+      clearInterval: globalThis.clearInterval.bind(globalThis),
+      open() {},
+    };
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/feed-groups') {
+        return Promise.resolve(jsonResponse({ ok: true, groups: [], larkAppId: 'cli_a' }));
+      }
+      if (url === '/api/groups/create' && init?.method === 'POST') return createResponse.promise;
+      if (url === '/api/groups?refresh=1') {
+        const index = refreshCount++;
+        refreshRequests[index].resolve();
+        return index === 0 ? pollingResponse.promise : manualResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByType('button').filter(node => node.props.id === 'g-create')).toHaveLength(1);
+    });
+    await act(async () => {
+      renderer.root.findAllByType('button').find(node => node.props.id === 'g-create')!.props.onClick();
+    });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ id: 'g-createform' })).toHaveLength(1);
+    });
+    act(() => {
+      renderer.root.findByProps({ type: 'checkbox', value: 'cli_a' })
+        .props.onChange({ currentTarget: { checked: true } });
+    });
+
+    const nativeFormData = globalThis.FormData;
+    (globalThis as any).FormData = class {
+      get(name: string): string { return name === 'name' ? 'Created Room' : ''; }
+    };
+    try {
+      act(() => {
+        renderer.root.findByProps({ id: 'g-createform' }).props.onSubmit({
+          preventDefault() {},
+          currentTarget: {},
+        });
+      });
+      await act(async () => {
+        createResponse.resolve(jsonResponse({ ok: true, chatId: 'oc_created', creator: 'cli_a' }));
+      });
+      await vi.waitFor(() => expect(releasePollDelay).toBeTypeOf('function'));
+      act(() => { renderer.root.findByProps({ id: 'g-create-close' }).props.onClick(); });
+
+      await act(async () => {
+        releasePollDelay!();
+        await pollDelayProcessed.promise;
+        await refreshRequests[0].promise;
+      });
+      act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
+      await refreshRequests[1].promise;
+      await act(async () => { manualResponse.reject(new Error('later_manual_failed')); });
+      expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
+        && node.children.join('').includes('later_manual_failed'))).toHaveLength(1);
+
+      const polledChat = makeChat([makeMember()], { chatId: 'oc_created', name: 'Polled Room' });
+      await act(async () => {
+        pollingResponse.resolve(jsonResponse({ chats: [polledChat], bots: [bot] }));
+      });
+      await waitForRender(() => {
+        expect(renderer.root.findByProps({ 'data-chat': 'oc_created' }).findByType('b').children.join(''))
+          .toBe('Polled Room');
+      });
+      expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
+        && node.children.join('').includes('later_manual_failed'))).toHaveLength(0);
+    } finally {
+      (globalThis as any).FormData = nativeFormData;
+      (globalThis as any).document = nativeDocument;
+      (globalThis as any).window = nativeWindow;
+      act(() => renderer.unmount());
+    }
   });
 
   it('does not let an older create poll overwrite a newer manual reload', async () => {

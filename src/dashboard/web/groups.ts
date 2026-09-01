@@ -5,6 +5,7 @@ import type {
   RoleProfileSummaryLike,
 } from './role-profile-match.js';
 import {
+  commitGroupsSnapshotCache,
   emptyGroupsSnapshot,
   fetchGroupsSnapshot,
   type GroupBot,
@@ -15,6 +16,7 @@ import {
 import { effectiveRoleKey, loadEffectiveRoleMap } from './role-batch.js';
 
 export {
+  commitGroupsSnapshotCache,
   emptyGroupsSnapshot,
   fetchGroupsSnapshot,
 };
