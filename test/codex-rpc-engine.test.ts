@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll } from 'vitest';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRpcEngine } from '../src/codex-rpc-engine.js';
@@ -24,6 +24,10 @@ const owner = (turnId: string, dispatchAttempt?: number) => ({
   ...(dispatchAttempt !== undefined ? { dispatchAttempt } : {}),
 });
 
+function readTrace(path: string): Array<{ event: string; method?: string; argv?: string[]; env?: Record<string, string | undefined> }> {
+  return readFileSync(path, 'utf8').trim().split('\n').filter(Boolean).map(line => JSON.parse(line));
+}
+
 describe('CodexRpcEngine — happy-path lifecycle against a fake app-server', () => {
   it('start (spawn → /readyz → connect → initialize) then startThread → sendTurn → stop', async () => {
     const engine = makeEngine();
@@ -37,6 +41,30 @@ describe('CodexRpcEngine — happy-path lifecycle against a fake app-server', ()
     await engine.waitForThreadPreview();
     await engine.setThreadName('[BotMux·Lark] hello world');
     engine.stop();
+  }, 20_000);
+
+  it('spawns a detached app-server with inherited env and initializes before thread work', async () => {
+    const traceFile = join(tmpdir(), `fake-rpc-trace-${Math.round(performance.now())}.jsonl`);
+    const engine = makeEngine({
+      sessionId: 'spawn-characterization',
+      env: { ...process.env, FAKE_TRACE_FILE: traceFile, FAKE_TRACE_ENV: 'preserved' },
+    });
+    await engine.start();
+    const pid = engine.appServerPid!;
+    const pgid = Number(execFileSync('ps', ['-o', 'pgid=', '-p', String(pid)], { encoding: 'utf8' }).trim());
+    await engine.startThread();
+    engine.stop();
+
+    const trace = readTrace(traceFile);
+    rmSync(traceFile, { force: true });
+    expect(trace[0]).toMatchObject({
+      event: 'spawn',
+      argv: ['app-server', '--listen', expect.stringMatching(new RegExp('^ws://127\\.0\\.0\\.1:\\d+$'))],
+      env: { FAKE_TRACE_ENV: 'preserved' },
+    });
+    expect(pgid).toBe(pid);
+    expect(trace.filter(entry => entry.event === 'rpc').map(entry => entry.method).slice(0, 3))
+      .toEqual(['initialize', 'initialized', 'thread/start']);
   }, 20_000);
 
   it('waits for a delayed first-message preview before allowing the final title write', async () => {
