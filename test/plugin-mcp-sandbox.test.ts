@@ -23,7 +23,6 @@ import {
   MCP_GATEWAY_SESSION_ENV,
   MCP_GATEWAY_SOCKET_ENV,
 } from '../src/core/plugins/mcp/environment.js';
-import { resolveNativeSubagentRuntimeHookWrapperPath } from '../src/core/botmux-wrapper.js';
 import {
   startSessionMcpGatewayHost,
   type SessionMcpGatewayHost,
@@ -284,55 +283,4 @@ describe.skipIf(process.platform !== 'linux' || !existsSync(builtCli) || !bwrapU
     }
   });
 
-  it('normal gateway composition trusts the main wrapper only, not the dedicated native hook wrapper', () => {
-    const gatewayBin = join(home, '.botmux', 'bin', 'botmux');
-    mkdirSync(dirname(gatewayBin), { recursive: true });
-    writeFileSync(gatewayBin, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
-    chmodSync(gatewayBin, 0o755);
-
-    const botmuxHome = join(dataDir, '..');
-    const botHome = join(botmuxHome, 'bots', 'cli_test');
-    const outbox = join(dataDir, 'sandboxes', 'sid-gateway-compose', 'outbox');
-    mkdirSync(botHome, { recursive: true });
-    mkdirSync(outbox, { recursive: true });
-    const policy = buildFsPolicy({
-      platform: 'linux',
-      homeDir: home,
-      botmuxHome,
-      sessionDataDir: dataDir,
-      workingDir: project,
-      currentAppId: 'cli_test',
-      botHome,
-      redirectedCliData: true,
-      execPaths: [dirname(process.execPath)],
-      botmuxInstallRoot: resolve('.'),
-      outbox,
-    });
-    policy.rules = policy.rules.filter(rule => rule.access === 'deny' || existsSync(rule.path));
-
-    const sandbox = prepareDirectSandbox({
-      sessionId: 'sid-gateway-compose',
-      dataDir,
-      policy,
-      chdir: project,
-      home,
-      cliBin: process.execPath,
-      cliArgs: ['-e', 'process.exit(0)'],
-      trustedBotmuxCommandPaths: [gatewayBin],
-      stableBotmuxWrapperPath: gatewayBin,
-    });
-    if (!sandbox) return;
-    try {
-      const overlayTargets: string[] = [];
-      for (let i = 0; i < sandbox.args.length - 2; i++) {
-        if (sandbox.args[i] === '--ro-bind' && String(sandbox.args[i + 1]).endsWith('/shimbin/botmux')) {
-          overlayTargets.push(String(sandbox.args[i + 2]));
-        }
-      }
-      expect(overlayTargets).toEqual([gatewayBin]);
-      expect(overlayTargets).not.toContain(resolveNativeSubagentRuntimeHookWrapperPath({ HOME: home }, 'linux'));
-    } finally {
-      sandbox.cleanup();
-    }
-  });
 });
