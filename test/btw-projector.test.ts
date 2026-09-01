@@ -1,12 +1,35 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
+import { createBtwOperationStore } from '../src/features/btw/operation-store.js';
 import { createBtwProjector } from '../src/features/btw/projector.js';
 import type { BtwRuntimeClient } from '../src/features/btw/runtime-protocol.js';
 import type { BtwOperation, BtwProjectionItem, FrozenBtwReplyTarget } from '../src/features/btw/types.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
-import { makeBtwOperation, makeBtwScope } from './fixtures/btw-fixtures.js';
+import { makeBtwOperation, makeBtwPrepareInput, makeBtwScope } from './fixtures/btw-fixtures.js';
 
 const NOW = new Date('2026-09-01T12:00:00.000Z');
+const tempDirs: string[] = [];
+
+afterEach(() => {
+  for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+});
+
+function durableRuntime() {
+  const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-projector-'));
+  tempDirs.push(dataDir);
+  const store = createBtwOperationStore({ dataDir, now: () => NOW });
+  const runtime = {
+    recordInitialCardAttempt: async (...args: Parameters<typeof store.recordInitialCardAttempt>) => store.recordInitialCardAttempt(...args),
+    recordCard: async (...args: Parameters<typeof store.recordBtwCard>) => store.recordBtwCard(...args),
+    listPendingProjections: async (larkAppId: string) => store.listPendingBtwProjections(larkAppId),
+    recordProjectionFailure: async (...args: Parameters<typeof store.recordBtwProjectionFailure>) => store.recordBtwProjectionFailure(...args),
+    ackProjection: async (...args: Parameters<typeof store.ackBtwProjection>) => store.ackBtwProjection(...args),
+  };
+  return { store, runtime };
+}
 
 function withTarget(target: Partial<FrozenBtwReplyTarget>): BtwOperation {
   const operation = makeBtwOperation();
@@ -176,9 +199,67 @@ describe('BTW initial card projection', () => {
     expect(runtime.recordCard).not.toHaveBeenCalled();
     expect(runtime.ackProjection).not.toHaveBeenCalled();
   });
+
+  it('propagates recordCard CAS failure without misrecording a successful provider create', async () => {
+    const { projector, runtime, replyMessage } = harness();
+    runtime.recordCard.mockRejectedValueOnce(new Error('runtime CAS unavailable'));
+
+    await expect(projector.ensureInitialCard(makeBtwOperation())).rejects.toThrow('runtime CAS unavailable');
+
+    expect(replyMessage).toHaveBeenCalledTimes(1);
+    expect(runtime.recordInitialCardAttempt).not.toHaveBeenCalled();
+  });
 });
 
 describe('BTW terminal card projection', () => {
+  it('rebinds an existing withdrawal intent after oversized fallback and creates one durable replacement', async () => {
+    const { store, runtime } = durableRuntime();
+    const scope = makeBtwScope();
+    const created = store.prepareBtw(makeBtwPrepareInput()).operation;
+    store.recordBtwCard(scope, created.btwOpId, 'om_withdrawn_original');
+    store.prepareBtwSubmission(scope, created.btwOpId, created.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, created.btwOpId, {
+      status: 'completed',
+      answer: `FULL:${'界'.repeat(50_000)}:END`,
+    });
+    const terminal = store.listPendingBtwProjections(scope.larkAppId)[0];
+    store.ackBtwProjection(scope, created.btwOpId, {
+      operationRevision: terminal.expectedOperationRevision,
+      projectionRevision: terminal.projectionRevision,
+    }, { kind: 'withdrawn' });
+
+    const updateMessage = vi.fn(async () => {
+      throw new MessageWithdrawnError('om_withdrawn_original');
+    });
+    const replyMessage = vi.fn(async (_app, _message, _content, msgType) =>
+      msgType === 'interactive' ? 'om_stable_replacement' : 'om_reminder');
+    const projector = createBtwProjector({
+      runtime,
+      updateMessage,
+      replyMessage,
+      sendMessage: vi.fn(async () => 'om_unexpected'),
+      localeForApp: () => 'zh',
+      now: () => NOW,
+    });
+
+    await projector.drainApp(scope.larkAppId);
+
+    const durable = store.getBtwOperation(scope, created.btwOpId)!;
+    expect(durable.execution.answer).toBe(`FULL:${'界'.repeat(50_000)}:END`);
+    expect(durable.card).toMatchObject({
+      replacementState: 'created',
+      replacementForRevision: durable.projection.desiredRevision,
+      replacementMessageId: 'om_stable_replacement',
+    });
+    expect(durable.projection).toMatchObject({
+      patchedRevision: durable.projection.desiredRevision,
+      reminderState: 'sent',
+    });
+    expect(durable.projection.deliveryFailure).toBeUndefined();
+    expect(updateMessage).not.toHaveBeenCalled();
+    expect(replyMessage.mock.calls.filter(call => call[3] === 'interactive')).toHaveLength(1);
+  });
+
   it('PATCHes the original card with the complete answer, ACKs the exact revision, then sends one stable reminder', async () => {
     const terminal = projectedOperation();
     const reminder = projectedOperation({
@@ -331,6 +412,23 @@ describe('BTW terminal card projection', () => {
     expect(runtime.listPendingProjections).toHaveBeenCalledTimes(2);
   });
 
+  it('propagates patched CAS failure without reclassifying it as a provider rejection', async () => {
+    const operation = projectedOperation();
+    const { projector, runtime, updateMessage } = harness([[projectionItem(operation)]]);
+    runtime.ackProjection.mockRejectedValueOnce(new Error('runtime CAS unavailable'));
+
+    await expect(projector.drainApp('cli_app')).rejects.toThrow('runtime CAS unavailable');
+
+    expect(updateMessage).toHaveBeenCalledTimes(1);
+    expect(runtime.ackProjection).toHaveBeenCalledTimes(1);
+    expect(runtime.ackProjection).toHaveBeenCalledWith(
+      makeBtwScope(), operation.btwOpId,
+      { operationRevision: 7, projectionRevision: 4 },
+      { kind: 'patched' },
+    );
+    expect(runtime.recordProjectionFailure).not.toHaveBeenCalled();
+  });
+
   it('records an ambiguous reminder as unknown and never resends it', async () => {
     const reminder = projectedOperation({
       revision: 8,
@@ -347,6 +445,41 @@ describe('BTW terminal card projection', () => {
       { operationRevision: 8, projectionRevision: 4 },
       { kind: 'reminder_unknown' },
     );
+    expect(replyMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it('terminates deterministic reminder rejection durably instead of retrying forever', async () => {
+    const { store, runtime } = durableRuntime();
+    const scope = makeBtwScope();
+    const created = store.prepareBtw(makeBtwPrepareInput()).operation;
+    store.recordBtwCard(scope, created.btwOpId, 'om_card_reminder_rejected');
+    store.prepareBtwSubmission(scope, created.btwOpId, created.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, created.btwOpId, { status: 'failed', message: 'terminal failure' });
+    const terminal = store.listPendingBtwProjections(scope.larkAppId)[0];
+    store.ackBtwProjection(scope, created.btwOpId, {
+      operationRevision: terminal.expectedOperationRevision,
+      projectionRevision: terminal.projectionRevision,
+    }, { kind: 'patched' });
+
+    const replyMessage = vi.fn(async () => {
+      throw {
+        isAxiosError: true,
+        response: { status: 400, data: { code: 230001, msg: 'invalid reminder' } },
+        message: 'invalid reminder',
+      };
+    });
+    const projector = createBtwProjector({
+      runtime, replyMessage, localeForApp: () => 'zh', now: () => NOW,
+    });
+
+    await projector.drainApp(scope.larkAppId);
+    await projector.drainApp(scope.larkAppId);
+
+    expect(store.getBtwOperation(scope, created.btwOpId)?.projection).toMatchObject({
+      reminderState: 'unknown',
+      reminderAttempt: 1,
+    });
+    expect(store.listPendingBtwProjections(scope.larkAppId)).toEqual([]);
     expect(replyMessage).toHaveBeenCalledTimes(1);
   });
 

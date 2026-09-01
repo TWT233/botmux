@@ -117,6 +117,35 @@ describe('buildBtwCard', () => {
     });
   });
 
+  it('renders a provider-permanent delivery failure instead of the terminal answer', () => {
+    const base = operationFor('completed', { answer: 'DO_NOT_RENDER' });
+    const card = parsedCard({
+      ...base,
+      projection: {
+        ...base.projection,
+        blockedRevision: base.projection.desiredRevision,
+        deliveryFailure: {
+          kind: 'provider_permanent',
+          errorCode: 'provider_rejected',
+          message: '飞书拒绝了结果卡片',
+        },
+      },
+    }, 'zh');
+
+    expect(card).toEqual({
+      config: { wide_screen_mode: true },
+      header: {
+        title: { tag: 'plain_text', content: '💬 旁问 · 旁问结果投递失败' },
+        template: 'red',
+      },
+      elements: [
+        { tag: 'markdown', content: '**问题**\nWhat changed in the upstream delivery path?' },
+        { tag: 'markdown', content: '**详情**\n飞书拒绝了结果卡片' },
+      ],
+    });
+    expect(JSON.stringify(card)).not.toContain('DO_NOT_RENDER');
+  });
+
   it('contains no session action, lifecycle action, or pin request', () => {
     const json = buildBtwCard(operationFor('completed', { answer: 'done' }), 'zh');
     const card = JSON.parse(json);
