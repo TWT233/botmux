@@ -2,10 +2,19 @@ import React from 'react';
 import TestRenderer, { act } from 'react-test-renderer';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardBehaviorSection } from '../src/dashboard/web/bot-defaults-page.js';
-import { ManageDialog } from '../src/dashboard/web/groups-page.js';
+import { ManageDialog, renderGroupsPage } from '../src/dashboard/web/groups-page.js';
 import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
+
+const groupsPageMount = vi.hoisted(() => ({ node: null as unknown }));
+
+vi.mock('../src/dashboard/web/react-mount.js', () => ({
+  mountReactPage: (_root: HTMLElement, node: unknown) => {
+    groupsPageMount.node = node;
+    return () => undefined;
+  },
+}));
 
 function findByDataAction(
   renderer: TestRenderer.ReactTestRenderer,
@@ -135,6 +144,99 @@ describe('group manage streaming-card pin rows', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    groupsPageMount.node = null;
+  });
+
+  it('keeps the open manage dialog synced to the chat returned by the save reload', async () => {
+    const initialChat = {
+      chatId: 'oc_group',
+      name: 'Release Room',
+      ownerId: 'ou_owner',
+      memberBots: [{
+        larkAppId: 'cli_a',
+        botName: 'Claude (stale)',
+        inChat: true,
+        pinStreamingCardMasterEnabled: true,
+        pinStreamingCardChatEnabled: false,
+        pinStreamingCardEffectiveEnabled: false,
+      }],
+    };
+    const reloadedChat = {
+      ...initialChat,
+      name: 'Release Room (fresh)',
+      memberBots: [{
+        ...initialChat.memberBots[0],
+        botName: 'Claude (fresh)',
+        pinStreamingCardChatEnabled: true,
+        pinStreamingCardEffectiveEnabled: true,
+      }],
+    };
+    const requests: string[] = [];
+    (globalThis as any).fetch = vi.fn(async (input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = init?.method ?? 'GET';
+      requests.push(`${method} ${url}`);
+      if (url === '/api/groups') {
+        return { ok: true, status: 200, json: async () => ({ chats: [initialChat], bots: [] }) } as any;
+      }
+      if (url === '/api/role-profiles') {
+        return { ok: true, status: 200, json: async () => ({ profiles: [] }) } as any;
+      }
+      if (url === '/api/groups/oc_group/pin-streaming-card/cli_a' && method === 'PUT') {
+        return { ok: true, status: 200, json: async () => ({ ok: true }) } as any;
+      }
+      if (url === '/api/groups?refresh=1') {
+        return { ok: true, status: 200, json: async () => ({ chats: [reloadedChat], bots: [] }) } as any;
+      }
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    await act(async () => {
+      renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement);
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    act(() => {
+      renderer.root.findByProps({ className: 'manage-chat' }).props.onClick();
+    });
+
+    expect(renderer.root.findByType(ManageDialog).props.chat).toBe(initialChat);
+    expect(renderer.root.findByProps({
+      'data-action': 'toggle-pin-streaming-card-group',
+      'data-app-id': 'cli_a',
+    }).props.checked).toBe(false);
+    expect(renderer.root.findByProps({ 'data-pin-master-state': 'on' }).children.join(''))
+      .toContain('不会置顶');
+
+    await act(async () => {
+      renderer.root.findByProps({
+        'data-action': 'toggle-pin-streaming-card-group',
+        'data-app-id': 'cli_a',
+      }).props.onChange({ currentTarget: { checked: true } });
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+
+    expect(requests).toContain('GET /api/groups?refresh=1');
+    expect(renderer.root.findAllByType(ManageDialog)).toHaveLength(1);
+    expect(renderer.root.findByType(ManageDialog).props.chat).toBe(reloadedChat);
+    expect(renderer.root.findByProps({
+      'data-action': 'toggle-pin-streaming-card-group',
+      'data-app-id': 'cli_a',
+    }).props.checked).toBe(true);
+    expect(renderer.root.findByProps({ 'data-pin-master-state': 'on' }).children.join(''))
+      .toContain('会置顶');
+    expect(renderer.root.findByType(ManageDialog).findAllByType('strong').some(node =>
+      node.children.join('') === 'Claude (fresh)'
+    )).toBe(true);
+
+    act(() => renderer.unmount());
   });
 
   it('shows master-off copy and keeps the row editable without letting the chat force-enable pinning', async () => {
