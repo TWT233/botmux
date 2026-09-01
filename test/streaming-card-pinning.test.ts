@@ -954,21 +954,21 @@ describe('streaming-card pin policy', () => {
     ]));
     getBotMock.mockReturnValue({
       config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true },
-      botOpenId: 'ou_bot_self',
     } as any);
     listChatPinsMock.mockImplementation(async (_appId: string, chatId: string) => {
       if (chatId === 'oc_chat') {
         return [
-          { messageId: 'om_current', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-          { messageId: 'om_frozen_a', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-          { messageId: 'om_manual_other', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-          { messageId: 'om_frozen_b', chatId, operatorId: 'ou_other_bot', operatorIdType: 'open_id' },
-          { messageId: 'om_blank_type', chatId, operatorId: 'ou_bot_self', operatorIdType: '' },
+          { messageId: 'om_current', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
+          { messageId: 'om_frozen_a', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
+          { messageId: 'om_manual_other', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
+          { messageId: 'om_frozen_b', chatId, operatorId: 'app-other', operatorIdType: 'app_id' },
+          { messageId: 'om_open_id_same_bot', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
+          { messageId: 'om_blank_type', chatId, operatorId: 'app-pin', operatorIdType: '' },
         ];
       }
       return [
-        { messageId: 'om_chat2_current', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-        { messageId: 'om_chat2_frozen', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
+        { messageId: 'om_chat2_current', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
+        { messageId: 'om_chat2_frozen', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
       ];
     });
 
@@ -989,6 +989,7 @@ describe('streaming-card pin policy', () => {
     ]));
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_manual_other');
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_frozen_b');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_open_id_same_bot');
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_blank_type');
   });
 
@@ -1009,11 +1010,12 @@ describe('streaming-card pin policy', () => {
         pinStreamingCard: false,
         noPinStreamingCardChats: ['oc_chat'],
       },
-      botOpenId: 'ou_bot_self',
     } as any);
     listChatPinsMock.mockResolvedValue([
-      { messageId: 'om_opted_frozen', chatId: 'oc_chat', operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-      { messageId: 'om_manual_other', chatId: 'oc_chat', operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
+      { messageId: 'om_opted_frozen', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
+      { messageId: 'om_manual_other', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
+      { messageId: 'om_opted_current', chatId: 'oc_chat', operatorId: 'app-other', operatorIdType: 'app_id' },
+      { messageId: 'om_opted_current', chatId: 'oc_chat', operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
     ]);
 
     reconcileRestoredStreamingCardPins('app-pin');
@@ -1025,6 +1027,7 @@ describe('streaming-card pin policy', () => {
       ['app-pin', 'om_opted_frozen'],
     ]);
     expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_manual_other');
+    expect(unpinMessageMock).not.toHaveBeenCalledWith('app-pin', 'om_opted_current');
   });
 
   it('lists each chat at most once per restore run and isolates one chat failure from others', async () => {
@@ -1038,12 +1041,11 @@ describe('streaming-card pin policy', () => {
     ]));
     getBotMock.mockReturnValue({
       config: { larkAppId: 'app-pin', cliId: 'claude-code', pinStreamingCard: true },
-      botOpenId: 'ou_bot_self',
     } as any);
     listChatPinsMock.mockImplementation(async (_appId: string, chatId: string) => {
       if (chatId === 'oc_chat') throw new Error('chat list failed');
       return [
-        { messageId: 'om_other', chatId, operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
+        { messageId: 'om_other', chatId, operatorId: 'app-pin', operatorIdType: 'app_id' },
       ];
     });
 
@@ -1070,7 +1072,6 @@ describe('streaming-card pin policy', () => {
         pinStreamingCard: true,
         apiOnly: true,
       },
-      botOpenId: 'ou_bot_self',
     }) as any);
 
     reconcileRestoredStreamingCardPins('app-pin');
@@ -1096,11 +1097,10 @@ describe('streaming-card pin policy', () => {
         cliId: 'claude-code',
         pinStreamingCard: false,
       },
-      botOpenId: 'ou_bot_self',
     } as any);
     listChatPinsMock.mockResolvedValue([
-      { messageId: 'om_current', chatId: 'oc_chat', operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
-      { messageId: 'om_frozen', chatId: 'oc_chat', operatorId: 'ou_bot_self', operatorIdType: 'open_id' },
+      { messageId: 'om_current', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
+      { messageId: 'om_frozen', chatId: 'oc_chat', operatorId: 'app-pin', operatorIdType: 'app_id' },
     ]);
     unpinMessageMock.mockImplementation((appId: string, messageId: string) => {
       calls.push(`unpin:${messageId}`);

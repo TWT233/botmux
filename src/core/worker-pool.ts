@@ -2567,21 +2567,14 @@ function snapshotRestoreCandidatesForBot(
   );
 }
 
-function sameAppRemoteProofIds(
+function sameAppRemoteAppIdProofIds(
   larkAppId: string,
   candidateIds: ReadonlySet<string>,
   remotePins: Awaited<ReturnType<typeof listChatPins>>,
 ): Set<string> {
-  let botOpenId: string | undefined;
-  try {
-    botOpenId = getBot(larkAppId).botOpenId;
-  } catch {
-    botOpenId = undefined;
-  }
-  if (!botOpenId) return new Set();
   const proven = new Set<string>();
   for (const pin of remotePins) {
-    if (pin.operatorIdType !== 'open_id' || pin.operatorId !== botOpenId) continue;
+    if (pin.operatorIdType !== 'app_id' || pin.operatorId !== larkAppId) continue;
     if (!candidateIds.has(pin.messageId)) continue;
     proven.add(pin.messageId);
   }
@@ -2631,7 +2624,7 @@ async function reconcileRestoredStreamingCardPinsForRequest(
       );
       if (localCandidateIds.size === 0) continue;
       const remotePins = await listChatPins(larkAppId, chatId);
-      const provenIds = sameAppRemoteProofIds(larkAppId, localCandidateIds, remotePins);
+      const provenIds = sameAppRemoteAppIdProofIds(larkAppId, localCandidateIds, remotePins);
       if (provenIds.size === 0) continue;
       await Promise.allSettled(entries.map(async (entry) => {
         const provenCurrent = entry.currentId && provenIds.has(entry.currentId)
