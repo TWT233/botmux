@@ -28,13 +28,6 @@ async function collectWake(iterator: AsyncIterator<{ kind: 'btw_projection_wake'
   ]);
 }
 
-async function establishWatchSubscription(): Promise<void> {
-  // Projection wakes are intentionally best-effort and non-durable.  Give the
-  // independent watch socket time to complete its local auth/subscribe round
-  // trip before asserting delivery of a subsequent transition.
-  await new Promise<void>(resolve => setTimeout(resolve, 50));
-}
-
 afterEach(async () => {
   for (const dir of tempDirs.splice(0)) {
     try {
@@ -94,9 +87,10 @@ describe('BTW runtime process behavior', () => {
     });
 
     const runtime = await connectBtwRuntime({ dataDir });
-    const wakeStream = runtime.client.watchProjectionWakes('cli_app')[Symbol.asyncIterator]();
+    const wakeSubscription = runtime.client.watchProjectionWakes('cli_app');
+    await wakeSubscription.ready;
+    const wakeStream = wakeSubscription[Symbol.asyncIterator]();
     const wakePromise = collectWake(wakeStream);
-    await establishWatchSubscription();
     const submitResults = await Promise.all([
       runtime.client.submitBtw(makeBtwScope(), created.btwOpId),
       runtime.client.submitBtw(makeBtwScope(), created.btwOpId),
@@ -123,11 +117,13 @@ describe('BTW runtime process behavior', () => {
     const ids = deriveBtwIdentifiers(makeBtwScope(), input.requestId);
     await runtime.client.recordCard(makeBtwScope(), ids.btwOpId, 'om_card_projection_1');
 
-    const firstWatcher = runtime.client.watchProjectionWakes('cli_app')[Symbol.asyncIterator]();
-    const otherWatcher = runtime.client.watchProjectionWakes('other_app')[Symbol.asyncIterator]();
+    const firstSubscription = runtime.client.watchProjectionWakes('cli_app');
+    const otherSubscription = runtime.client.watchProjectionWakes('other_app');
+    await Promise.all([firstSubscription.ready, otherSubscription.ready]);
+    const firstWatcher = firstSubscription[Symbol.asyncIterator]();
+    const otherWatcher = otherSubscription[Symbol.asyncIterator]();
     const firstWakePromise = collectWake(firstWatcher);
     const foreignWakePromise = otherWatcher.next();
-    await establishWatchSubscription();
     await runtime.client.submitBtw(makeBtwScope(), ids.btwOpId);
     const firstWake = await firstWakePromise;
 
@@ -141,9 +137,10 @@ describe('BTW runtime process behavior', () => {
     ]);
 
     const beforeReconnect = await runtime.client.listPendingProjections('cli_app');
-    const secondWatcher = runtime.client.watchProjectionWakes('cli_app')[Symbol.asyncIterator]();
+    const secondSubscription = runtime.client.watchProjectionWakes('cli_app');
+    await secondSubscription.ready;
+    const secondWatcher = secondSubscription[Symbol.asyncIterator]();
     const secondWakePromise = collectWake(secondWatcher);
-    await establishWatchSubscription();
     await runtime.client.submitBtw(makeBtwScope(), ids.btwOpId);
     const secondWake = await secondWakePromise;
     const afterReconnect = await runtime.client.listPendingProjections('cli_app');
@@ -202,5 +199,13 @@ describe('BTW runtime process behavior', () => {
     expect(submitted.execution.state).toBe('accepted');
     expect(raw).toContain('"state": "accepted"');
     expect(raw).not.toContain('"submit_prepared"');
+  });
+
+  it('flushes the shutdown reply before closing the runtime socket', async () => {
+    const dataDir = newDataDir();
+    const runtime = await connectBtwRuntime({ dataDir });
+
+    await expect(runtime.client.shutdownRuntime()).resolves.toBeUndefined();
+    runtime.close();
   });
 });
