@@ -6,6 +6,7 @@ import { createServer, type Server as NetServer, type Socket } from 'node:net';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { PluginMcpGateway, type GatewayTrustedTurnIdentityProvider } from './gateway.js';
 import { acceptMcpGatewayHandshake, mcpGatewayAuthTokenPath } from './socket-auth.js';
+import type { SessionMcpRuntimeManifest } from './session-runtime.js';
 
 export interface SessionMcpGatewayHost {
   socketPath: string;
@@ -99,6 +100,8 @@ function rotateGatewayAuthToken(socketPath: string): string {
 export async function startSessionMcpGatewayHost(opts: {
   sessionId: string;
   dataDir: string;
+  /** The persistent runtime's frozen generation. Never re-read live state when supplied. */
+  manifest?: SessionMcpRuntimeManifest | null;
   trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider;
   onError?: (error: Error) => void;
 }): Promise<SessionMcpGatewayHost> {
@@ -132,6 +135,7 @@ export async function startSessionMcpGatewayHost(opts: {
         BOTMUX_SESSION_ID: opts.sessionId,
       }, {
         trustedTurnIdentity: opts.trustedTurnIdentity,
+        manifest: opts.manifest,
       });
       let gatewayClose: Promise<void> | undefined;
       const closeGateway = (): Promise<void> => {

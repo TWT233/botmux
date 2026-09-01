@@ -432,6 +432,7 @@ import { PersistentTraeRpcProxy } from './codex-rpc-session.js';
 import { isPersistentTraeRpcColdStart } from './codex-rpc-lifecycle.js';
 import { connectBtwRuntime } from './features/btw/runtime-client.js';
 import { ManagedTraeNotificationBridge } from './features/btw/managed-notification-bridge.js';
+import { ManagedUserInputTerminalError, settleManagedUserInputBridge } from './features/btw/managed-user-input-settlement.js';
 import type { AttachedBtwRuntimeSession, BtwRuntimeNotification } from './features/btw/runtime-protocol.js';
 import {
   beginRuntimeWriteCycle,
@@ -696,8 +697,24 @@ async function applyManagedTraeNotification(notification: BtwRuntimeNotification
   if (notification.kind === 'request_user_input') {
     const attachment = managedTraeAttachment;
     if (!attachment) throw new Error('managed Trae request_user_input arrived without an attachment');
-    await new Promise<void>(resolveInput => {
-      pendingManagedTraeUserInputs.set(notification.payload.requestId, { attachment, release: resolveInput });
+    const cfg = lastInitConfig;
+    if (!cfg) throw new Error('managed Trae request_user_input arrived before worker init');
+    const requestId = notification.payload.requestId;
+    await new Promise<void>((release, reject) => {
+      const pending = { attachment, release };
+      pendingManagedTraeUserInputs.set(requestId, pending);
+      // The existing Lark ask broker remains the UI authority.  This worker
+      // only bridges its protocol result back to the runtime; a replacement
+      // observer gets the same journaled ask and installs its own bridge.
+      settleManagedUserInputBridge({
+        start: () => bridgeTraexUserInput(cfg, notification.payload.params),
+        isCurrent: () => managedTraeAttachment === attachment && pendingManagedTraeUserInputs.get(requestId) === pending,
+        settle: result => resolveManagedTraeUserInput(requestId, result),
+        releaseStaleWaiter: release,
+        // Keep the runtime journal entry unacknowledged for a replacement
+        // worker if the Lark bridge has a non-terminal transport/protocol error.
+        retryFromReplacement: reject,
+      });
     });
     return;
   }
@@ -1349,10 +1366,14 @@ async function bridgeTraexUserInput(
     answers?: ReadonlyArray<ReadonlyArray<string>>;
     comment?: string | null;
   };
-  // Timeout/cancel/invalidated — surface as an error rather than an empty answer
-  // that TraeX would treat as "no one answered" and silently skip.
+  // Only broker-confirmed expiry/invalidation is a native-turn terminal. An
+  // unavailable daemon or malformed response is transport uncertainty, not an
+  // operator stop, and must remain replayable by a replacement worker.
+  if (result.kind === 'timedOut' || result.kind === 'invalidated') {
+    throw new ManagedUserInputTerminalError(`ask not answered (${result.kind})`);
+  }
   if (result.kind !== 'answered') {
-    throw new Error(`ask not answered (${result.kind ?? 'unknown'})`);
+    throw new Error(`unexpected ask broker result (${result.kind ?? 'unknown'})`);
   }
 
   const customText = result.comment?.trim() ?? '';
@@ -1480,6 +1501,7 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     if (!wantResume && cfg.prompt) {
       const firstIdentity: CodexRpcTurnIdentity = {
         turnId: cfg.turnId ?? `codex-rpc-${randomBytes(8).toString('hex')}`,
+        ...(cfg.trustedCaller ? { caller: cfg.trustedCaller } : {}),
         ...(cfg.dispatchAttempt !== undefined
           ? { dispatchAttempt: cfg.dispatchAttempt }
           : {}),
@@ -11582,6 +11604,7 @@ async function flushPending(): Promise<void> {
         if (writeManagedTraeAttachment) {
           managedTraeTurnIdentity = {
             turnId: item.turnId ?? `managed-trae-${randomBytes(8).toString('hex')}`,
+            ...(item.trustedCaller ? { caller: item.trustedCaller } : {}),
             ...(item.dispatchAttempt !== undefined ? { dispatchAttempt: item.dispatchAttempt } : {}),
           };
           const managedKey = managedTraeTurnKey(managedTraeTurnIdentity);
@@ -18673,6 +18696,7 @@ process.on('message', async (raw: unknown) => {
           if (!msg.resume && msg.prompt) {
             const identity: CodexRpcTurnIdentity = {
               turnId: msg.turnId ?? `managed-trae-first-${randomBytes(8).toString('hex')}`,
+              ...(msg.trustedCaller ? { caller: msg.trustedCaller } : {}),
               ...(msg.dispatchAttempt !== undefined ? { dispatchAttempt: msg.dispatchAttempt } : {}),
             };
             const key = managedTraeTurnKey(identity);
