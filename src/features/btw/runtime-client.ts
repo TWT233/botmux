@@ -152,7 +152,7 @@ function isOperation(value: unknown): boolean {
 
 function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unknown): boolean {
   switch (commandType) {
-    case 'prepare_btw': return isRecord(value) && (value.kind === 'created' || value.kind === 'existing') && isOperation(value.operation);
+    case 'prepare_btw': return isRecord(value) && (value.kind === 'created' || value.kind === 'duplicate') && isOperation(value.operation);
     case 'record_initial_card_attempt':
     case 'record_card':
     case 'submit_btw': return isOperation(value);
