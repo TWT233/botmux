@@ -13282,35 +13282,50 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Dropped managed_turn_origin_revoked with mismatched sessionId`);
           break;
         }
-        // Same-worker IPC is ordered, but token-match as well so a delayed
-        // revoke can never clear authority already rotated by the next turn.
-        if (msg.capability
-          && ds.managedTurnOrigin?.capability
-          && ds.managedTurnOrigin.capability !== msg.capability) {
-          logger.warn(`[${t}] Ignored stale managed turn origin revoke after capability rotation`);
-          break;
-        }
+        // Same-worker IPC is ordered, but exact-match both authorities so a
+        // delayed revoke can never clear a token already rotated by the next
+        // turn. Live-send and policy authority are independent: a stale token
+        // for one must not block a matching revoke for the other.
+        const origin = ds.managedTurnOrigin;
+        if (!origin) break;
         if (msg.originChannelId
-          && ds.managedTurnOrigin?.originChannelId
-          && ds.managedTurnOrigin.originChannelId !== msg.originChannelId) {
+          && origin.originChannelId
+          && origin.originChannelId !== msg.originChannelId) {
           logger.warn(`[${t}] Ignored managed_turn_origin_revoked for a different pane channel`);
           break;
         }
-        if (!msg.capability && ds.managedTurnOrigin
-          && (ds.managedTurnOrigin.turnId !== msg.turnId
-            || ds.managedTurnOrigin.dispatchAttempt !== msg.dispatchAttempt)) {
+        const unboundLiveRevoke = !msg.capability && !msg.policyCapability;
+        if (unboundLiveRevoke
+          && (origin.turnId !== msg.turnId
+            || origin.dispatchAttempt !== msg.dispatchAttempt)) {
           logger.warn(`[${t}] Ignored unbound stale managed turn origin revoke`);
           break;
         }
-        ds.managedTurnOrigin = ds.managedTurnOrigin?.policyCapability
-          ? {
-              capability: randomBytes(32).toString('hex'),
-              ...(msg.originChannelId ?? ds.managedTurnOrigin.originChannelId
-                ? { originChannelId: msg.originChannelId ?? ds.managedTurnOrigin.originChannelId }
-                : {}),
-              policyCapability: ds.managedTurnOrigin.policyCapability,
-            }
-          : undefined;
+        const revokeLive = unboundLiveRevoke
+          || (msg.capability !== undefined && origin.capability === msg.capability);
+        const revokePolicy = msg.policyCapability !== undefined
+          && origin.policyCapability === msg.policyCapability;
+        if (msg.capability !== undefined && !revokeLive) {
+          logger.warn(`[${t}] Ignored stale live capability in managed turn origin revoke`);
+        }
+        if (msg.policyCapability !== undefined && !revokePolicy) {
+          logger.warn(`[${t}] Ignored stale policy capability in managed turn origin revoke`);
+        }
+        if (!revokeLive && !revokePolicy) break;
+        if (revokeLive) {
+          ds.managedTurnOrigin = origin.policyCapability && !revokePolicy
+            ? {
+                capability: randomBytes(32).toString('hex'),
+                ...(msg.originChannelId ?? origin.originChannelId
+                  ? { originChannelId: msg.originChannelId ?? origin.originChannelId }
+                  : {}),
+                policyCapability: origin.policyCapability,
+              }
+            : undefined;
+          break;
+        }
+        const { policyCapability: _revokedPolicyCapability, ...liveOrigin } = origin;
+        ds.managedTurnOrigin = liveOrigin;
         break;
       }
 

@@ -4033,6 +4033,67 @@ describe('managed turn authority worker generations', () => {
     expect(ds.managedTurnOrigin?.capability).not.toBe('turn-capability');
   });
 
+  it('revokes policy authority only when the explicit policy token matches', () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'live-capability',
+      policyCapability: 'current-policy-capability',
+      turnId: 'turn-current',
+    });
+
+    worker.emit('message', {
+      type: 'managed_turn_origin_revoked',
+      sessionId: ds.session.sessionId,
+      policyCapability: 'stale-policy-capability',
+    });
+    expect(ds.managedTurnOrigin).toMatchObject({
+      capability: 'live-capability',
+      policyCapability: 'current-policy-capability',
+    });
+
+    worker.emit('message', {
+      type: 'managed_turn_origin_revoked',
+      sessionId: ds.session.sessionId,
+      policyCapability: 'current-policy-capability',
+    });
+    expect(ds.managedTurnOrigin).toEqual({
+      capability: 'live-capability',
+      turnId: 'turn-current',
+    });
+  });
+
+  it('ignores a stale policy revoke after both capabilities rotate', () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'new-live-capability',
+      policyCapability: 'new-policy-capability',
+      turnId: 'turn-new',
+    });
+    worker.emit('message', {
+      type: 'managed_turn_origin_revoked',
+      sessionId: ds.session.sessionId,
+      capability: 'old-live-capability',
+      policyCapability: 'old-policy-capability',
+      turnId: 'turn-old',
+    });
+
+    expect(ds.managedTurnOrigin).toMatchObject({
+      capability: 'new-live-capability',
+      policyCapability: 'new-policy-capability',
+      turnId: 'turn-new',
+    });
+  });
+
   it('clears authority on refork and ignores a stale worker announcement', () => {
     const ds = makeDs();
     forkWorker(ds, 'first', false);

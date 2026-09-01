@@ -16021,7 +16021,7 @@ async function spawnCli(
       sandboxRelayCapability,
       exitedTurnId,
       exitedDispatchAttempt,
-      { revokePolicy: true },
+      { revokePolicy: !intentionalRestart },
     );
     log(`${cliName()} exited (code: ${code}, signal: ${signal})`);
     if (lastInitConfig?.cliId === 'codex-app' && codexAppControlFatal) {
@@ -16304,6 +16304,9 @@ function restoreMojoLivePatchAfterRespawn(): void {
 
 function killCli(opts: {
   preservePending?: boolean;
+  /** An intentional in-worker CLI restart replaces only the live backend. The
+   * surviving Node worker keeps its generation-scoped policy authority. */
+  preservePolicyCapability?: boolean;
   /** The replacement worker reuses this logical session's sandbox tree. Stop
    * this worker's watcher but leave the tree/mountpoints for that replacement. */
   preserveSandbox?: boolean;
@@ -16361,7 +16364,7 @@ function killCli(opts: {
     sandboxRelayCapability,
     currentBotmuxTurnId,
     currentBotmuxDispatchAttempt,
-    { revokePolicy: true },
+    { revokePolicy: !opts.preservePolicyCapability },
   );
   // Stop the sandbox outbox watcher, then reclaim the deny-mask mountpoints +
   // remove the per-session sandbox tree. In the fs-policy model the CLI writes
@@ -16507,7 +16510,10 @@ async function restartCliProcess(
         ));
         return;
       }
-      killCli({ preservePending: opts.preservePending });
+      killCli({
+        preservePending: opts.preservePending,
+        preservePolicyCapability: true,
+      });
       awaitingFirstPrompt = true;
       setTimeout(async () => {
         let spawnedWorkingDir: string | undefined;
