@@ -26,6 +26,7 @@ const MAX_AUTH_BYTES = 1024;
 const MAX_FRAME_BYTES = 64 * 1024;
 const MAX_PENDING_REQUESTS_PER_SOCKET = 64;
 const SOCKET_PATH_MAX_BYTES = process.platform === 'darwin' ? 96 : 100;
+const STARTUP_CLAIM_LEASE_MS = 5_000;
 
 interface RuntimePaths {
   runtimeDir: string;
@@ -47,6 +48,7 @@ interface RuntimeStartupClaim {
   ownerPid: number;
   ownerStartIdentity: string;
   buildId: string;
+  leaseExpiresAt: number;
 }
 
 interface EnsureRuntimeInput {
@@ -94,6 +96,13 @@ interface RuntimeState {
 }
 
 const runtimeStates = new Map<string, RuntimeState>();
+
+/** Deterministic startup-handoff interleaving seam; never set by production code. */
+export interface BtwRuntimeTestHooks {
+  afterChildClaimLockAcquired?: () => void | Promise<void>;
+}
+let runtimeTestHooks: BtwRuntimeTestHooks | undefined;
+export function __testOnly_setBtwRuntimeHooks(hooks?: BtwRuntimeTestHooks): void { runtimeTestHooks = hooks; }
 
 export interface BtwExecutorWakeQueue {
   enqueue(btwOpId: string): void;
@@ -223,7 +232,8 @@ function readStartupMarker(paths: RuntimePaths): RuntimeStartupMarker | RuntimeS
     if (typeof (value as Partial<RuntimeStartupClaim>).claim === 'string'
       && typeof (value as Partial<RuntimeStartupClaim>).ownerPid === 'number'
       && typeof (value as Partial<RuntimeStartupClaim>).ownerStartIdentity === 'string'
-      && typeof value.buildId === 'string') return value as RuntimeStartupClaim;
+      && typeof value.buildId === 'string'
+      && typeof (value as Partial<RuntimeStartupClaim>).leaseExpiresAt === 'number') return value as RuntimeStartupClaim;
     if (typeof value.pid !== 'number' || !Number.isSafeInteger(value.pid) || value.pid <= 0
       || typeof value.startIdentity !== 'string' || !value.startIdentity
       || typeof value.buildId !== 'string' || !value.buildId) return undefined;
@@ -657,8 +667,10 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
     }
     const starting = readStartupMarker(paths);
     if (starting && starting.buildId === buildId) {
-      if (isStartupClaim(starting)
-        && readProcessStartIdentity(starting.ownerPid) === starting.ownerStartIdentity) return;
+      if (isStartupClaim(starting)) {
+        if (readProcessStartIdentity(starting.ownerPid) === starting.ownerStartIdentity
+          || Date.now() < starting.leaseExpiresAt) return;
+      }
       if (!isStartupClaim(starting)
         && readProcessStartIdentity(starting.pid) === starting.startIdentity) return;
     }
@@ -671,7 +683,13 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
     // Reserve before spawn. If this process dies at any later point, a future
     // ensure can prove the owner dead and reclaim it; it never mistakes a
     // reservation for a live child.
-    writeStartupMarker(paths, { claim, ownerPid: process.pid, ownerStartIdentity, buildId });
+    writeStartupMarker(paths, {
+      claim, ownerPid: process.pid, ownerStartIdentity, buildId,
+      // A child has only the opaque claim capability, not the parent's PID. If
+      // P dies just after spawning C, this lease prevents a reclaimer from
+      // deleting the reservation before C can atomically bind itself.
+      leaseExpiresAt: Date.now() + STARTUP_CLAIM_LEASE_MS,
+    });
     const { spawn } = await import('node:child_process');
     const childRuntime = childSpawn();
     const child = spawn(childRuntime.command, childRuntime.args, {
@@ -758,7 +776,6 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
   const dataDir = canonicalDataDir(input.dataDir);
   const paths = runtimePaths(dataDir);
   mkdirSync(paths.runtimeDir, { recursive: true, mode: 0o700 });
-  cleanupSocketFile(paths.socketPath);
 
   const buildId = assertRuntimeBuildIdKnown();
   const pid = process.pid;
@@ -773,6 +790,7 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
     if (!startupClaim || !startup || !isStartupClaim(startup) || startup.claim !== startupClaim || startup.buildId !== buildId) {
       throw new Error('btw runtime startup claim is missing or invalid');
     }
+    await runtimeTestHooks?.afterChildClaimLockAcquired?.();
     writeStartupMarker(paths, { pid, startIdentity, buildId });
   });
   // Only after the atomic handoff may this child touch socket/store state.

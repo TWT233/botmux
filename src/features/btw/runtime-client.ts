@@ -145,9 +145,38 @@ class RuntimeRpcConnection {
 function isRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === 'object' && !Array.isArray(value);
 }
+function isString(value: unknown): value is string { return typeof value === 'string'; }
+function isOptionalString(value: unknown): boolean { return value === undefined || isString(value); }
+function isFiniteNonNegativeInteger(value: unknown): boolean { return Number.isSafeInteger(value) && (value as number) >= 0; }
+const OPERATION_STATES = new Set(['card_pending', 'card_unknown', 'accepted', 'submit_prepared', 'running', 'completed', 'failed', 'cancelled', 'interrupted', 'submission_unknown']);
+const FRAME_STATES = new Set(['not_started', 'definitely_unsent', 'may_have_been_sent', 'acknowledged']);
+const REPLACEMENT_STATES = new Set(['none', 'pending', 'created']);
+const REMINDER_STATES = new Set(['none', 'pending', 'sent', 'unknown']);
 
 function isOperation(value: unknown): boolean {
-  return isRecord(value) && typeof value.btwOpId === 'string' && isRecord(value.execution) && typeof value.execution.state === 'string';
+  return isRecord(value)
+    && value.schemaVersion === 1 && isFiniteNonNegativeInteger(value.revision)
+    && typeof value.btwOpId === 'string' && typeof value.requestId === 'string' && typeof value.question === 'string'
+    && isRecord(value.parent) && isString(value.parent.botmuxSessionId) && isString(value.parent.cliId) && isString(value.parent.nativeThreadId) && isString(value.parent.runtimeEpoch) && isString(value.parent.configHash) && isString(value.parent.cwd)
+    && isRecord(value.replyTarget) && isString(value.replyTarget.larkAppId) && isString(value.replyTarget.chatId) && (value.replyTarget.rootMessageId === null || isString(value.replyTarget.rootMessageId)) && (value.replyTarget.replyToMessageId === null || isString(value.replyTarget.replyToMessageId)) && (value.replyTarget.chatType === 'group' || value.replyTarget.chatType === 'p2p') && (value.replyTarget.brand === 'feishu' || value.replyTarget.brand === 'lark')
+    && isRecord(value.card) && isString(value.card.createUuid) && isFiniteNonNegativeInteger(value.card.createAttempt) && isOptionalString(value.card.messageId) && isOptionalString(value.card.nextCreateAttemptAt) && isOptionalString(value.card.firstPossiblySentAt) && isOptionalString(value.card.createRetryDeadline) && isString(value.card.replacementUuid) && REPLACEMENT_STATES.has(value.card.replacementState as string) && (value.card.replacementForRevision === undefined || isFiniteNonNegativeInteger(value.card.replacementForRevision)) && isOptionalString(value.card.replacementMessageId)
+    && isRecord(value.execution) && OPERATION_STATES.has(value.execution.state as string) && isString(value.execution.nativeTurnId) && isFiniteNonNegativeInteger(value.execution.attempt) && isOptionalString(value.execution.submissionEpoch) && FRAME_STATES.has(value.execution.frameState as string) && isOptionalString(value.execution.answer) && isOptionalString(value.execution.errorCode) && isOptionalString(value.execution.message)
+    && isRecord(value.projection) && isFiniteNonNegativeInteger(value.projection.desiredRevision) && isFiniteNonNegativeInteger(value.projection.patchedRevision) && (value.projection.blockedRevision === undefined || isFiniteNonNegativeInteger(value.projection.blockedRevision)) && isFiniteNonNegativeInteger(value.projection.retryAttempt) && isOptionalString(value.projection.nextAttemptAt) && isString(value.projection.reminderUuid) && REMINDER_STATES.has(value.projection.reminderState as string) && isFiniteNonNegativeInteger(value.projection.reminderAttempt) && isOptionalString(value.projection.reminderNextAttemptAt)
+    && (value.projection.deliveryFailure === undefined || (isRecord(value.projection.deliveryFailure) && (value.projection.deliveryFailure.kind === 'visible_fallback' || value.projection.deliveryFailure.kind === 'provider_permanent') && isString(value.projection.deliveryFailure.errorCode) && isString(value.projection.deliveryFailure.message)))
+    && typeof value.createdAt === 'string' && typeof value.updatedAt === 'string';
+}
+
+function isProjectionItem(value: unknown): boolean {
+  return isRecord(value) && typeof value.larkAppId === 'string' && typeof value.botmuxSessionId === 'string'
+    && typeof value.btwOpId === 'string' && isFiniteNonNegativeInteger(value.expectedOperationRevision)
+    && isFiniteNonNegativeInteger(value.projectionRevision) && isOperation(value.operation);
+}
+
+function isQuiesceResult(value: unknown): boolean {
+  return isRecord(value) && Array.isArray(value.affectedAppIds) && value.affectedAppIds.every(item => typeof item === 'string')
+    && Array.isArray(value.projectionWatermarks) && value.projectionWatermarks.every(item => isRecord(item)
+      && isRecord(item.scope) && typeof item.scope.larkAppId === 'string' && typeof item.scope.botmuxSessionId === 'string'
+      && typeof item.btwOpId === 'string' && isFiniteNonNegativeInteger(item.projectionRevision));
 }
 
 function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unknown): boolean {
@@ -157,11 +186,11 @@ function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unk
     case 'record_card':
     case 'submit_btw': return isOperation(value);
     case 'list_pending_initial_cards': return Array.isArray(value) && value.every(isOperation);
-    case 'list_pending_projections': return Array.isArray(value);
+    case 'list_pending_projections': return Array.isArray(value) && value.every(isProjectionItem);
     case 'record_projection_failure':
     case 'ack_projection': return isRecord(value) && (value.kind === 'applied' || value.kind === 'stale') && isOperation(value.operation);
     case 'watch_projection_wakes': return isRecord(value) && value.subscribed === true;
-    case 'quiesce_all': return isRecord(value) && Array.isArray(value.affectedAppIds) && Array.isArray(value.projectionWatermarks);
+    case 'quiesce_all': return isQuiesceResult(value);
     case 'shutdown_runtime': return isRecord(value) && value.done === true;
     default: return false;
   }

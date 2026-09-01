@@ -7,7 +7,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { BTW_RUNTIME_PROTOCOL_VERSION, type BtwRuntimeDescriptor, type BtwRuntimeEnvelope, type BtwRuntimeFrame } from '../src/features/btw/runtime-protocol.js';
 import { BtwRuntimeClientImpl, connectBtwRuntime, ensureBtwRuntime } from '../src/features/btw/runtime-client.js';
-import { consumeBtwExecutorWakes, runBtwRuntime, shutdownRuntime } from '../src/features/btw/runtime-server.js';
+import { __testOnly_setBtwRuntimeHooks, consumeBtwExecutorWakes, runBtwRuntime, shutdownRuntime } from '../src/features/btw/runtime-server.js';
 import { runtimeBuildIdentity } from '../src/utils/runtime-build-id.js';
 import { readProcessStartIdentity } from '../src/core/session-marker.js';
 import { deriveBtwIdentifiers } from '../src/features/btw/types.js';
@@ -385,12 +385,64 @@ describe('BTW runtime auth and singleton boot', () => {
     mkdirSync(runtimeDir, { mode: 0o700 });
     writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
       claim: 'dead-parent-reservation', ownerPid: 999999, ownerStartIdentity: 'never-live', buildId: 'stale',
+      leaseExpiresAt: 0,
     }));
 
     const descriptor = await ensureTestRuntime(dataDir);
     expect(descriptor.pid).toBeGreaterThan(1);
     expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
   });
+
+  it('does not reclaim a dead parent reservation while its spawned-child lease is valid', async () => {
+    const dataDir = newDataDir();
+    const runtimeDir = join(dataDir, 'btw');
+    mkdirSync(runtimeDir, { mode: 0o700 });
+    writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
+      claim: 'child-capability', ownerPid: 999999, ownerStartIdentity: 'dead-parent',
+      buildId: runtimeBuildIdentity().status === 'known' ? runtimeBuildIdentity().id : 'unknown',
+      leaseExpiresAt: Date.now() + 30_000,
+    }));
+
+    await expect(ensureBtwRuntime({ dataDir })).rejects.toThrow('failed to publish');
+    const reservation = JSON.parse(readFileSync(join(runtimeDir, 'runtime.starting.json'), 'utf8')) as { claim?: string };
+    expect(reservation.claim).toBe('child-capability');
+    expect(existsSync(join(runtimeDir, 'runtime.json'))).toBe(false);
+  }, 12_000);
+
+  it('serializes a dead-parent reclaimer behind the spawned child claim transition', async () => {
+    const dataDir = newDataDir();
+    const build = runtimeBuildIdentity();
+    if (build.status !== 'known') throw new Error('test needs known runtime build');
+    const claim = 'spawned-child-capability';
+    const runtimeDir = join(dataDir, 'btw');
+    mkdirSync(runtimeDir, { mode: 0o700 });
+    writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
+      claim, ownerPid: 999999, ownerStartIdentity: 'dead-parent', buildId: build.id, leaseExpiresAt: Date.now() + 5_000,
+    }));
+    const previousClaim = process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
+    process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM = claim;
+    let releaseClaim!: () => void;
+    const claimed = new Promise<void>(resolve => { releaseClaim = resolve; });
+    let entered!: () => void;
+    const enteredClaim = new Promise<void>(resolve => { entered = resolve; });
+    __testOnly_setBtwRuntimeHooks({ afterChildClaimLockAcquired: async () => { entered(); await claimed; } });
+    try {
+      const child = runBtwRuntime({ dataDir });
+      await enteredClaim;
+      const reclaimer = ensureBtwRuntime({ dataDir });
+      await new Promise(resolve => setTimeout(resolve, 25));
+      expect(existsSync(join(runtimeDir, 'runtime.json'))).toBe(false);
+      releaseClaim();
+      await child;
+      const descriptor = await reclaimer;
+      expect(readProcessStartIdentity(descriptor.pid)).toBe(descriptor.startIdentity);
+      await shutdownRuntime({ dataDir });
+    } finally {
+      __testOnly_setBtwRuntimeHooks();
+      if (previousClaim === undefined) delete process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
+      else process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM = previousClaim;
+    }
+  }, 12_000);
 
 
   it('closes a connection that sends an envelope outside the runtime command union', async () => {
@@ -478,23 +530,49 @@ describe('BTW runtime auth and singleton boot', () => {
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
-  it('accepts a duplicate prepare_btw result from the runtime contract', async () => {
-    const socketPath = `/tmp/btw-runtime-duplicate-result-${process.pid}-${Date.now()}.sock`;
+  it('rejects a malformed nested list_pending_projections item', async () => {
+    const socketPath = `/tmp/btw-runtime-invalid-projection-${process.pid}-${Date.now()}.sock`;
     staleSocketPaths.push(socketPath);
-    const duplicate = { ...makeBtwPrepareInput(), kind: 'duplicate' };
-    const operation = { btwOpId: 'btwop_duplicate', execution: { state: 'accepted' } };
     const server = createServer(socket => {
       socket.on('data', chunk => {
         for (const line of String(chunk).trim().split('\n')) {
           const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
           if (frame.kind === 'auth') socket.write('{"kind":"auth_ok"}\n');
-          else socket.write(`${JSON.stringify({ kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type, result: { kind: duplicate.kind, operation } })}\n`);
+          else socket.write(`${JSON.stringify({ kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type, result: [{ larkAppId: 'cli_app' }] })}\n`);
         }
       });
     });
     await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
     const client = new BtwRuntimeClientImpl({ descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' }, token: 'token' });
-    await expect(client.prepareBtw(makeBtwPrepareInput())).resolves.toMatchObject({ kind: 'duplicate', operation });
+    await expect(client.listPendingProjections('cli_app')).rejects.toThrow('invalid btw runtime reply result');
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('accepts a duplicate prepare_btw result from the runtime contract', async () => {
+    const socketPath = `/tmp/btw-runtime-duplicate-result-${process.pid}-${Date.now()}.sock`;
+    staleSocketPaths.push(socketPath);
+    const duplicate = { ...makeBtwPrepareInput(), kind: 'duplicate' };
+    const completeOperation = {
+      schemaVersion: 1, revision: 1, btwOpId: 'btwop_duplicate', requestId: 'req_duplicate', question: 'question',
+      parent: makeBtwPrepareInput().parent, replyTarget: makeBtwPrepareInput().replyTarget,
+      card: { createUuid: 'card', createAttempt: 0, replacementUuid: 'replace', replacementState: 'none' },
+      execution: { state: 'accepted', nativeTurnId: 'turn', attempt: 0, frameState: 'not_started' },
+      projection: { desiredRevision: 1, patchedRevision: 0, retryAttempt: 0, reminderUuid: 'reminder', reminderState: 'none', reminderAttempt: 0 },
+      createdAt: '2026-01-01T00:00:00.000Z', updatedAt: '2026-01-01T00:00:00.000Z',
+    };
+    const server = createServer(socket => {
+      socket.on('data', chunk => {
+        for (const line of String(chunk).trim().split('\n')) {
+          const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
+          if (frame.kind === 'auth') socket.write('{"kind":"auth_ok"}\n');
+          else socket.write(`${JSON.stringify({ kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type, result: { kind: duplicate.kind, operation: completeOperation } })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    const client = new BtwRuntimeClientImpl({ descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' }, token: 'token' });
+    await expect(client.prepareBtw(makeBtwPrepareInput())).resolves.toMatchObject({ kind: 'duplicate', operation: completeOperation });
     client.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
@@ -508,7 +586,7 @@ describe('BTW runtime auth and singleton boot', () => {
     const runtimeDir = join(dataDir, 'btw');
     mkdirSync(runtimeDir, { mode: 0o700 });
     writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
-      claim, ownerPid: process.pid, ownerStartIdentity: readProcessStartIdentity(process.pid), buildId: build.id,
+      claim, ownerPid: process.pid, ownerStartIdentity: readProcessStartIdentity(process.pid), buildId: build.id, leaseExpiresAt: Date.now() + 5_000,
     }));
     process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM = claim;
     try {
