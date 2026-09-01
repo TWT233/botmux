@@ -14,6 +14,7 @@
 //   FAKE_RESUME_CONFIG_FILE=path → write the received thread/resume params to path
 //                                  (lets a test assert model/effort are SUPPRESSED
 //                                   on resume)
+//   FAKE_TRACE_FILE=path → append process + RPC observations for characterization
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { writeFileSync } from 'node:fs';
@@ -36,7 +37,17 @@ const UPDATED_AFTER = Number(process.env.FAKE_UPDATED_AFTER ?? '101');
 let threadReadAttempt = 0;
 let currentThreadName;
 const REQUEST_USER_INPUT = process.env.FAKE_REQUEST_USER_INPUT === '1';
+const TRACE_FILE = process.env.FAKE_TRACE_FILE;
 let turnCount = 0;
+
+function trace(event, detail = {}) {
+  if (!TRACE_FILE) return;
+  try {
+    writeFileSync(TRACE_FILE, `${JSON.stringify({ event, ...detail })}\n`, { flag: 'a' });
+  } catch { /* test-only observation */ }
+}
+
+trace('spawn', { argv: process.argv.slice(2), env: { FAKE_TRACE_ENV: process.env.FAKE_TRACE_ENV } });
 
 const httpServer = createServer((req, res) => {
   if (req.url === '/readyz') { res.writeHead(200); res.end('ok'); return; }
@@ -77,6 +88,7 @@ wss.on('connection', (ws) => {
   };
   ws.on('message', (data) => {
     let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
+    if (typeof msg.method === 'string') trace('rpc', { method: msg.method });
     if (REQUEST_USER_INPUT && msg.id === 900 && (msg.result !== undefined || msg.error !== undefined)) {
       if (!pendingTurnReply) return;
       // Real traex 0.200.19 normalizes ANY reply to requestUserInput (empty
