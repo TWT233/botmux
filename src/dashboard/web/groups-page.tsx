@@ -1009,8 +1009,10 @@ function OncallRow(props: {
   const [workingDir, setWorkingDir] = useState(member.oncallChat?.workingDir ?? '');
   const [saving, setSaving] = useState(false);
   const [status, setStatus] = useState<{ text: string; className?: string } | null>(null);
+  const dirtyRef = useRef(false);
 
   useEffect(() => {
+    if (dirtyRef.current) return;
     setEnabled(!!member.oncallChat);
     setWorkingDir(member.oncallChat?.workingDir ?? '');
   }, [member]);
@@ -1035,6 +1037,7 @@ function OncallRow(props: {
         : await fetch(url, { method: 'DELETE' });
       const body = await r.json().catch(() => ({}));
       if (r.ok && body.ok) {
+        dirtyRef.current = false;
         setStatus({
           text: enabled ? `✓ 已绑定 → ${body.resolvedPath ?? wd}` : '✓ 已解绑',
           className: 'hint-ok',
@@ -1058,6 +1061,7 @@ function OncallRow(props: {
           data-action="toggle"
           checked={enabled}
           onChange={ev => {
+            dirtyRef.current = true;
             setEnabled(ev.currentTarget.checked);
             if (ev.currentTarget.checked) window.setTimeout(() => inputRef.current?.focus(), 0);
           }}
@@ -1073,7 +1077,10 @@ function OncallRow(props: {
           placeholder="e.g. /root/iserver/botmux"
           value={workingDir}
           disabled={!enabled}
-          onChange={ev => setWorkingDir(ev.currentTarget.value)}
+          onChange={ev => {
+            dirtyRef.current = true;
+            setWorkingDir(ev.currentTarget.value);
+          }}
         />
         <button type="button" data-action="save" disabled={saving} onClick={() => void save()}>{tr('groups.save')}</button>
         <span className={`oncall-status ${status?.className ?? ''}`} data-status>{status?.text ?? ''}</span>
@@ -1460,7 +1467,7 @@ function GroupsPage() {
   const timersRef = useRef<Set<number>>(new Set());
   const delayResolversRef = useRef<Map<number, () => void>>(new Map());
   const roleContextRunRef = useRef(0);
-  const reloadGroupsRunRef = useRef(0);
+  const snapshotRunRef = useRef(0);
   const [snapshot, setSnapshotState] = useState<GroupsSnapshot>(emptyGroupsSnapshot);
   const [roleContext, setRoleContext] = useState<RoleProfileContext>(() => emptyRoleContext());
   const [filters, setFilters] = useState<GroupFilters>({ q: '', missingOnly: false });
@@ -1510,24 +1517,30 @@ function GroupsPage() {
   }, []);
 
   const reloadGroups = useCallback(async (options?: { force?: boolean }): Promise<GroupsSnapshot> => {
-    const runId = ++reloadGroupsRunRef.current;
-    const next = await fetchGroupsSnapshot({ force: options?.force });
-    if (!mountedRef.current || runId !== reloadGroupsRunRef.current) return next;
-    setSnapshot(next);
-    setLoadError(null);
-    void refreshRoleProfileContext(next);
-    return next;
+    const runId = ++snapshotRunRef.current;
+    try {
+      const next = await fetchGroupsSnapshot({ force: options?.force });
+      if (!mountedRef.current || runId !== snapshotRunRef.current) return snapshotRef.current;
+      setSnapshot(next);
+      setLoadError(null);
+      void refreshRoleProfileContext(next);
+      return next;
+    } catch (error) {
+      if (!mountedRef.current || runId !== snapshotRunRef.current) return snapshotRef.current;
+      throw error;
+    }
   }, [refreshRoleProfileContext, setSnapshot]);
 
   const refreshUntilSeen = useCallback(async (chatId: string, expectedBotIds: Set<string>): Promise<void> => {
+    const runId = ++snapshotRunRef.current;
     const delays = [600, 1200, 1200, 1200, 1200, 1200];
     for (const ms of delays) {
       await delay(ms);
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || runId !== snapshotRunRef.current) return;
       let next: GroupsSnapshot;
       try { next = await fetchGroupsSnapshot({ force: true }); }
       catch { continue; }
-      if (!mountedRef.current) return;
+      if (!mountedRef.current || runId !== snapshotRunRef.current) return;
       const row = (next.chats ?? []).find(chat => chat.chatId === chatId);
       if (row && allExpectedInChat(row, expectedBotIds)) {
         setSnapshot(next);

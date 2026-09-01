@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardBehaviorSection } from '../src/dashboard/web/bot-defaults-page.js';
 import { ManageDialog, renderGroupsPage } from '../src/dashboard/web/groups-page.js';
 import type { GroupChat } from '../src/dashboard/web/groups.js';
+import { primeGroupsSnapshotCache } from '../src/dashboard/web/groups-api.js';
 import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -29,10 +30,11 @@ function findByDataAction(
   return renderer.root.findByProps({ 'data-action': action });
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(error: unknown): void } {
   let resolve!: (value: T) => void;
-  const promise = new Promise<T>(done => { resolve = done; });
-  return { promise, resolve };
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
 }
 
 function jsonResponse(body: unknown): any {
@@ -298,11 +300,11 @@ describe('group manage streaming-card pin rows', () => {
       node.children.join('') === 'Claude (fresh)'
     )).toBe(true);
 
-    await act(async () => {
-      staleManualResponse.resolve(jsonResponse({ chats: [initialChat], bots: [] }));
-    });
+    await act(async () => { staleManualResponse.reject(new Error('stale_refresh_failed')); });
     expect(renderer.root.findByType('h3').children.join('')).toContain('Release Room (fresh)');
     expect(groupPinToggle(renderer).props.checked).toBe(true);
+    expect(renderer.root.findAll(node => node.props.className === 'hint-warn'
+      && node.children.join('').includes('stale_refresh_failed'))).toHaveLength(0);
 
     act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
     await act(async () => {
@@ -319,6 +321,119 @@ describe('group manage streaming-card pin rows', () => {
     )).toBe(true);
 
     act(() => renderer.unmount());
+  });
+
+  it('does not let an older create poll overwrite a newer manual reload', async () => {
+    const bot = { larkAppId: 'cli_a', botName: 'Claude' };
+    primeGroupsSnapshotCache({ chats: [], bots: [bot] });
+    const createResponse = deferred<any>();
+    const manualResponse = deferred<any>();
+    const pollingResponse = deferred<any>();
+    const refreshRequests = [deferred<void>(), deferred<void>()];
+    const pollDelayProcessed = deferred<void>();
+    let refreshCount = 0;
+    const nativeDocument = (globalThis as any).document;
+    const nativeWindow = (globalThis as any).window;
+    const hostSetTimeout = globalThis.setTimeout.bind(globalThis);
+    const hostClearTimeout = globalThis.clearTimeout.bind(globalThis);
+    let releasePollDelay: (() => void) | undefined;
+    (globalThis as any).document = {
+      addEventListener() {},
+      removeEventListener() {},
+      getElementById() { return null; },
+    };
+    (globalThis as any).window = {
+      setTimeout(callback: () => void, ms?: number) {
+        if (ms === 600 && !releasePollDelay) {
+          releasePollDelay = () => {
+            callback();
+            queueMicrotask(() => pollDelayProcessed.resolve());
+          };
+          return 91;
+        }
+        return hostSetTimeout(callback, ms);
+      },
+      clearTimeout: hostClearTimeout,
+      setInterval: globalThis.setInterval.bind(globalThis),
+      clearInterval: globalThis.clearInterval.bind(globalThis),
+      open() {},
+    };
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/feed-groups') {
+        return Promise.resolve(jsonResponse({ ok: true, groups: [], larkAppId: 'cli_a' }));
+      }
+      if (url === '/api/groups/create' && init?.method === 'POST') return createResponse.promise;
+      if (url === '/api/groups?refresh=1') {
+        refreshRequests[refreshCount].resolve();
+        refreshCount += 1;
+        return refreshCount === 1 ? manualResponse.promise : pollingResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByType('button').filter(node => node.props.id === 'g-create')).toHaveLength(1);
+    });
+    await act(async () => {
+      renderer.root.findAllByType('button').find(node => node.props.id === 'g-create')!.props.onClick();
+    });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ id: 'g-createform' })).toHaveLength(1);
+    });
+    act(() => {
+      renderer.root.findByProps({ type: 'checkbox', value: 'cli_a' })
+        .props.onChange({ currentTarget: { checked: true } });
+    });
+
+    const nativeFormData = globalThis.FormData;
+    (globalThis as any).FormData = class {
+      get(name: string): string { return name === 'name' ? 'Created Room' : ''; }
+    };
+    try {
+      act(() => {
+        renderer.root.findByProps({ id: 'g-createform' }).props.onSubmit({
+          preventDefault() {},
+          currentTarget: {},
+        });
+      });
+      await act(async () => {
+        createResponse.resolve(jsonResponse({
+          ok: true,
+          chatId: 'oc_created',
+          creator: 'cli_a',
+        }));
+      });
+      await vi.waitFor(() => expect(releasePollDelay).toBeTypeOf('function'));
+      act(() => { renderer.root.findByProps({ id: 'g-create-close' }).props.onClick(); });
+
+      act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
+      await refreshRequests[0].promise;
+      const newestChat = makeChat([makeMember()], { chatId: 'oc_created', name: 'Newest Room' });
+      await act(async () => {
+        manualResponse.resolve(jsonResponse({ chats: [newestChat], bots: [bot] }));
+      });
+      expect(renderer.root.findByProps({ 'data-chat': 'oc_created' }).findByType('b').children.join(''))
+        .toBe('Newest Room');
+
+      await act(async () => {
+        releasePollDelay!();
+        await pollDelayProcessed.promise;
+      });
+
+      expect(refreshCount).toBe(1);
+      expect(renderer.root.findByProps({ 'data-chat': 'oc_created' }).findByType('b').children.join(''))
+        .toBe('Newest Room');
+    } finally {
+      (globalThis as any).FormData = nativeFormData;
+      (globalThis as any).document = nativeDocument;
+      (globalThis as any).window = nativeWindow;
+      act(() => renderer.unmount());
+    }
   });
 
   it('ignores a pre-write snapshot during save when the post-write reload fails', async () => {
@@ -368,7 +483,7 @@ describe('group manage streaming-card pin rows', () => {
       .toContain('does not pin');
   });
 
-  it('refreshes oncall enabled state and working directory from a new member snapshot', () => {
+  it('refreshes pristine oncall fields but preserves a dirty working-directory draft', () => {
     const initialMember = makeMember({ oncallChat: null });
     const freshMember = makeMember({ oncallChat: { workingDir: '/srv/fresh-repo' } });
     const onReloadGroups = vi.fn(async () => ({ chats: [], bots: [] }));
@@ -381,6 +496,20 @@ describe('group manage streaming-card pin rows', () => {
 
     expect(renderer.root.findByProps({ 'data-action': 'toggle' }).props.checked).toBe(true);
     expect(renderer.root.findByProps({ 'data-input': 'workingDir' }).props.value).toBe('/srv/fresh-repo');
+
+    act(() => {
+      renderer.root.findByProps({ 'data-input': 'workingDir' })
+        .props.onChange({ currentTarget: { value: '/unsaved-user-edit' } });
+    });
+    act(() => {
+      renderer.update(manageElement(makeChat([{
+        ...freshMember,
+        botName: 'Claude (metadata refreshed)',
+      }]), onReloadGroups));
+    });
+
+    expect(renderer.root.findByProps({ 'data-input': 'workingDir' }).props.value)
+      .toBe('/unsaved-user-edit');
   });
 
   it('drops a selected leave target when a fresh chat snapshot removes that member', () => {
