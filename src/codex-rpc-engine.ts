@@ -138,7 +138,9 @@ const REQUEST_TIMEOUT_MS = 60_000;
  *  200ms–10s budgets. */
 const MIN_POLL_REQUEST_BUDGET_MS = 50;
 
-export class CodexRpcEngine {
+/** Internal implementation shared by the worker-compatible engine facade and
+ *  reusable persistent sessions. */
+export class CodexRpcEngineCore {
   private child?: ChildProcess;
   private ws?: WebSocket;
   private nextId = 1;
@@ -825,4 +827,10 @@ export class CodexRpcEngine {
       try { this.opts.onDead?.(); } catch { /* best effort */ }
     }
   }
+}
+
+/** Worker-compatible facade. Its public constructor and methods deliberately
+ *  remain byte-compatible while reusable callers adopt CodexRpcSession. */
+export class CodexRpcEngine extends CodexRpcEngineCore {
+  constructor(opts: CodexRpcEngineOpts) { super(opts); }
 }
