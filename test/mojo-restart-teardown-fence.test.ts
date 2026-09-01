@@ -87,7 +87,9 @@ describe('classifyRestartTeardown', () => {
 describe('worker.ts restart wiring', () => {
   const src = readFileSync(join(import.meta.dirname, '../src/worker.ts'), 'utf-8');
   const restart = src.slice(src.indexOf('async function restartCliProcess('));
-  const teardownBlock = restart.slice(0, restart.indexOf('killCli({ preservePending: opts.preservePending })'));
+  const teardownBlock = restart.slice(0, restart.indexOf(
+    'killCli({\n        preservePending: opts.preservePending,\n        preservePolicyCapability: true,',
+  ));
   it('no longer swallows the teardown outcome', () => {
     // The exact laundering shape: a bare race against a sleep, discarded, inside an
     // empty catch. Asserted on source because the alternative is spinning up a real

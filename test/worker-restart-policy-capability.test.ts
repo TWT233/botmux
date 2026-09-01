@@ -16,6 +16,7 @@ interface Harness {
   messages: WorkerToDaemon[];
   root: string;
   sessionId: string;
+  crashSignal?: string;
   launchCount?: string;
   tmuxSession?: string;
 }
@@ -52,10 +53,11 @@ function revokesSince(harness: Harness, index: number): OriginRevoke[] {
     .filter((message): message is OriginRevoke => message.type === 'managed_turn_origin_revoked');
 }
 
-function startWorker(backendType: 'tmux' | 'mojo'): Harness {
+function startWorker(backendType: 'pty' | 'tmux' | 'mojo', opts: { initialAtMostOnce?: boolean } = {}): Harness {
   const root = mkdtempSync(join(tmpdir(), 'botmux-restart-policy-'));
   tempDirs.add(root);
   const launchCount = join(root, 'launch-count');
+  const crashSignal = join(root, 'crash-now');
   const fakeCli = join(root, backendType === 'mojo' ? 'mojo' : 'trae');
   writeFileSync(fakeCli, backendType === 'mojo' ? `#!/usr/bin/env bash
 echo '{"type":"system","subtype":"init","session_id":"mojo-restart-session"}'
@@ -69,11 +71,11 @@ count=0
 if [ -f '${launchCount}' ]; then count=$(cat '${launchCount}'); fi
 count=$((count + 1))
 printf '%s' "$count" > '${launchCount}'
-for _ in $(seq 1 20); do
+while :; do
+  if [ -f '${crashSignal}' ]; then exit 17; fi
   printf '\n› \n'
   sleep 0.05
 done
-while :; do sleep 60; done
 `);
   chmodSync(fakeCli, 0o755);
 
@@ -112,11 +114,12 @@ while :; do sleep 60; done
     ...(backendType === 'mojo' ? { backendConfig: { cloud: true } } : {}),
     prompt: 'opening turn',
     turnId: 'turn-before-restart',
+    ...(opts.initialAtMostOnce ? { atMostOnce: true } : {}),
     larkAppId: 'app_restart_policy',
     larkAppSecret: 'secret',
     launchShell: '/bin/sh',
   } satisfies DaemonToWorker);
-  return { child, logs, messages, root, sessionId, launchCount, tmuxSession };
+  return { child, logs, messages, root, sessionId, crashSignal, launchCount, tmuxSession };
 }
 
 async function waitForInitialOrigin(harness: Harness): Promise<Origin> {
@@ -164,8 +167,51 @@ afterEach(async () => {
   tempDirs.clear();
 });
 
-describe.skipIf(!tmuxAvailable)('worker restart policy capability lifecycle', () => {
-  it('keeps policy authority stable through backend onExit and killCli', async () => {
+describe('worker restart policy capability lifecycle', () => {
+  it('keeps worker-generation policy authority across natural crash recovery', async () => {
+    const harness = startWorker('pty', { initialAtMostOnce: true });
+    const before = await waitForInitialOrigin(harness);
+    const crashMessageIndex = harness.messages.length;
+
+    writeFileSync(harness.crashSignal!, 'crash');
+    await waitFor(
+      harness,
+      () => harness.messages.some(message => message.type === 'claude_exit'),
+      'natural backend crash',
+    );
+    rmSync(harness.crashSignal!);
+    harness.child.send({ type: 'restart', attemptId: 'natural-crash-recovery' } satisfies DaemonToWorker);
+    await waitFor(
+      harness,
+      () => readFileSync(harness.launchCount!, 'utf8') === '2',
+      'replacement process launch after natural crash',
+    );
+    const crashRevokes = revokesSince(harness, crashMessageIndex);
+    expect(crashRevokes.some(message => message.capability === before.capability)).toBe(true);
+    expect(crashRevokes.every(message => message.policyCapability === undefined)).toBe(true);
+  }, 45_000);
+
+  it('revokes policy authority when the worker generation tears down', async () => {
+    const harness = startWorker('pty');
+    const before = await waitForInitialOrigin(harness);
+    const teardownMessageIndex = harness.messages.length;
+
+    harness.child.send({
+      type: 'detach_for_transfer',
+      requestId: 'worker-generation-teardown',
+    } satisfies DaemonToWorker);
+    await waitFor(
+      harness,
+      () => harness.messages.some(message => message.type === 'transfer_detached'
+        && message.requestId === 'worker-generation-teardown'),
+      'worker generation teardown acknowledgement',
+    );
+
+    const teardownRevokes = revokesSince(harness, teardownMessageIndex);
+    expect(teardownRevokes.some(message => message.policyCapability === before.policyCapability)).toBe(true);
+  }, 30_000);
+
+  it.skipIf(!tmuxAvailable)('keeps policy authority stable through backend onExit and killCli', async () => {
     const harness = startWorker('tmux');
     const before = await waitForInitialOrigin(harness);
     const restartMessageIndex = harness.messages.length;
@@ -173,9 +219,9 @@ describe.skipIf(!tmuxAvailable)('worker restart policy capability lifecycle', ()
     harness.child.send({ type: 'restart', attemptId: 'kill-cli' } satisfies DaemonToWorker);
     await waitFor(
       harness,
-      () => harness.messages.some(message => message.type === 'restart_result'
-        && message.attemptId === 'kill-cli' && message.status === 'succeeded'),
-      'replacement CLI readiness after killCli',
+      () => readFileSync(harness.launchCount!, 'utf8') === '2'
+        && revokesSince(harness, restartMessageIndex).length >= 2,
+      'backend teardown and replacement launch after killCli',
       30_000,
     );
     expect(readFileSync(harness.launchCount!, 'utf8')).toBe('2');
