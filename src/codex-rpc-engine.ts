@@ -85,6 +85,14 @@ export interface CodexRpcEngineOpts {
    *  resolving the ack. The worker uses that identity to release only the
    *  matching rpcActive bridge entry. */
   onTurnTerminal?: (terminal: CodexRpcTurnTerminal) => void;
+  /** Parsed transport notification hook; the WebSocket payload is parsed once
+   *  before the normal terminal/input routing consumes it. */
+  onNotification?: (notification: CodexRpcNotification) => void;
+}
+
+export interface CodexRpcNotification {
+  method: string;
+  params: unknown;
 }
 
 export interface CodexRpcTurnIdentity {
@@ -150,6 +158,7 @@ export class CodexRpcEngineCore {
     timer: ReturnType<typeof setTimeout>;
     method: string;
     turnIdentity?: CodexRpcTurnIdentity;
+    beforeSend?: () => void;
   }>();
   private readonly turnOwners = new Map<string, CodexRpcTurnIdentity>();
   private readonly nativeTurnByOwner = new Map<string, string>();
@@ -184,7 +193,7 @@ export class CodexRpcEngineCore {
     return nativeTurnId;
   }
 
-  private bindNativeTurn(nativeTurnId: string, identity: CodexRpcTurnIdentity): void {
+  registerNativeTurnOwner(nativeTurnId: string, identity: CodexRpcTurnIdentity): void {
     if (!nativeTurnId) throw new Error('turn/start returned no native turn id');
     const existingOwner = this.turnOwners.get(nativeTurnId);
     if (existingOwner && this.ownerKey(existingOwner) !== this.ownerKey(identity)) {
@@ -445,6 +454,17 @@ export class CodexRpcEngineCore {
     };
   }
 
+  /** Per-request dispatch boundary used by the reusable session. */
+  async requestAtDispatchBoundary(
+    method: string, params: unknown, opts: { timeoutMs?: number; fatalOnTimeout?: boolean; beforeSend?: () => void } = {},
+  ): Promise<{ result?: unknown; error?: Error; dispatched: boolean }> {
+    let dispatched = false;
+    try {
+      const result = await this.request(method, params, { timeoutMs: opts.timeoutMs, fatalOnTimeout: opts.fatalOnTimeout ?? false }, () => { dispatched = true; }, undefined, opts.beforeSend);
+      return { result, dispatched };
+    } catch (error) { return { error: error instanceof Error ? error : new Error(String(error)), dispatched }; }
+  }
+
   /** Deliver the FRESH first turn and resolve its outcome as one of THREE states,
    *  prioritising exactly-once over never-lost (P1-1). An empty thread can't be
    *  resumed by the TUI, so the first turn must persist the rollout before the
@@ -636,6 +656,7 @@ export class CodexRpcEngineCore {
     opts?: { timeoutMs?: number; fatalOnTimeout?: boolean },
     onDispatch?: () => void,
     turnIdentity?: CodexRpcTurnIdentity,
+    beforeSend?: () => void,
   ): Promise<any> {
     if (turnIdentity && [...this.pending.values()].some(p => p.method === 'turn/start')) {
       return Promise.reject(new Error('concurrent turn/start requests are not allowed'));
@@ -670,11 +691,16 @@ export class CodexRpcEngineCore {
         timer,
         method,
         ...(turnIdentity ? { turnIdentity: { ...turnIdentity } } : {}),
+        ...(beforeSend ? { beforeSend } : {}),
       });
       // onDispatch fires ONLY after send() succeeds (ws was OPEN + no throw) — the
       // frame is then on the socket, so any later failure is "dispatched" and must
       // be treated as ambiguous, never not-sent (Codex P1-1 boundary).
-      try { this.send({ jsonrpc: '2.0', id, method, params }); onDispatch?.(); }
+      try {
+        this.pending.get(id)?.beforeSend?.();
+        this.send({ jsonrpc: '2.0', id, method, params });
+        onDispatch?.();
+      }
       catch (e) { this.pending.delete(id); clearTimeout(timer); reject(e as Error); }
     });
   }
@@ -729,6 +755,9 @@ export class CodexRpcEngineCore {
   private onMessage(line: string): void {
     let msg: Json;
     try { msg = JSON.parse(line); } catch { return; }
+    if (typeof msg.method === 'string' && typeof msg.id !== 'number') {
+      try { this.opts.onNotification?.({ method: msg.method, params: msg.params }); } catch { /* observer only */ }
+    }
     // Response to one of our requests.
     if (typeof msg.id === 'number' && (msg.result !== undefined || msg.error !== undefined)) {
       const p = this.pending.get(msg.id);
@@ -741,7 +770,7 @@ export class CodexRpcEngineCore {
         try {
           if (p.turnIdentity) {
             const nativeTurnId = String(msg.result?.turn?.id ?? '');
-            this.bindNativeTurn(nativeTurnId, p.turnIdentity);
+            this.registerNativeTurnOwner(nativeTurnId, p.turnIdentity);
           }
           p.resolve(msg.result);
         } catch (err) {

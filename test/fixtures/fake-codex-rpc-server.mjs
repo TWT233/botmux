@@ -15,6 +15,8 @@
 //                                  (lets a test assert model/effort are SUPPRESSED
 //                                   on resume)
 //   FAKE_TRACE_FILE=path → append process + RPC observations for characterization
+//   FAKE_DELAY_THREAD_READ_MS=N → delay thread/read responses for concurrency tests
+//   FAKE_NOTIFY_ON_TURN=1 → emit one ordinary notification while processing turn/start
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
 import { writeFileSync } from 'node:fs';
@@ -37,6 +39,8 @@ const UPDATED_AFTER = Number(process.env.FAKE_UPDATED_AFTER ?? '101');
 let threadReadAttempt = 0;
 let currentThreadName;
 const REQUEST_USER_INPUT = process.env.FAKE_REQUEST_USER_INPUT === '1';
+const DELAY_THREAD_READ_MS = Number(process.env.FAKE_DELAY_THREAD_READ_MS ?? '0');
+const NOTIFY_ON_TURN = process.env.FAKE_NOTIFY_ON_TURN === '1';
 const TRACE_FILE = process.env.FAKE_TRACE_FILE;
 let turnCount = 0;
 
@@ -127,12 +131,14 @@ wss.on('connection', (ws) => {
       }
       case 'thread/read':
         threadReadAttempt += 1;
-        return reply({ thread: {
+        const threadRead = { thread: {
           id: msg.params?.threadId ?? 'thread-fake-1',
           name: currentThreadName ?? null,
           preview: threadReadAttempt > PREVIEW_DELAY_READS ? '<botmux_routing> first message preview' : '',
           updatedAt: threadReadAttempt > UPDATED_DELAY_READS ? UPDATED_AFTER : UPDATED_BEFORE,
-        } });
+        } };
+        if (DELAY_THREAD_READ_MS > 0) return setTimeout(() => reply(threadRead), DELAY_THREAD_READ_MS);
+        return reply(threadRead);
       case 'thread/name/set': currentThreadName = msg.params?.name; return reply({});
       case 'turn/interrupt': {
         // FAKE_INTERRUPT_ERROR=1 models an interrupt that itself fails: the
@@ -166,6 +172,12 @@ wss.on('connection', (ws) => {
         turnCount++;
         const nativeTurnId = `turn-fake-${turnCount}`;
         const threadId = msg.params?.threadId;
+        if (NOTIFY_ON_TURN) {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0', method: 'item/agentMessage/delta',
+            params: { threadId, turnId: nativeTurnId, delta: 'fake notification' },
+          }));
+        }
         if (HANG_TURN) {
           if (HANG_TURN_NOTIFY) emitTurnLifecycle(threadId, nativeTurnId);
           return;
