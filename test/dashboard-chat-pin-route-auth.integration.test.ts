@@ -1,14 +1,14 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import { once } from 'node:events';
-import { createServer as createNetServer } from 'node:net';
 import { join, resolve } from 'node:path';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import type { ChildProcess } from 'node:child_process';
 
 import { spawnTsScript } from './helpers/ts-runner.js';
 import { loadOrCreatePersistedToken } from '../src/dashboard/auth.js';
+import { loopbackFetch, type LoopbackFetchInit } from '../src/core/loopback-fetch.js';
 
 const DASHBOARD_ENTRY = resolve('src/index-dashboard.ts');
 
@@ -23,47 +23,70 @@ async function closeServer(server: Server | undefined): Promise<void> {
   await new Promise<void>(resolveClose => server.close(() => resolveClose()));
 }
 
-async function reservePort(): Promise<number> {
-  const server = createNetServer();
-  server.listen(0, '127.0.0.1');
-  await once(server, 'listening');
-  const port = (server.address() as import('node:net').AddressInfo).port;
-  await new Promise<void>(resolveClose => server.close(() => resolveClose()));
-  return port;
+type LoopbackResponse = {
+  status: number;
+  bodyText: string;
+};
+
+async function requestLoopback(
+  url: string,
+  init: LoopbackFetchInit = {},
+): Promise<LoopbackResponse> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 2_000);
+  timeout.unref();
+  try {
+    const response = await loopbackFetch(url, { ...init, signal: controller.signal });
+    return { status: response.status, bodyText: await response.text() };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
-async function waitForDashboard(
-  base: string,
+async function waitForDashboardPort(
+  portPath: string,
   child: ChildProcess,
   logs: () => string,
   timeoutMs = 15_000,
-): Promise<void> {
+): Promise<number> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     if (child.exitCode !== null || child.signalCode !== null) {
       throw new Error(`dashboard exited early\n${logs()}`);
     }
     try {
-      const response = await fetch(`${base}/__health`);
-      if (response.ok) return;
+      const port = Number(readFileSync(portPath, 'utf8').trim());
+      if (Number.isInteger(port) && port > 0 && port <= 65_535) {
+        const response = await requestLoopback(`http://127.0.0.1:${port}/__health`);
+        if (response.status === 200) return port;
+      }
     } catch {
       // still booting
     }
     await new Promise(resolveSleep => setTimeout(resolveSleep, 100));
   }
-  throw new Error(`timeout waiting for dashboard health\n${logs()}`);
+  throw new Error(`timeout waiting for dashboard port/health\n${logs()}`);
 }
 
 async function stopChild(child: ChildProcess | undefined): Promise<void> {
   if (!child || child.exitCode !== null || child.signalCode !== null) return;
+  const closePromise = once(child, 'close');
   child.kill('SIGTERM');
-  await Promise.race([
-    once(child, 'close'),
-    new Promise(resolveTimeout => setTimeout(resolveTimeout, 10_000)),
-  ]);
-  if (child.exitCode === null && child.signalCode === null) {
-    child.kill('SIGKILL');
-    await once(child, 'close');
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const outcome = await Promise.race([
+      closePromise.then(() => 'closed' as const),
+      new Promise<'timeout'>(resolveTimeout => {
+        timeout = setTimeout(() => resolveTimeout('timeout'), 10_000);
+        timeout.unref();
+      }),
+    ]);
+    if (outcome === 'timeout' && child.exitCode === null && child.signalCode === null) {
+      child.kill('SIGKILL');
+      await closePromise;
+    }
+  } finally {
+    if (timeout) clearTimeout(timeout);
   }
 }
 
@@ -88,7 +111,6 @@ describe('dashboard pin-streaming-card route auth', () => {
     const dataDir = join(botmuxDir, 'data');
     const registryDir = join(dataDir, 'dashboard-daemons');
     const botsConfigPath = join(botmuxDir, 'bots.json');
-    const dashboardPort = await reservePort();
     mkdirSync(registryDir, { recursive: true });
     writeFileSync(join(botmuxDir, '.dashboard-secret'), 'dashboard-secret-for-pin-auth-test', { mode: 0o600 });
     writeFileSync(join(botmuxDir, '.data-dir'), `${dataDir}\n`, { mode: 0o600 });
@@ -132,7 +154,9 @@ describe('dashboard pin-streaming-card route auth', () => {
         USERPROFILE: homeDir,
         SESSION_DATA_DIR: dataDir,
         BOTS_CONFIG: botsConfigPath,
-        BOTMUX_DASHBOARD_PORT: String(dashboardPort),
+        // Let the dashboard's real listenWithProbe own selection and publish
+        // the exact bound port to the isolated HOME; no reserve/release race.
+        BOTMUX_DASHBOARD_PORT: '7891',
         BOTMUX_DASHBOARD_HOST: '127.0.0.1',
         BOTMUX_DASHBOARD_PUBLIC_READONLY: 'false',
       },
@@ -144,16 +168,20 @@ describe('dashboard pin-streaming-card route auth', () => {
     let stderr = '';
     dashboardChild.stderr?.on('data', chunk => { stderr += String(chunk); });
 
+    const dashboardPort = await waitForDashboardPort(
+      join(botmuxDir, '.dashboard-port'),
+      dashboardChild,
+      () => `${stdout}\n${stderr}`,
+    );
     const base = `http://127.0.0.1:${dashboardPort}`;
-    await waitForDashboard(base, dashboardChild, () => `${stdout}\n${stderr}`);
     const pinRoute = `${base}/api/groups/${encodeURIComponent('oc auth/topic')}`
       + `/pin-streaming-card/${encodeURIComponent('cli auth-test-app')}`;
-    const anonymousPin = () => fetch(pinRoute, {
+    const anonymousPin = () => requestLoopback(pinRoute, {
       method: 'PUT',
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ enabled: false }),
     });
-    const authenticatedPin = await fetch(pinRoute, {
+    const authenticatedPin = await requestLoopback(pinRoute, {
       method: 'PUT',
       headers: {
         cookie: `botmux_dashboard_token=${dashboardToken}`,
@@ -176,7 +204,7 @@ describe('dashboard pin-streaming-card route auth', () => {
       pinWrites: [],
     });
 
-    const enablePublicReadOnly = await fetch(`${base}/api/settings`, {
+    const enablePublicReadOnly = await requestLoopback(`${base}/api/settings`, {
       method: 'PUT',
       headers: {
         cookie: `botmux_dashboard_token=${dashboardToken}`,
@@ -186,9 +214,9 @@ describe('dashboard pin-streaming-card route auth', () => {
     });
     expect(enablePublicReadOnly.status, stderr).toBe(200);
 
-    const anonymousSettings = await fetch(`${base}/api/settings`);
+    const anonymousSettings = await requestLoopback(`${base}/api/settings`);
     expect(anonymousSettings.status, stderr).toBe(200);
-    expect(await anonymousSettings.json()).toMatchObject({
+    expect(JSON.parse(anonymousSettings.bodyText)).toMatchObject({
       authed: false,
       settings: { publicReadOnly: true },
     });
