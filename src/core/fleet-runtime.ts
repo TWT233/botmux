@@ -57,9 +57,22 @@ export function fleetDaemonNodeArgs(): string[] {
 /** The shared env every supervised member (bot daemons + the dashboard) inherits.
  *  Loads the legacy global .env for backward compat (WEB_HOST etc.), same as
  *  index-daemon did via dotenv. */
+export function readFleetDaemonEnvFile(
+  envFilePath = ENV_FILE,
+  readTextFile: (path: string) => string = path => readFileSync(path, 'utf-8'),
+): string | undefined {
+  try {
+    return readTextFile(envFilePath);
+  } catch {
+    // Match dotenv's historical lifecycle behavior: a missing, unreadable, or
+    // transiently replaced optional .env file must not prevent fleet recovery.
+    return undefined;
+  }
+}
+
 export function resolveFleetDaemonEnv(
   inheritedEnv: NodeJS.ProcessEnv = process.env,
-  envFileText: string | undefined = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf-8') : undefined,
+  envFileText: string | undefined = readFleetDaemonEnvFile(),
 ): NodeJS.ProcessEnv {
   // A restart invoked inside a managed session inherits the old daemon's
   // settings. Resolve the persisted lifecycle snapshot before spawning the
