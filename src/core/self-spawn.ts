@@ -28,7 +28,7 @@ import { join, dirname } from 'node:path';
  */
 
 export type BotmuxEntry =
-  | 'core-only' | 'daemon' | 'worker' | 'supervisor' | 'dashboard'
+  | 'core-only' | 'daemon' | 'worker' | 'supervisor' | 'dashboard' | 'btw-runtime'
   // CLI-adapter runners. Unlike the entries above these are not fleet processes:
   // an adapter spawns one as the CLI session itself (`resolvedBin` is
   // process.execPath and the runner is argv[0]). They need the same treatment for
@@ -42,6 +42,7 @@ const ENTRY_SUBCOMMAND: Record<BotmuxEntry, string> = {
   'worker': '__worker',
   'supervisor': '__supervisor',
   'dashboard': '__dashboard',
+  'btw-runtime': '__btw-runtime',
   'codex-app-runner': '__codex-app-runner',
   'dsh-runner': '__dsh-runner',
   'mira-runner': '__mira-runner',
@@ -55,6 +56,7 @@ const ENTRY_SCRIPT: Record<BotmuxEntry, string> = {
   'worker': 'worker.js',
   'supervisor': 'index-supervisor.js',
   'dashboard': 'index-dashboard.js',
+  'btw-runtime': 'index-btw-runtime.js',
   'codex-app-runner': 'codex-app-runner.js',
   'dsh-runner': 'dsh-runner.js',
   'mira-runner': 'mira-runner.js',
