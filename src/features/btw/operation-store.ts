@@ -27,6 +27,7 @@ import {
 
 const OPERATION_SCHEMA_VERSION = 1 as const;
 const POISON_SCHEMA_VERSION = 1 as const;
+const CREATE_AMBIGUITY_DEADLINE_MS = 55 * 60 * 1000;
 
 const OPERATION_STATES = new Set([
   'card_pending',
@@ -381,6 +382,312 @@ export function createBtwOperationStore(options: {
     return { operation: next, result: { kind: 'advanced', operation: next }, changed: true };
   });
 
+  const listPendingInitialCards = (larkAppId: string): BtwOperation[] =>
+    listAllOperations(options.dataDir)
+      .filter((operation) =>
+        operation.replyTarget.larkAppId === larkAppId
+        && operation.execution.state === 'card_pending'
+        && isRetryDue(operation.card.nextCreateAttemptAt, now()),
+      )
+      .sort(compareOperationsForListing);
+
+  const recordInitialCardAttempt = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    outcome: BtwInitialCardAttemptOutcome,
+  ): BtwOperation => withOperationMutation(scope, btwOpId, (operation, isoNow) => {
+    if (operation.execution.state !== 'card_pending') {
+      throw new Error(`recordInitialCardAttempt requires card_pending state, got ${operation.execution.state}`);
+    }
+    const nextAttempt = operation.card.createAttempt + 1;
+    const firstPossiblySentAt = outcome.kind === 'unknown'
+      ? (operation.card.firstPossiblySentAt ?? isoNow)
+      : operation.card.firstPossiblySentAt;
+    const deadline = currentCreateRetryDeadline({
+      ...operation.card,
+      ...(firstPossiblySentAt !== undefined ? { firstPossiblySentAt } : {}),
+    });
+    const retryAt = clampRetryAt(outcome.retryAt, deadline);
+
+    if (
+      outcome.kind === 'definitely_unsent'
+      && nextAttempt >= MAX_INITIAL_CARD_CREATE_ATTEMPTS
+    ) {
+      const next = evolveOperation(operation, isoNow, {
+        card: {
+          ...operation.card,
+          createAttempt: nextAttempt,
+          nextCreateAttemptAt: undefined,
+        },
+        execution: {
+          ...operation.execution,
+          state: 'card_unknown',
+          errorCode: 'initial_card_retry_exhausted',
+          message: outcome.message,
+        },
+      });
+      return { operation: next, result: next, changed: true };
+    }
+
+    if (deadline !== undefined && Date.parse(isoNow) >= Date.parse(deadline)) {
+      const next = evolveOperation(operation, isoNow, {
+        card: {
+          ...operation.card,
+          createAttempt: nextAttempt,
+          nextCreateAttemptAt: undefined,
+          ...(firstPossiblySentAt !== undefined
+            ? { firstPossiblySentAt }
+            : {}),
+          createRetryDeadline: deadline,
+        },
+        execution: {
+          ...operation.execution,
+          state: 'card_unknown',
+          errorCode: outcome.errorCode,
+          message: outcome.message,
+        },
+      });
+      return { operation: next, result: next, changed: true };
+    }
+
+    const next = evolveOperation(operation, isoNow, {
+      card: stripUndefinedObjectKeys({
+        ...operation.card,
+        createAttempt: nextAttempt,
+        nextCreateAttemptAt: retryAt,
+        ...(firstPossiblySentAt !== undefined ? { firstPossiblySentAt } : {}),
+        ...(deadline !== undefined ? { createRetryDeadline: deadline } : {}),
+      }),
+      execution: stripUndefinedObjectKeys({
+        ...operation.execution,
+        errorCode: undefined,
+        message: undefined,
+      }),
+    });
+    return { operation: next, result: next, changed: true };
+  });
+
+  const listPendingBtwProjections = (larkAppId: string): BtwProjectionItem[] =>
+    listAllOperations(options.dataDir)
+      .filter((operation) => operation.replyTarget.larkAppId === larkAppId)
+      .map((operation) => pendingProjectionForOperation(operation, now()))
+      .filter((item): item is BtwProjectionItem => item !== undefined)
+      .sort(compareProjectionItemsForListing);
+
+  const recordBtwProjectionFailure = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    expected: { operationRevision: number; projectionRevision: number },
+    failure: BtwProjectionFailure,
+  ): { kind: 'applied' | 'stale'; operation: BtwOperation } => withOperationMutation<{ kind: 'applied' | 'stale'; operation: BtwOperation }>(scope, btwOpId, (operation, isoNow) => {
+    if (!matchesProjectionCas(operation, expected)) {
+      return { operation, result: { kind: 'stale', operation }, changed: false };
+    }
+    if (!isContentProjectionPending(operation)) {
+      throw new Error('recordBtwProjectionFailure requires a pending content projection');
+    }
+    if (failure.kind === 'visible_fallback') {
+      const next = evolveVisibleOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          deliveryFailure: {
+            kind: 'visible_fallback',
+            errorCode: failure.errorCode,
+            message: failure.message,
+          },
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+    const next = evolveOperation(operation, isoNow, {
+      projection: {
+        ...operation.projection,
+        blockedRevision: operation.projection.desiredRevision,
+        nextAttemptAt: undefined,
+        deliveryFailure: {
+          kind: 'provider_permanent',
+          errorCode: failure.errorCode,
+          message: failure.message,
+        },
+      },
+    });
+    return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+  });
+
+  const ackBtwProjection = (
+    scope: BtwOperationScope,
+    btwOpId: string,
+    expected: { operationRevision: number; projectionRevision: number },
+    outcome: BtwProjectionProviderOutcome,
+  ): { kind: 'applied' | 'stale'; operation: BtwOperation } => withOperationMutation<{ kind: 'applied' | 'stale'; operation: BtwOperation }>(scope, btwOpId, (operation, isoNow) => {
+    if (!matchesProjectionCas(operation, expected)) {
+      return { operation, result: { kind: 'stale', operation }, changed: false };
+    }
+
+    if (outcome.kind === 'patched') {
+      if (operation.projection.patchedRevision === operation.projection.desiredRevision) {
+        return { operation, result: { kind: 'applied', operation }, changed: false };
+      }
+      if (!isContentProjectionPending(operation)) {
+        throw new Error('patched acknowledgement requires a pending content projection');
+      }
+      if (
+        operation.card.replacementState === 'pending'
+        && operation.card.replacementForRevision === operation.projection.desiredRevision
+      ) {
+        throw new Error('patched acknowledgement cannot advance a replacement-pending projection');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          patchedRevision: operation.projection.desiredRevision,
+          blockedRevision: undefined,
+          nextAttemptAt: undefined,
+          deliveryFailure: undefined,
+          reminderState: 'pending',
+          reminderAttempt: 0,
+          reminderNextAttemptAt: undefined,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'withdrawn') {
+      if (
+        operation.card.replacementState === 'pending'
+        && operation.card.replacementForRevision === operation.projection.desiredRevision
+      ) {
+        return { operation, result: { kind: 'applied', operation }, changed: false };
+      }
+      if (!isContentProjectionPending(operation)) {
+        throw new Error('withdrawn acknowledgement requires a pending content projection');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        card: {
+          ...operation.card,
+          replacementState: 'pending',
+          replacementForRevision: operation.projection.desiredRevision,
+          replacementMessageId: undefined,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'replacement_created') {
+      if (
+        operation.card.replacementState === 'created'
+        && operation.card.replacementForRevision === operation.projection.desiredRevision
+        && operation.card.replacementMessageId === outcome.messageId
+        && operation.projection.patchedRevision === operation.projection.desiredRevision
+      ) {
+        return { operation, result: { kind: 'applied', operation }, changed: false };
+      }
+      if (!(
+        operation.card.replacementState === 'pending'
+        && operation.card.replacementForRevision === operation.projection.desiredRevision
+      )) {
+        throw new Error('replacement_created acknowledgement requires a pending replacement intent');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        card: {
+          ...operation.card,
+          replacementState: 'created',
+          replacementForRevision: operation.projection.desiredRevision,
+          replacementMessageId: outcome.messageId,
+        },
+        projection: {
+          ...operation.projection,
+          patchedRevision: operation.projection.desiredRevision,
+          blockedRevision: undefined,
+          nextAttemptAt: undefined,
+          deliveryFailure: undefined,
+          reminderState: 'pending',
+          reminderAttempt: 0,
+          reminderNextAttemptAt: undefined,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'retryable_failure') {
+      if (isReminderProjectionPending(operation)) {
+        const next = evolveOperation(operation, isoNow, {
+          projection: {
+            ...operation.projection,
+            reminderState: 'pending',
+            reminderAttempt: operation.projection.reminderAttempt + 1,
+            reminderNextAttemptAt: outcome.retryAt,
+          },
+        });
+        return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+      }
+      if (!isContentProjectionPending(operation)) {
+        throw new Error('retryable_failure acknowledgement requires a pending projection');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          retryAttempt: operation.projection.retryAttempt + 1,
+          nextAttemptAt: outcome.retryAt,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'reminder_sent') {
+      if (operation.projection.reminderState === 'sent') {
+        return { operation, result: { kind: 'applied', operation }, changed: false };
+      }
+      if (!isReminderPhase(operation)) {
+        throw new Error('reminder_sent acknowledgement requires a pending reminder');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          reminderState: 'sent',
+          reminderAttempt: operation.projection.reminderAttempt + 1,
+          reminderNextAttemptAt: undefined,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'reminder_definitely_unsent') {
+      if (!isReminderPhase(operation)) {
+        throw new Error('reminder_definitely_unsent acknowledgement requires a pending reminder');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          reminderState: 'pending',
+          reminderAttempt: operation.projection.reminderAttempt + 1,
+          reminderNextAttemptAt: outcome.retryAt,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    if (outcome.kind === 'reminder_unknown') {
+      if (operation.projection.reminderState === 'unknown') {
+        return { operation, result: { kind: 'applied', operation }, changed: false };
+      }
+      if (!isReminderPhase(operation)) {
+        throw new Error('reminder_unknown acknowledgement requires a pending reminder');
+      }
+      const next = evolveOperation(operation, isoNow, {
+        projection: {
+          ...operation.projection,
+          reminderState: 'unknown',
+          reminderAttempt: operation.projection.reminderAttempt + 1,
+          reminderNextAttemptAt: undefined,
+        },
+      });
+      return { operation: next, result: { kind: 'applied', operation: next }, changed: true };
+    }
+
+    return { operation, result: { kind: 'applied', operation }, changed: false };
+  });
+
   const reconcileBtwOperations = (input: {
     runtimeEpoch: string;
     liveSessionIds: ReadonlySet<string>;
@@ -457,9 +764,8 @@ export function createBtwOperationStore(options: {
     pathFor,
     prepareBtw,
     getBtwOperation,
-    listPendingInitialCards: () => notImplemented('listPendingInitialCards'),
-    recordInitialCardAttempt: (_scope: BtwOperationScope, _btwOpId: string, _outcome: BtwInitialCardAttemptOutcome) =>
-      notImplemented('recordInitialCardAttempt'),
+    listPendingInitialCards,
+    recordInitialCardAttempt,
     recordBtwCard,
     listExecutableBtwOperations,
     prepareBtwSubmission,
@@ -467,20 +773,9 @@ export function createBtwOperationStore(options: {
     recordBtwSubmissionUnknown,
     recordBtwRunning,
     recordBtwTerminal,
-    listPendingBtwProjections: (_larkAppId: string): BtwProjectionItem[] =>
-      notImplemented('listPendingBtwProjections'),
-    recordBtwProjectionFailure: (
-      _scope: BtwOperationScope,
-      _btwOpId: string,
-      _expected: { operationRevision: number; projectionRevision: number },
-      _failure: BtwProjectionFailure,
-    ) => notImplemented('recordBtwProjectionFailure'),
-    ackBtwProjection: (
-      _scope: BtwOperationScope,
-      _btwOpId: string,
-      _expected: { operationRevision: number; projectionRevision: number },
-      _outcome: BtwProjectionProviderOutcome,
-    ) => notImplemented('ackBtwProjection'),
+    listPendingBtwProjections,
+    recordBtwProjectionFailure,
+    ackBtwProjection,
     reconcileBtwOperations,
   };
 }
@@ -768,7 +1063,17 @@ function evolveVisibleOperation(
   isoNow: string,
   patch: Partial<Pick<BtwOperation, 'card' | 'execution' | 'projection'>>,
 ): BtwOperation {
-  const projection = patch.projection ?? operation.projection;
+  const projection: BtwOperation['projection'] = {
+    ...operation.projection,
+    retryAttempt: 0,
+    nextAttemptAt: undefined,
+    blockedRevision: undefined,
+    deliveryFailure: undefined,
+    reminderState: 'none',
+    reminderAttempt: 0,
+    reminderNextAttemptAt: undefined,
+    ...(patch.projection ?? {}),
+  };
   return evolveOperation(operation, isoNow, {
     ...patch,
     projection: {
@@ -782,6 +1087,96 @@ function stripUndefinedObjectKeys<T extends Record<string, unknown>>(value: T): 
   return Object.fromEntries(
     Object.entries(value).filter(([, entry]) => entry !== undefined),
   ) as T;
+}
+
+function ambiguityDeadlineFrom(firstPossiblySentAt: string): string {
+  return new Date(Date.parse(firstPossiblySentAt) + CREATE_AMBIGUITY_DEADLINE_MS).toISOString();
+}
+
+function currentCreateRetryDeadline(
+  card: BtwOperation['card'],
+): string | undefined {
+  if (card.createRetryDeadline !== undefined) return card.createRetryDeadline;
+  if (card.firstPossiblySentAt !== undefined) return ambiguityDeadlineFrom(card.firstPossiblySentAt);
+  return undefined;
+}
+
+function clampRetryAt(retryAt: string, deadline?: string): string {
+  if (Number.isNaN(Date.parse(retryAt))) {
+    throw new Error(`retryAt must be an ISO timestamp: ${retryAt}`);
+  }
+  if (deadline === undefined) return retryAt;
+  return Date.parse(retryAt) <= Date.parse(deadline) ? retryAt : deadline;
+}
+
+function isRetryDue(retryAt: string | undefined, current: Date): boolean {
+  return retryAt === undefined || Date.parse(retryAt) <= current.getTime();
+}
+
+function compareOperationsForListing(left: BtwOperation, right: BtwOperation): number {
+  return left.createdAt.localeCompare(right.createdAt)
+    || left.btwOpId.localeCompare(right.btwOpId);
+}
+
+function compareProjectionItemsForListing(left: BtwProjectionItem, right: BtwProjectionItem): number {
+  return compareOperationsForListing(left.operation, right.operation)
+    || left.projectionRevision - right.projectionRevision;
+}
+
+function matchesProjectionCas(
+  operation: BtwOperation,
+  expected: { operationRevision: number; projectionRevision: number },
+): boolean {
+  return operation.revision === expected.operationRevision
+    && operation.projection.desiredRevision === expected.projectionRevision;
+}
+
+function hasVisibleCard(operation: BtwOperation): boolean {
+  return operation.card.messageId !== undefined;
+}
+
+function isContentProjectionPending(operation: BtwOperation): boolean {
+  return hasVisibleCard(operation)
+    && operation.projection.desiredRevision > 1
+    && operation.projection.desiredRevision > operation.projection.patchedRevision
+    && operation.projection.blockedRevision !== operation.projection.desiredRevision;
+}
+
+function isReminderPhase(operation: BtwOperation): boolean {
+  return operation.projection.desiredRevision > 1
+    && operation.projection.patchedRevision === operation.projection.desiredRevision
+    && operation.projection.reminderState === 'pending';
+}
+
+function isReminderProjectionPending(operation: BtwOperation): boolean {
+  return isReminderPhase(operation);
+}
+
+function pendingProjectionForOperation(
+  operation: BtwOperation,
+  current: Date,
+): BtwProjectionItem | undefined {
+  if (isContentProjectionPending(operation) && isRetryDue(operation.projection.nextAttemptAt, current)) {
+    return {
+      larkAppId: operation.replyTarget.larkAppId,
+      botmuxSessionId: operation.parent.botmuxSessionId,
+      btwOpId: operation.btwOpId,
+      expectedOperationRevision: operation.revision,
+      projectionRevision: operation.projection.desiredRevision,
+      operation,
+    };
+  }
+  if (isReminderPhase(operation) && isRetryDue(operation.projection.reminderNextAttemptAt, current)) {
+    return {
+      larkAppId: operation.replyTarget.larkAppId,
+      botmuxSessionId: operation.parent.botmuxSessionId,
+      btwOpId: operation.btwOpId,
+      expectedOperationRevision: operation.revision,
+      projectionRevision: operation.projection.desiredRevision,
+      operation,
+    };
+  }
+  return undefined;
 }
 
 function isTerminalExecutionState(state: BtwOperation['execution']['state']): boolean {
