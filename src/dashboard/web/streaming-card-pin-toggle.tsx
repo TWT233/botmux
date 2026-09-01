@@ -19,6 +19,7 @@ export function StreamingCardPinToggle(props: {
   checked: boolean;
   disabled?: boolean;
   title: ReactNode;
+  help?: ReactNode;
   description?: ReactNode;
   detail?: ReactNode;
   detailTone?: StatusTone;
@@ -54,6 +55,11 @@ export function StreamingCardPinToggle(props: {
           {props.description ? <small>{props.description}</small> : null}
         </span>
       </label>
+      {props.help ? (
+        <p className="streaming-card-pin-toggle-help hint-muted" data-streaming-card-pin-help={props.scope}>
+          {props.help}
+        </p>
+      ) : null}
       {props.detail ? (
         <p
           className={`streaming-card-pin-toggle-detail ${statusToneClass(props.detailTone)}`}

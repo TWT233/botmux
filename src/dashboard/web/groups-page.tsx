@@ -1120,7 +1120,12 @@ function GroupPinStreamingCardRow(props: {
         return;
       }
       setStatus(tr('groups.pinStreamingCardSaved'));
-      await props.onSaved();
+      try {
+        await props.onSaved();
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        setStatus(tr('groups.pinStreamingCardRefreshFailed', { error: message }));
+      }
     } catch (error) {
       setChecked(previous);
       const message = error instanceof Error ? error.message : String(error);
@@ -1142,11 +1147,20 @@ function GroupPinStreamingCardRow(props: {
         disabled={saving}
         title={tr('groups.pinStreamingCard')}
         description={tr('groups.pinStreamingCardDescription')}
+        help={tr('groups.pinStreamingCardHelp')}
         detail={detail}
         detailTone={detailTone}
         detailAttrs={{ 'data-pin-master-state': masterEnabled ? 'on' : 'off' }}
         status={status}
-        statusTone={status.startsWith(tr('groups.pinStreamingCardSaved')) ? 'ok' : status ? 'warn' : 'muted'}
+        statusTone={
+          status.startsWith(tr('groups.pinStreamingCardSaved'))
+            ? 'ok'
+            : status.startsWith(tr('groups.pinStreamingCardRefreshFailed'))
+              ? 'warn'
+              : status
+                ? 'warn'
+                : 'muted'
+        }
         statusAttrs={{ 'data-pin-status': member.larkAppId }}
         dataAction="toggle-pin-streaming-card-group"
         dataAppId={member.larkAppId}

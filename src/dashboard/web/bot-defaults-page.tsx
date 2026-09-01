@@ -3729,6 +3729,7 @@ export function CardBehaviorSection(props: { bot: BotDefaultsRow; putCardPref(pa
             dataAction="toggle-pin-streaming-card"
             title={<FieldTitle help={tr('botDefaults.pinStreamingCardHelp')}>{tr('botDefaults.pinStreamingCard')}</FieldTitle>}
             description={tr('botDefaults.pinStreamingCardDescription')}
+            help={tr('botDefaults.pinStreamingCardHelp')}
             onChange={checked => {
               const previous = pinStreamingCard;
               setPinStreamingCard(checked);
