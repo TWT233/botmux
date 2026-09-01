@@ -12458,7 +12458,17 @@ function setupWorkerHandlers(
           logger.warn(`[${t}] Ignored claude_exit from stale worker generation`);
           break;
         }
-        ds.managedTurnOrigin = ds.managedTurnOrigin?.policyCapability
+        // The live-send capability dies with this backend. Preserve the
+        // worker-generation policy capability only while this local worker is
+        // still eligible for same-worker crash recovery. Branches that cannot
+        // restart in place start with no authority, and crash-loop protection
+        // clears this temporary policy-only state before parking below.
+        const mayRestartLocalWorker = !(msg.codexAppActiveWriter === true
+          && effectiveCliId === 'codex-app')
+          && !isSharedAdoptSession(ds)
+          && !isRemoteBackendSession(ds)
+          && !worker.killed;
+        ds.managedTurnOrigin = mayRestartLocalWorker && ds.managedTurnOrigin?.policyCapability
           ? {
               capability: randomBytes(32).toString('hex'),
               ...(ds.managedTurnOrigin.originChannelId
@@ -12609,6 +12619,7 @@ function setupWorkerHandlers(
         restartCounts.set(key, rc);
 
         if (rc.count > 3) {
+          ds.managedTurnOrigin = undefined;
           logger.warn(`[${t}] ${sessionCliDisplayName(ds, botCfg)} crashed ${rc.count} times in 1 min, not auto-restarting`);
           const keepDiagnosticWorker = !!msg.canParkDiagnostic && !!ds.worker && !ds.worker.killed;
           // Freeze the last streaming card so it doesn't stay at "working"
@@ -12691,6 +12702,8 @@ function setupWorkerHandlers(
           logger.info(`[${t}] Auto-restarting ${sessionCliDisplayName(ds, botCfg)}...`);
           ds.workerReady = false;
           ds.worker.send({ type: 'restart', reason: 'cli_crash', env: latestPerBotEnvForRestart(ds), model: latestModelForRespawn(ds) } as DaemonToWorker);
+        } else {
+          ds.managedTurnOrigin = undefined;
         }
         break;
       }

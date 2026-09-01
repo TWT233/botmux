@@ -71,11 +71,19 @@ count=0
 if [ -f '${launchCount}' ]; then count=$(cat '${launchCount}'); fi
 count=$((count + 1))
 printf '%s' "$count" > '${launchCount}'
-while :; do
-  if [ -f '${crashSignal}' ]; then exit 17; fi
-  printf '\n› \n'
-  sleep 0.05
-done
+if [ "$count" -eq 1 ]; then
+  while :; do
+    if [ -f '${crashSignal}' ]; then exit 17; fi
+    printf '\n› \n'
+    sleep 0.05
+  done
+else
+  for _ in $(seq 1 20); do
+    printf '\n› \n'
+    sleep 0.05
+  done
+  exec sleep 60
+fi
 `);
   chmodSync(fakeCli, 0o755);
 
@@ -186,6 +194,30 @@ describe('worker restart policy capability lifecycle', () => {
       () => readFileSync(harness.launchCount!, 'utf8') === '2',
       'replacement process launch after natural crash',
     );
+    harness.child.send({ type: 'session_ready', source: 'resume' } satisfies DaemonToWorker);
+    await waitFor(
+      harness,
+      () => harness.messages.some(message => message.type === 'restart_result'
+        && message.attemptId === 'natural-crash-recovery' && message.status === 'succeeded'),
+      'replacement readiness after natural crash',
+      30_000,
+    );
+    harness.child.send({
+      type: 'message',
+      content: 'turn after natural crash',
+      turnId: 'turn-natural-crash-recovery',
+    } satisfies DaemonToWorker);
+    await waitFor(
+      harness,
+      () => origins(harness).some(message => message.turnId === 'turn-natural-crash-recovery'),
+      'managed origin after natural crash',
+    );
+    const after = origins(harness).filter(
+      message => message.turnId === 'turn-natural-crash-recovery',
+    ).at(-1)!;
+    expect(readFileSync(harness.launchCount!, 'utf8')).toBe('2');
+    expect(after.policyCapability).toBe(before.policyCapability);
+    expect(after.capability).not.toBe(before.capability);
     const crashRevokes = revokesSince(harness, crashMessageIndex);
     expect(crashRevokes.some(message => message.capability === before.capability)).toBe(true);
     expect(crashRevokes.every(message => message.policyCapability === undefined)).toBe(true);
@@ -211,7 +243,7 @@ describe('worker restart policy capability lifecycle', () => {
     expect(teardownRevokes.some(message => message.policyCapability === before.policyCapability)).toBe(true);
   }, 30_000);
 
-  it.skipIf(!tmuxAvailable)('keeps policy authority stable through backend onExit and killCli', async () => {
+  it.skipIf(!tmuxAvailable)('keeps policy authority stable through intentional restart entry and killCli', async () => {
     const harness = startWorker('tmux');
     const before = await waitForInitialOrigin(harness);
     const restartMessageIndex = harness.messages.length;
@@ -221,14 +253,14 @@ describe('worker restart policy capability lifecycle', () => {
       harness,
       () => readFileSync(harness.launchCount!, 'utf8') === '2'
         && revokesSince(harness, restartMessageIndex).length >= 2,
-      'backend teardown and replacement launch after killCli',
+      'intentional restart teardown and replacement launch after killCli',
       30_000,
     );
     expect(readFileSync(harness.launchCount!, 'utf8')).toBe('2');
     const restartRevokes = revokesSince(harness, restartMessageIndex);
-    // The entry revoke and the backend teardown/killCli edge must both complete
-    // before the replacement reaches ready.
-    expect(restartRevokes.length).toBeGreaterThanOrEqual(2);
+    // Natural-crash coverage above owns backend.onExit. This case isolates the
+    // intentional restart entry plus killCli teardown edge.
+    expect(restartRevokes).toHaveLength(2);
     expect(restartRevokes.some(message => message.capability === before.capability)).toBe(true);
     expect(restartRevokes.every(message => message.policyCapability === undefined)).toBe(true);
   }, 45_000);
