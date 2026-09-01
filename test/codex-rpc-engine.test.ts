@@ -5,6 +5,7 @@ import { spawn, execFileSync } from 'node:child_process';
 import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRpcEngine } from '../src/codex-rpc-engine.js';
+import { CodexRpcSession } from '../src/codex-rpc-session.js';
 
 const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
@@ -660,5 +661,56 @@ describe('CodexRpcEngine — failure/recovery paths', () => {
     await new Promise(resolve => setTimeout(resolve, 1500));
     expect(order).toEqual(['terminal:active-dead:engine-dead', 'dead']);
     engine.stop();
+  }, 20_000);
+});
+
+describe('CodexRpcSession — dispatch boundary', () => {
+  it('distinguishes definitely-unsent from accepted-frame unknown and registers an owner before send', async () => {
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+      sessionId: `dispatch-boundary-${Math.round(performance.now())}`,
+      requestTimeoutMs: 250,
+    });
+    await session.start();
+    await session.startThread();
+
+    const preSendOwner = owner('pre-send-owner', 1);
+    session.registerNativeTurnOwner('turn-pre-registered', preSendOwner);
+    let ownerVisibleDuringSend = false;
+    const definitelyUnsent = await session.requestWithDispatchBoundary(
+      'turn/start',
+      { threadId: session.activeThreadId, input: [] },
+      { beforeSend: () => {
+        ownerVisibleDuringSend = (session as any).registeredNativeTurnOwners.get('turn-pre-registered')?.turnId === 'pre-send-owner';
+        throw new Error('client send refused');
+      } },
+    );
+    expect(definitelyUnsent).toMatchObject({ kind: 'definitely_unsent', error: expect.any(Error) });
+    expect(ownerVisibleDuringSend).toBe(true);
+
+    const acknowledged = await session.requestWithDispatchBoundary(
+      'turn/start',
+      { threadId: session.activeThreadId, input: [] },
+      {},
+    );
+    expect(acknowledged).toMatchObject({ kind: 'acknowledged', result: { turn: { id: 'turn-fake-1' } } });
+    session.closeOwnedProcess();
+
+    const ackDroppingSession = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: { ...process.env, FAKE_HANG_TURN: '1' },
+      sessionId: `dispatch-boundary-drop-ack-${Math.round(performance.now())}`,
+      requestTimeoutMs: 50,
+    });
+    await ackDroppingSession.start();
+    await ackDroppingSession.startThread();
+    const unknown = await ackDroppingSession.requestWithDispatchBoundary(
+      'turn/start',
+      { threadId: ackDroppingSession.activeThreadId, input: [] },
+      { timeoutMs: 50 },
+    );
+    expect(unknown).toMatchObject({ kind: 'submission_unknown', error: expect.any(Error) });
+    ackDroppingSession.detachObserver();
+    ackDroppingSession.closeOwnedProcess();
   }, 20_000);
 });
