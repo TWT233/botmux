@@ -400,7 +400,10 @@ describe('btw operation store', () => {
       frameState: 'acknowledged',
     });
 
-    expect(store.recordBtwRunning(scope, opId, retried.execution.nativeTurnId)).toEqual(running);
+    const runningAgain = store.recordBtwRunning(scope, opId, retried.execution.nativeTurnId);
+    expect(runningAgain).toEqual(running);
+    expect(runningAgain.revision).toBe(running.revision);
+    expect(runningAgain.updatedAt).toBe(running.updatedAt);
   });
 
   it('accepts cards only from card_pending and keeps the accepted binding immutable', () => {
@@ -412,7 +415,10 @@ describe('btw operation store', () => {
     const accepted = store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1');
     expect(accepted.execution.state).toBe('accepted');
     expect(accepted.card.messageId).toBe('om_card_binding_1');
-    expect(store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1')).toEqual(accepted);
+    const acceptedAgain = store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_1');
+    expect(acceptedAgain).toEqual(accepted);
+    expect(acceptedAgain.revision).toBe(accepted.revision);
+    expect(acceptedAgain.updatedAt).toBe(accepted.updatedAt);
     expect(() => store.recordBtwCard(scope, pending.btwOpId, 'om_card_binding_2')).toThrow(/different message id/i);
 
     const preSubmitted = store.prepareBtw({
@@ -453,7 +459,10 @@ describe('btw operation store', () => {
     store.prepareBtwSubmission(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
     const definitelyUnsent = store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
     expect(definitelyUnsent.execution.frameState).toBe('definitely_unsent');
-    expect(store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch)).toEqual(definitelyUnsent);
+    const definitelyUnsentAgain = store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, prepared.parent.runtimeEpoch);
+    expect(definitelyUnsentAgain).toEqual(definitelyUnsent);
+    expect(definitelyUnsentAgain.revision).toBe(definitelyUnsent.revision);
+    expect(definitelyUnsentAgain.updatedAt).toBe(definitelyUnsent.updatedAt);
     expect(() => store.recordBtwDefinitelyUnsent(scope, prepared.btwOpId, 'runtime_epoch_other')).toThrow(/runtime epoch/i);
 
     const running = store.prepareBtw({
@@ -604,8 +613,11 @@ describe('btw operation store', () => {
     });
     expect(conflictingTerminal.kind).toBe('duplicate');
     expect(conflictingTerminal.operation).toEqual(terminalBeforeAck.operation);
-    expect(readdirSync(dirname(recordPath)).some(name =>
-      name.startsWith(`${basenameWithoutJson(recordPath)}.terminal-conflict.`))).toBe(true);
+    const diagnosticName = readdirSync(dirname(recordPath)).find(name =>
+      name.startsWith(`${basenameWithoutJson(recordPath)}.terminal-conflict.`));
+    expect(diagnosticName).toBeDefined();
+    const diagnosticPath = join(dirname(recordPath), diagnosticName!);
+    const diagnosticBytes = readFileSync(diagnosticPath, 'utf8');
 
     const secondInput = {
       ...makeBtwPrepareInput(),
@@ -634,6 +646,22 @@ describe('btw operation store', () => {
       state: 'cancelled',
       message: 'cancelled from same live connection',
     });
+
+    const laterPrepared = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_after_terminal_conflict',
+    });
+    expect(laterPrepared.kind).toBe('created');
+    store.recordBtwCard(scope, laterPrepared.operation.btwOpId, 'om_card_after_terminal_conflict');
+    expect(store.listExecutableBtwOperations(input.parent.runtimeEpoch).map(op => op.btwOpId))
+      .toContain(laterPrepared.operation.btwOpId);
+    const reconciled = store.reconcileBtwOperations({
+      runtimeEpoch: input.parent.runtimeEpoch,
+      liveSessionIds: new Set([scope.botmuxSessionId]),
+    });
+    expect(Array.isArray(reconciled)).toBe(true);
+    expect(readFileSync(diagnosticPath, 'utf8')).toBe(diagnosticBytes);
+    expect(readdirSync(dirname(recordPath)).some(name => name.startsWith(`${diagnosticName}.corrupt.`))).toBe(false);
   });
 
   it('reconciles old epochs and dead sessions without reviving terminal records', () => {
