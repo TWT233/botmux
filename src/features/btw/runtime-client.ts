@@ -2,20 +2,24 @@ import { createConnection, type Socket } from 'node:net';
 
 import {
   BTW_RUNTIME_PROTOCOL_VERSION,
-  type BtwOperation,
-  type BtwOperationScope,
-  type BtwProjectionFailure,
-  type BtwProjectionProviderOutcome,
-  type BtwQuiesceResult,
   type BtwRuntimeClient,
   type BtwRuntimeCommand,
   type BtwRuntimeDescriptor,
   type BtwRuntimeEnvelope,
   type BtwRuntimeFrame,
-  type PrepareBtwInput,
-  type PrepareBtwResult,
 } from './runtime-protocol.js';
 import { connectBtwRuntime as connectServerRuntime, ensureBtwRuntime as ensureServerRuntime } from './runtime-server.js';
+import type {
+  BtwInitialCardAttemptOutcome,
+  BtwOperation,
+  BtwOperationScope,
+  BtwProjectionFailure,
+  BtwProjectionItem,
+  BtwProjectionProviderOutcome,
+  BtwQuiesceResult,
+  PrepareBtwInput,
+  PrepareBtwResult,
+} from './types.js';
 
 interface ClientInit {
   descriptor: BtwRuntimeDescriptor;
@@ -250,7 +254,7 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
   }
 
   watchProjectionWakes(larkAppId: string): BtwProjectionWakeSubscription {
-    return new BtwProjectionWakeSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, larkAppId);
+    return BtwProjectionWakeSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, larkAppId);
   }
 
   ensureSession(): Promise<never> { throw new Error('Task 6 does not implement ensureSession'); }
@@ -271,7 +275,7 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return await this.request<PrepareBtwResult>({ type: 'prepare_btw', input });
   }
 
-  async recordInitialCardAttempt(scope: BtwOperationScope, btwOpId: string, outcome: never): Promise<BtwOperation> {
+  async recordInitialCardAttempt(scope: BtwOperationScope, btwOpId: string, outcome: BtwInitialCardAttemptOutcome): Promise<BtwOperation> {
     return await this.request<BtwOperation>({ type: 'record_initial_card_attempt', scope, btwOpId, outcome });
   }
 
@@ -287,8 +291,8 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return await this.request<BtwOperation[]>({ type: 'list_pending_initial_cards', larkAppId });
   }
 
-  async listPendingProjections(larkAppId: string) {
-    return await this.request({ type: 'list_pending_projections', larkAppId });
+  async listPendingProjections(larkAppId: string): Promise<BtwProjectionItem[]> {
+    return await this.request<BtwProjectionItem[]>({ type: 'list_pending_projections', larkAppId });
   }
 
   async recordProjectionFailure(
@@ -296,8 +300,8 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     btwOpId: string,
     expected: { operationRevision: number; projectionRevision: number },
     failure: BtwProjectionFailure,
-  ) {
-    return await this.request({ type: 'record_projection_failure', scope, btwOpId, expected, failure });
+  ): Promise<{ kind: 'applied' | 'stale'; operation: BtwOperation }> {
+    return await this.request<{ kind: 'applied' | 'stale'; operation: BtwOperation }>({ type: 'record_projection_failure', scope, btwOpId, expected, failure });
   }
 
   async ackProjection(
@@ -305,8 +309,8 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     btwOpId: string,
     expected: { operationRevision: number; projectionRevision: number },
     outcome: BtwProjectionProviderOutcome,
-  ) {
-    return await this.request({ type: 'ack_projection', scope, btwOpId, expected, outcome });
+  ): Promise<{ kind: 'applied' | 'stale'; operation: BtwOperation }> {
+    return await this.request<{ kind: 'applied' | 'stale'; operation: BtwOperation }>({ type: 'ack_projection', scope, btwOpId, expected, outcome });
   }
 
   async quiesceAll(): Promise<BtwQuiesceResult> {
