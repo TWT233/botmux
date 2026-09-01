@@ -500,6 +500,55 @@ describe('Codex-compatible runtime editor', () => {
     }
   });
 
+  it('blocks save and shows inline errors when native custom fields are incomplete', async () => {
+    const previousFetch = globalThis.fetch;
+    const fetchSpy = vi.fn(async (_url: string, _init?: any) => {
+      if (String(_url).includes('/api/cli-options/models')) {
+        return { ok: true, status: 200, json: async () => ({ models: [], source: 'static' }) } as any;
+      }
+      throw new Error('save should not be attempted');
+    });
+    (globalThis as any).fetch = fetchSpy;
+    try {
+      const { root } = renderAgent({ cliId: 'traex', agentSelectionKey: 'traex' });
+      act(() => root.findByProps({ dataInput: 'nativeSubagentModelMode' }).props.onChange('custom'));
+      act(() => root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.onChange('custom'));
+      await act(async () => {
+        root.findByProps({ 'data-action': 'save-agent' }).props.onClick();
+        await Promise.resolve();
+      });
+
+      const errors = root.findAll(node => node.props?.['data-native-subagent-error'] === '');
+      expect(errors.map(node => node.children.join(''))).toEqual([
+        '请输入自定义 subagent model',
+        '请选择自定义 subagent reasoning effort',
+      ]);
+      expect(root.findByProps({ 'data-agent-status': '' }).children.join('')).toContain('请先修正 native subagent runtime 的必填项');
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      (globalThis as any).fetch = previousFetch;
+    }
+  });
+
+  it('resets native custom effort to pass-through when the custom model no longer allows it', async () => {
+    const { root } = renderAgent({
+      cliId: 'traex',
+      agentSelectionKey: 'traex',
+      nativeSubagentRuntime: {
+        model: { mode: 'custom', value: 'GPT-5.6-Sol' },
+        reasoningEffort: { mode: 'custom', value: 'ultra' },
+      },
+    });
+
+    await act(async () => {
+      root.findByProps({ 'data-input': 'nativeSubagentModel' }).props.onChange({ currentTarget: { value: 'DeepSeek-V4-Pro' } });
+      await Promise.resolve();
+    });
+
+    expect(root.findByProps({ dataInput: 'nativeSubagentReasoningEffortMode' }).props.value).toBe('passthrough');
+    expect(root.findAllByProps({ dataInput: 'nativeSubagentReasoningEffort' })).toHaveLength(0);
+  });
+
   it('offers every canonical effort for an effort-only override when the model passes through', () => {
     const { root } = renderAgent({
       cliId: 'traex', agentSelectionKey: 'traex', model: 'DeepSeek-V4-Pro',
