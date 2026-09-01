@@ -7,6 +7,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { BTW_RUNTIME_PROTOCOL_VERSION, type BtwRuntimeDescriptor, type BtwRuntimeEnvelope, type BtwRuntimeFrame } from '../src/features/btw/runtime-protocol.js';
 import { BtwRuntimeClientImpl, connectBtwRuntime, ensureBtwRuntime } from '../src/features/btw/runtime-client.js';
+import { consumeBtwExecutorWakes, runBtwRuntime, shutdownRuntime } from '../src/features/btw/runtime-server.js';
+import { runtimeBuildIdentity } from '../src/utils/runtime-build-id.js';
 import { readProcessStartIdentity } from '../src/core/session-marker.js';
 import { deriveBtwIdentifiers } from '../src/features/btw/types.js';
 import { makeBtwPrepareInput, makeBtwScope } from './fixtures/btw-fixtures.js';
@@ -185,6 +187,9 @@ describe('BTW runtime auth and singleton boot', () => {
     expect(statSync(descriptorPath).mode & 0o777).toBe(0o600);
     expect(statSync(tokenPath).mode & 0o777).toBe(0o600);
     expect(statSync(descriptor.socket).mode & 0o777).toBe(0o600);
+    const socketDir = dirname(descriptor.socket);
+    expect(statSync(socketDir).uid).toBe(process.getuid?.());
+    expect(statSync(socketDir).mode & 0o777).toBe(0o700);
   });
 
   it('rejects wrong token and stale epoch during authentication', async () => {
@@ -471,6 +476,61 @@ describe('BTW runtime auth and singleton boot', () => {
     await expect(client.quiesceAll()).rejects.toThrow('invalid btw runtime reply result');
     client.close();
     await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('accepts a duplicate prepare_btw result from the runtime contract', async () => {
+    const socketPath = `/tmp/btw-runtime-duplicate-result-${process.pid}-${Date.now()}.sock`;
+    staleSocketPaths.push(socketPath);
+    const duplicate = { ...makeBtwPrepareInput(), kind: 'duplicate' };
+    const operation = { btwOpId: 'btwop_duplicate', execution: { state: 'accepted' } };
+    const server = createServer(socket => {
+      socket.on('data', chunk => {
+        for (const line of String(chunk).trim().split('\n')) {
+          const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
+          if (frame.kind === 'auth') socket.write('{"kind":"auth_ok"}\n');
+          else socket.write(`${JSON.stringify({ kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type, result: { kind: duplicate.kind, operation } })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    const client = new BtwRuntimeClientImpl({ descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' }, token: 'token' });
+    await expect(client.prepareBtw(makeBtwPrepareInput())).resolves.toMatchObject({ kind: 'duplicate', operation });
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
+  it('retains one coalesced executor wake until the runtime-side consumer drains it', async () => {
+    const dataDir = newDataDir();
+    const build = runtimeBuildIdentity();
+    if (build.status !== 'known') throw new Error('test needs known runtime build');
+    const claim = `test-claim-${Date.now()}`;
+    const originalClaim = process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
+    const runtimeDir = join(dataDir, 'btw');
+    mkdirSync(runtimeDir, { mode: 0o700 });
+    writeFileSync(join(runtimeDir, 'runtime.starting.json'), JSON.stringify({
+      claim, ownerPid: process.pid, ownerStartIdentity: readProcessStartIdentity(process.pid), buildId: build.id,
+    }));
+    process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM = claim;
+    try {
+      await runBtwRuntime({ dataDir });
+      const runtime = await connectTestRuntime(dataDir);
+      const input = makeBtwPrepareInput();
+      const scope = makeBtwScope();
+      await runtime.client.prepareBtw(input);
+      const operationId = deriveBtwIdentifiers(scope, input.requestId).btwOpId;
+      await runtime.client.recordCard(scope, operationId, 'om_executor_wake');
+      await Promise.all([runtime.client.submitBtw(scope, operationId), runtime.client.submitBtw(scope, operationId)]);
+      expect(consumeBtwExecutorWakes({ dataDir })).toEqual([operationId]);
+      expect(consumeBtwExecutorWakes({ dataDir })).toEqual([]);
+      runtime.close();
+    } finally {
+      await shutdownRuntime({ dataDir });
+      const index = tempDirs.indexOf(dataDir);
+      if (index >= 0) tempDirs.splice(index, 1);
+      rmSync(dataDir, { recursive: true, force: true });
+      if (originalClaim === undefined) delete process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
+      else process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM = originalClaim;
+    }
   });
 
   it('serves typed replies through connectBtwRuntime after the second authenticated handshake', async () => {

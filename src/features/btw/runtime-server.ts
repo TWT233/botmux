@@ -89,11 +89,33 @@ interface RuntimeState {
   authenticatedSockets: Set<Socket>;
   projectionWakeQueue: Set<string>;
   projectionWakeScheduled: boolean;
-  executorWakeQueue: Set<string>;
+  executorWakeQueue: BtwExecutorWakeQueue;
   executorWakeScheduled: boolean;
 }
 
 const runtimeStates = new Map<string, RuntimeState>();
+
+export interface BtwExecutorWakeQueue {
+  enqueue(btwOpId: string): void;
+  consume(): string[];
+  readonly size: number;
+}
+
+class RetainedBtwExecutorWakeQueue implements BtwExecutorWakeQueue {
+  private readonly entries = new Set<string>();
+  enqueue(btwOpId: string): void { this.entries.add(btwOpId); }
+  consume(): string[] { const values = [...this.entries]; this.entries.clear(); return values; }
+  get size(): number { return this.entries.size; }
+}
+
+/**
+ * Task 9's runtime-side executor installs a consumer through this narrow
+ * surface. No RPC frame or generic event bus is introduced. Pending wake IDs
+ * remain retained until this consumer explicitly drains them.
+ */
+export function consumeBtwExecutorWakes(input: { dataDir: string }): string[] {
+  return runtimeStates.get(canonicalDataDir(input.dataDir))?.executorWakeQueue.consume() ?? [];
+}
 
 function runtimePaths(dataDir: string): RuntimePaths {
   const parentDir = join(canonicalDataDir(dataDir), 'btw');
@@ -116,7 +138,10 @@ function securePrivateDirectory(path: string): void {
   const parent = dirname(path);
   const parentStats = lstatSync(parent);
   if (parentStats.isSymbolicLink()) throw new Error(`btw runtime directory parent is a symlink: ${parent}`);
-  if (parentStats.uid !== process.getuid?.()) throw new Error(`btw runtime directory parent is not owned by the current uid: ${parent}`);
+  // System temp roots such as /tmp are normally root-owned and sticky. They
+  // are acceptable only as a real parent; the child below remains private.
+  const stickySystemParent = parentStats.uid === 0 && (parentStats.mode & 0o1000) !== 0;
+  if (parentStats.uid !== process.getuid?.() && !stickySystemParent) throw new Error(`btw runtime directory parent is not owned by the current uid: ${parent}`);
   if (!existsSync(path)) mkdirSync(path, { mode: 0o700 });
   const stats = lstatSync(path);
   if (stats.isSymbolicLink()) throw new Error(`btw runtime directory is a symlink: ${path}`);
@@ -139,11 +164,7 @@ function btwRuntimeSocketPath(dataDir: string): string {
   securePrivateDirectory(socketDir);
   const base = join(socketDir, `btwrt-${stableSocketSlug(dataDir)}-${process.getuid?.() ?? 'nouid'}.sock`);
   if (Buffer.byteLength(base) <= SOCKET_PATH_MAX_BYTES) return base;
-  const fallback = join(socketDir, `btwrt-${randomBytes(6).toString('hex')}.sock`);
-  if (Buffer.byteLength(fallback) > SOCKET_PATH_MAX_BYTES) {
-    throw new Error('btw runtime socket path exceeds platform limit');
-  }
-  return fallback;
+  throw new Error('btw runtime socket path exceeds platform limit');
 }
 
 function assertRuntimeBuildIdKnown(): string {
@@ -380,15 +401,9 @@ function publishProjectionWake(state: RuntimeState, larkAppId: string): void {
 }
 
 function scheduleExecutorWake(state: RuntimeState, btwOpId: string): void {
-  state.executorWakeQueue.add(btwOpId);
-  if (state.executorWakeScheduled) return;
-  state.executorWakeScheduled = true;
-  queueMicrotask(() => {
-    state.executorWakeScheduled = false;
-    // Task 6 retains only a local, coalesced executor signal.  Task 9 installs
-    // its consumer and native adapter resolver; nothing is dispatched here.
-    state.executorWakeQueue.clear();
-  });
+  state.executorWakeQueue.enqueue(btwOpId);
+  // Coalescing is represented by the retained Set. Task 9 calls the explicit
+  // consumer above; Task 6 deliberately has no automatic dispatcher.
 }
 
 async function handleRuntimeCommand(
@@ -750,12 +765,18 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
   const startIdentity = readProcessStartIdentity(pid);
   if (!startIdentity) throw new Error('cannot determine btw runtime process identity');
   const startupClaim = process.env.BOTMUX_BTW_RUNTIME_STARTUP_CLAIM;
-  const startup = readStartupMarker(paths);
-  if (!startupClaim || !startup || !isStartupClaim(startup) || startup.claim !== startupClaim || startup.buildId !== buildId) {
-    throw new Error('btw runtime startup claim is missing or invalid');
-  }
-  // Child identity becomes visible before it touches socket/store state.
-  writeStartupMarker(paths, { pid, startIdentity, buildId });
+  // The child performs claim validation and marker conversion under exactly the
+  // parent's singleton lock. A reclaimer can therefore either replace a dead
+  // parent reservation or observe this child marker, never both.
+  await withFileLock(paths.lockPath, async () => {
+    const startup = readStartupMarker(paths);
+    if (!startupClaim || !startup || !isStartupClaim(startup) || startup.claim !== startupClaim || startup.buildId !== buildId) {
+      throw new Error('btw runtime startup claim is missing or invalid');
+    }
+    writeStartupMarker(paths, { pid, startIdentity, buildId });
+  });
+  // Only after the atomic handoff may this child touch socket/store state.
+  cleanupSocketFile(paths.socketPath);
   const descriptor = {
     pid,
     startIdentity,
@@ -797,7 +818,7 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
     authenticatedSockets: new Set(),
     projectionWakeQueue: new Set(),
     projectionWakeScheduled: false,
-    executorWakeQueue: new Set(),
+    executorWakeQueue: new RetainedBtwExecutorWakeQueue(),
     executorWakeScheduled: false,
   });
 }
