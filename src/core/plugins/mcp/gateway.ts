@@ -204,7 +204,18 @@ function snapshotGatewayDescriptors(snapshot: SessionMcpRuntimeManifest): Gatewa
 function resolveGatewayRuntime(
   requestedPluginIds: string[] | undefined,
   env: NodeJS.ProcessEnv,
+  manifest?: SessionMcpRuntimeManifest | null,
 ): { pluginIds: string[]; descriptors: GatewayDescriptor[] } {
+  // A runtime-owned host receives its complete generation from the persistent
+  // session runtime.  Once this argument is present, neither a live session
+  // snapshot nor the mutable plugin registry is an authority for the gateway.
+  // `null` is an explicit empty frozen generation; only `undefined` preserves
+  // the legacy discovery behavior used by ordinary CLI-native gateways.
+  if (manifest !== undefined) {
+    return manifest
+      ? { pluginIds: manifest.pluginIds, descriptors: snapshotGatewayDescriptors(manifest) }
+      : { pluginIds: [], descriptors: [] };
+  }
   if (!requestedPluginIds) {
     const sessionId = env.BOTMUX_SESSION_ID?.trim();
     const snapshot = sessionId
@@ -310,11 +321,15 @@ export class PluginMcpGateway {
   constructor(
     pluginIds?: string[],
     env: NodeJS.ProcessEnv = process.env,
-    opts: { trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider } = {},
+    opts: {
+      trustedTurnIdentity?: GatewayTrustedTurnIdentityProvider;
+      /** Explicit frozen generation for a persistent runtime-owned host. */
+      manifest?: SessionMcpRuntimeManifest | null;
+    } = {},
   ) {
     this.env = env;
     this.trustedTurnIdentity = opts.trustedTurnIdentity;
-    const runtime = resolveGatewayRuntime(pluginIds, env);
+    const runtime = resolveGatewayRuntime(pluginIds, env, opts.manifest);
     this.pluginIds = runtime.pluginIds;
     this.descriptors = runtime.descriptors;
     this.server = new Server(

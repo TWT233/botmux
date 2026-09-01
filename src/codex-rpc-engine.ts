@@ -28,6 +28,7 @@ import { existsSync, readFileSync, writeFileSync, rmSync, mkdirSync } from 'node
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { WebSocket } from 'ws';
+import type { TrustedCaller } from './types.js';
 
 type Json = Record<string, any>;
 type LogFn = (msg: string) => void;
@@ -98,6 +99,8 @@ export interface CodexRpcNotification {
 export interface CodexRpcTurnIdentity {
   turnId: string;
   dispatchAttempt?: number;
+  /** Frozen caller provenance for runtime-owned MCP gateway injection. */
+  caller?: TrustedCaller;
 }
 
 export type CodexRpcTurnTerminalStatus =

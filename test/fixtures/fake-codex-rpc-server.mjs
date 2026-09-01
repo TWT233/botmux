@@ -30,6 +30,7 @@ const TERMINAL_BEFORE_RESPONSE = process.env.FAKE_TERMINAL_BEFORE_RESPONSE === '
 const ERROR_AFTER_STARTED = process.env.FAKE_ERROR_AFTER_STARTED === '1';
 const DUPLICATE_TERMINAL = process.env.FAKE_DUPLICATE_TERMINAL === '1';
 const NO_TURN_TERMINAL = process.env.FAKE_NO_TURN_TERMINAL === '1';
+const DELAY_TURN_TERMINAL_MS = Number(process.env.FAKE_DELAY_TURN_TERMINAL_MS ?? '0');
 const TURN_STATUS = process.env.FAKE_TURN_STATUS ?? '';
 const DIE_AFTER = process.env.FAKE_DIE_AFTER_MS ? Number(process.env.FAKE_DIE_AFTER_MS) : 0;
 const PREVIEW_DELAY_READS = Number(process.env.FAKE_PREVIEW_DELAY_READS ?? '0');
@@ -213,11 +214,19 @@ wss.on('connection', (ws) => {
           return;
         }
         if (TERMINAL_BEFORE_RESPONSE) {
-          emitTurnLifecycle(threadId, nativeTurnId);
+          if (DELAY_TURN_TERMINAL_MS > 0) {
+            setTimeout(() => emitTurnLifecycle(threadId, nativeTurnId), DELAY_TURN_TERMINAL_MS);
+          } else {
+            emitTurnLifecycle(threadId, nativeTurnId);
+          }
           reply({ turn: { id: nativeTurnId } });
         } else {
           reply({ turn: { id: nativeTurnId } });
-          emitTurnLifecycle(threadId, nativeTurnId);
+          if (DELAY_TURN_TERMINAL_MS > 0) {
+            setTimeout(() => emitTurnLifecycle(threadId, nativeTurnId), DELAY_TURN_TERMINAL_MS);
+          } else {
+            emitTurnLifecycle(threadId, nativeTurnId);
+          }
         }
         return;
       }

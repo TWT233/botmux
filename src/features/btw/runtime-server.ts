@@ -14,6 +14,9 @@ import { createBtwOperationStore } from './operation-store.js';
 import { CodexRpcSession } from '../../codex-rpc-session.js';
 import { supportsManagedBtw, type BtwCapabilities } from '../../adapters/cli/btw.js';
 import type { CodexRpcTurnIdentity } from '../../codex-rpc-engine.js';
+import { startSessionMcpGatewayHost, type SessionMcpGatewayHost } from '../../core/plugins/mcp/host.js';
+import { MCP_GATEWAY_REQUIRED_ENV, MCP_GATEWAY_SOCKET_ENV } from '../../core/plugins/mcp/environment.js';
+import { applySessionOwnerEnv } from '../../utils/child-env.js';
 import {
   BTW_RUNTIME_PROTOCOL_VERSION,
   type BtwProjectionWake,
@@ -114,7 +117,9 @@ interface ManagedSession {
   nextSeq: number;
   journal: BtwRuntimeNotification[];
   subscribers: Set<Socket>;
-  pendingUserInputs: Map<string, { resolve(result: unknown): void }>;
+  pendingUserInputs: Map<string, { resolve(result: unknown): void; reject(error: Error): void }>;
+  mcpGatewayHost: SessionMcpGatewayHost | null;
+  activeTurnIdentity?: CodexRpcTurnIdentity;
 }
 
 const MANAGED_JOURNAL_MAX_ENTRIES = 1024;
@@ -161,7 +166,11 @@ async function ensureManagedSession(
     return {
       attachment: managedAttachment(state, existing),
       capabilities: admissionCapabilities(existing.profile, true),
-      configDrift: existing.profile.configHash !== profile.configHash,
+      // The MCP digest is an independently frozen generation boundary. Keep
+      // the original runtime even if a caller accidentally reuses its broader
+      // launch-config hash while the plugin manifest changed.
+      configDrift: existing.profile.configHash !== profile.configHash
+        || existing.profile.mcpManifestDigest !== profile.mcpManifestDigest,
     };
   }
   // This is a frozen adapter launch contract, not a self-asserted runtime
@@ -171,9 +180,38 @@ async function ensureManagedSession(
   if (!declared.nativeBtw || !declared.structuredTerminal || !declared.stableParentThread) {
     return { attachment: null, capabilities: declared, configDrift: false };
   }
-  const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
-  if (profile.ownerOpenId) env.BOTMUX_OWNER_OPEN_ID = profile.ownerOpenId;
   let managed!: ManagedSession;
+  // The App Server executes model tools, so its gateway must exist before the
+  // server starts.  This is the frozen session generation, never a read of
+  // current plugin configuration.
+  const mcpGatewayHost = profile.mcpManifest?.entries.length
+    ? await startSessionMcpGatewayHost({
+      sessionId: profile.sessionId,
+      dataDir: state.dataDir,
+      manifest: profile.mcpManifest,
+      trustedTurnIdentity: () => managed.activeTurnIdentity
+        ? {
+          ...(managed.activeTurnIdentity.caller ? { caller: managed.activeTurnIdentity.caller } : {}),
+          turnId: managed.activeTurnIdentity.turnId,
+          ...(managed.activeTurnIdentity.dispatchAttempt !== undefined
+            ? { dispatchAttempt: managed.activeTurnIdentity.dispatchAttempt }
+            : {}),
+        }
+        : undefined,
+    })
+    : null;
+  // The profile's env is already sanitized by the daemon.  Freeze all
+  // config-controlled values before installing the host-owned owner identity;
+  // neither the bot env nor a stale inherited environment may override it.
+  const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
+  if (mcpGatewayHost) {
+    env[MCP_GATEWAY_SOCKET_ENV] = mcpGatewayHost.socketPath;
+    env[MCP_GATEWAY_REQUIRED_ENV] = '1';
+  } else {
+    delete env[MCP_GATEWAY_SOCKET_ENV];
+    delete env[MCP_GATEWAY_REQUIRED_ENV];
+  }
+  applySessionOwnerEnv(env, profile.ownerOpenId);
   const engine = new CodexRpcSession({
     cliBin: profile.cliBin,
     cwd: profile.cwd,
@@ -186,12 +224,18 @@ async function ensureManagedSession(
       kind: 'main_event',
       payload: { type: 'delta', text: typeof notification.params === 'string' ? notification.params : JSON.stringify(notification.params) },
     }),
-    onTurnTerminal: terminal => publishManagedNotification(managed, { kind: 'main_terminal', payload: terminal }),
+    onTurnTerminal: terminal => {
+      if (managed.activeTurnIdentity?.turnId === terminal.identity.turnId
+        && managed.activeTurnIdentity.dispatchAttempt === terminal.identity.dispatchAttempt) {
+        managed.activeTurnIdentity = undefined;
+      }
+      publishManagedNotification(managed, { kind: 'main_terminal', payload: terminal });
+    },
     onRequestUserInput: async params => {
       const requestId = randomToken();
       return await new Promise<unknown>((resolveInput, rejectInput) => {
         try {
-          managed.pendingUserInputs.set(requestId, { resolve: resolveInput });
+          managed.pendingUserInputs.set(requestId, { resolve: resolveInput, reject: rejectInput });
           publishManagedNotification(managed, { kind: 'request_user_input', payload: { requestId, params } });
         } catch (error) {
           managed.pendingUserInputs.delete(requestId);
@@ -204,15 +248,20 @@ async function ensureManagedSession(
     }),
   });
   managed = {
-    profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(), pendingUserInputs: new Map(),
+    profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(), pendingUserInputs: new Map(), mcpGatewayHost,
   };
-  await engine.start();
-  managed.nativeThreadId = profile.nativeThreadId
-    ? await engine.resumeThread(profile.nativeThreadId)
-    : await engine.startThread();
-  managed.appServerUrl = engine.wsUrl;
-  state.managedSessions.set(profile.sessionId, managed);
-  return { attachment: managedAttachment(state, managed), capabilities: admissionCapabilities(profile, true), configDrift: false };
+  try {
+    await engine.start();
+    managed.nativeThreadId = profile.nativeThreadId
+      ? await engine.resumeThread(profile.nativeThreadId)
+      : await engine.startThread();
+    managed.appServerUrl = engine.wsUrl;
+    state.managedSessions.set(profile.sessionId, managed);
+    return { attachment: managedAttachment(state, managed), capabilities: admissionCapabilities(profile, true), configDrift: false };
+  } catch (error) {
+    await mcpGatewayHost?.close().catch(() => undefined);
+    throw error;
+  }
 }
 
 function assertManagedJournalCapacity(managed: ManagedSession): void {
@@ -568,13 +617,17 @@ async function handleRuntimeCommand(
       const managed = state.managedSessions.get(command.sessionId);
       if (!managed) throw new Error('managed btw session not found');
       assertManagedJournalCapacity(managed);
-      return await managed.engine.sendFirstTurn(command.content, command.identity, async () => false);
+      managed.activeTurnIdentity = command.identity;
+      try { return await managed.engine.sendFirstTurn(command.content, command.identity, async () => false); }
+      catch (error) { managed.activeTurnIdentity = undefined; throw error; }
     }
     case 'submit_main_turn': {
       const managed = state.managedSessions.get(command.sessionId);
       if (!managed) throw new Error('managed btw session not found');
       assertManagedJournalCapacity(managed);
-      return await managed.engine.sendTurn(command.content, command.identity);
+      managed.activeTurnIdentity = command.identity;
+      try { return await managed.engine.sendTurn(command.content, command.identity); }
+      catch (error) { managed.activeTurnIdentity = undefined; throw error; }
     }
     case 'read_thread_metadata': {
       const managed = state.managedSessions.get(command.sessionId);
@@ -601,7 +654,11 @@ async function handleRuntimeCommand(
       const pending = managed?.pendingUserInputs.get(command.requestId);
       if (!managed || !pending) throw new Error('managed Trae user input request not found');
       managed.pendingUserInputs.delete(command.requestId);
-      pending.resolve(command.result);
+      // A null settlement is the worker's expiry/explicit-stop path.
+      // Rejecting enters CodexRpcEngineCore's turn/interrupt branch; replying
+      // `{answers:{}}` (or any JSON-RPC error) would silently skip the ask.
+      if (command.result === null) pending.reject(new Error('managed Trae user input expired or stopped'));
+      else pending.resolve(command.result);
       return { done: true };
     }
     case 'prepare_btw':
@@ -978,6 +1035,15 @@ export async function connectBtwRuntime(input: ConnectRuntimeInput): Promise<{
 export async function shutdownRuntime(input: { dataDir: string }): Promise<void> {
   const state = runtimeStates.get(canonicalDataDir(input.dataDir));
   if (!state) return;
+  for (const managed of state.managedSessions.values()) {
+    for (const pending of managed.pendingUserInputs.values()) {
+      pending.reject(new Error('managed Trae runtime shutting down'));
+    }
+    managed.pendingUserInputs.clear();
+    managed.engine.closeOwnedProcess();
+    await managed.mcpGatewayHost?.close().catch(() => undefined);
+  }
+  state.managedSessions.clear();
   // `server.close()` waits for open connections.  In particular the
   // shutdown_runtime command arrives on one of them, so close the sockets
   // first instead of waiting on the request that asked us to shut down.

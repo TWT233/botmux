@@ -354,6 +354,52 @@ describe('plugin MCP Gateway', () => {
     await gateway.close();
   });
 
+  it('starts the trusted host from the supplied frozen manifest even when live session snapshot is missing', async () => {
+    installFixturePlugin('plugin-a', 'alpha', { PRIVATE_MCP_TOKEN: 'frozen-token' });
+    const sessionId = 'frozen-manifest-host';
+    const dataDir = join(home, '.botmux', 'data');
+    const frozenManifest = refreshSessionMcpRuntimeManifest({
+      sessionId,
+      pluginIds: ['plugin-a'],
+      dataDir,
+    });
+    // The runtime-owned generation must not depend on either mutable source
+    // once the frozen payload already exists.  Leaving the registry present
+    // would let a host accidentally fall back to today's plugin selection.
+    rmSync(join(dataDir, 'sessions', sessionId, 'plugin-mcp-runtime.json'), { force: true });
+    rmSync(join(home, '.botmux', 'plugins-registry.json'), { force: true });
+
+    const host = await startSessionMcpGatewayHost({
+      sessionId,
+      dataDir,
+      manifest: frozenManifest,
+    });
+    const transport = new StdioClientTransport({
+      command: tsRunnerPrefix().command,
+      args: [...tsRunnerPrefix().prefixArgs, resolve('src/cli.ts'), 'mcp', 'serve'],
+      cwd: resolve('.'),
+      env: {
+        ...mcpServeEnvironment(sessionId),
+        SESSION_DATA_DIR: dataDir,
+        [MCP_GATEWAY_SOCKET_ENV]: host.socketPath,
+        [MCP_GATEWAY_REQUIRED_ENV]: '1',
+      },
+      stderr: 'pipe',
+    });
+    const client = new Client({ name: 'trusted-host-frozen-manifest-test', version: '1.0.0' });
+    try {
+      await client.connect(transport);
+      expect((await client.listTools()).tools.map(tool => tool.name).sort()).toEqual(['alpha_unique', 'echo']);
+      const result = await client.callTool({ name: 'echo', arguments: {} });
+      expect((result.content[0] as { text: string }).text).toContain(
+        `session=${sessionId}:token=frozen-token`,
+      );
+    } finally {
+      await client.close().catch(() => undefined);
+      await host.close();
+    }
+  });
+
   it('keeps MCP tools isolated between two bot sessions that enable different plugins', async () => {
     installFixturePlugin('plugin-a', 'alpha');
     const dataDir = join(home, '.botmux', 'data');

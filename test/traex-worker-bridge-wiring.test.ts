@@ -1,9 +1,89 @@
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import {
+  ManagedUserInputTerminalError,
+  settleManagedUserInputBridge,
+} from '../src/features/btw/managed-user-input-settlement.js';
 
 const workerSource = readFileSync(new URL('../src/worker.ts', import.meta.url), 'utf8');
 
 describe('TRAE worker structured-bridge wiring', () => {
+  it('answers once, interrupts only a confirmed terminal, and never settles a detached observer', async () => {
+    let resolveAnswer!: (value: { answers: { choice: { answers: string[] } } }) => void;
+    let current = true;
+    let releases = 0;
+    const settled: Array<{ answers: { choice: { answers: string[] } } } | null> = [];
+    const retryErrors: Error[] = [];
+    const answer = { answers: { choice: { answers: ['Yes'] } } };
+
+    settleManagedUserInputBridge({
+      start: () => new Promise(resolve => { resolveAnswer = resolve; }),
+      isCurrent: () => current,
+      settle: async result => { settled.push(result); },
+      releaseStaleWaiter: () => { releases += 1; },
+      retryFromReplacement: error => { retryErrors.push(error); },
+    });
+    resolveAnswer(answer);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toEqual([answer]);
+    expect(retryErrors).toEqual([]);
+
+    settleManagedUserInputBridge({
+      start: async () => { throw new ManagedUserInputTerminalError('timed out'); },
+      isCurrent: () => current,
+      settle: async result => { settled.push(result); },
+      releaseStaleWaiter: () => { releases += 1; },
+      retryFromReplacement: error => { retryErrors.push(error); },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toEqual([answer, null]);
+
+    let resolveStale!: (value: typeof answer) => void;
+    settleManagedUserInputBridge({
+      start: () => new Promise(resolve => { resolveStale = resolve; }),
+      isCurrent: () => current,
+      settle: async result => { settled.push(result); },
+      releaseStaleWaiter: () => { releases += 1; },
+      retryFromReplacement: error => { retryErrors.push(error); },
+    });
+    current = false; // models detach deleting the worker-local pending row
+    resolveStale(answer);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toEqual([answer, null]);
+    expect(releases).toBe(1);
+
+    current = true;
+    settleManagedUserInputBridge({
+      start: async () => { throw new Error('daemon unavailable'); },
+      isCurrent: () => current,
+      settle: async result => { settled.push(result); },
+      releaseStaleWaiter: () => { releases += 1; },
+      retryFromReplacement: error => { retryErrors.push(error); },
+    });
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(settled).toEqual([answer, null]);
+    expect(retryErrors).toHaveLength(1);
+
+    let settleAttempts = 0;
+    settleManagedUserInputBridge({
+      start: async () => answer,
+      isCurrent: () => current,
+      settle: async () => {
+        settleAttempts += 1;
+        throw new Error('runtime answer socket closed');
+      },
+      releaseStaleWaiter: () => { releases += 1; },
+      retryFromReplacement: error => { retryErrors.push(error); },
+    });
+    await vi.waitFor(() => expect(retryErrors).toHaveLength(2));
+    expect(settleAttempts).toBe(1);
+    expect(settled).toEqual([answer, null]);
+  });
+
   it('gives the RPC app-server the non-secret Lark route required by botmux ask', () => {
     const start = workerSource.indexOf('async function engageCodexRpc');
     const end = workerSource.indexOf('engine = new CodexRpcEngine', start);
