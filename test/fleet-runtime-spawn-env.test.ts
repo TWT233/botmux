@@ -3,6 +3,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
+const H5_PREFIX = 'BOTMUX_DASHBOARD_FEISHU_H5_';
+const FUTURE_H5_KEY = `${H5_PREFIX}FUTURE_SPAWN_TEST`;
+
 const io = vi.hoisted(() => ({
   spawn: vi.fn(() => ({ pid: 4321, unref: vi.fn() })),
   openSync: vi.fn(() => 1),
@@ -29,6 +32,8 @@ describe('startFleetViaSupervisor restart environment', () => {
       'WEB_EXTERNAL_PORT=9100',
       'BOTMUX_WEB_PROXY_BASE_PORT=8900',
       'BOTMUX_WORKER_HTTP_HOST=127.0.0.2',
+      'BOTMUX_DASHBOARD_FEISHU_H5_APP_SECRET=file-secret',
+      `${FUTURE_H5_KEY}=file-future-secret`,
       '',
     ].join('\n'));
     vi.stubEnv('HOME', home);
@@ -71,6 +76,28 @@ describe('startFleetViaSupervisor restart environment', () => {
     });
     const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
     expect(options.env.BOTMUX_INTERNAL_REFRESH_DAEMON_ENV).toBeUndefined();
+  });
+
+  it('does not load persisted H5 settings into the supervisor spawn environment', async () => {
+    const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
+
+    expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({
+      action: 'started',
+      supervisorPid: 4321,
+    });
+    const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
+    expect(options.env.BOTMUX_DASHBOARD_FEISHU_H5_APP_SECRET).toBeUndefined();
+    expect(options.env[FUTURE_H5_KEY]).toBeUndefined();
+  });
+
+  it('strips inherited named and future H5 settings before spawning the supervisor', async () => {
+    vi.stubEnv('BOTMUX_DASHBOARD_FEISHU_H5_APP_SECRET', 'inherited-secret');
+    vi.stubEnv(FUTURE_H5_KEY, 'inherited-future-secret');
+    const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
+
+    expect(startFleetViaSupervisor()).toMatchObject({ action: 'started', supervisorPid: 4321 });
+    const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
+    expect(Object.keys(options.env).filter(key => key.startsWith(H5_PREFIX))).toEqual([]);
   });
 
   it('clears inherited lifecycle settings when the persisted .env is absent', async () => {
