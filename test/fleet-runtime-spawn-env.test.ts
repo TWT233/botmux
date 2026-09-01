@@ -28,6 +28,7 @@ describe('startFleetViaSupervisor restart environment', () => {
       'WEB_HOST=10.9.9.9',
       'WEB_EXTERNAL_PORT=9100',
       'BOTMUX_WEB_PROXY_BASE_PORT=8900',
+      'BOTMUX_WORKER_HTTP_HOST=127.0.0.2',
       '',
     ].join('\n'));
     vi.stubEnv('HOME', home);
@@ -35,6 +36,8 @@ describe('startFleetViaSupervisor restart environment', () => {
     vi.stubEnv('WEB_HOST', '127.0.0.1');
     vi.stubEnv('WEB_EXTERNAL_PORT', '9000');
     vi.stubEnv('BOTMUX_WEB_PROXY_BASE_PORT', '8800');
+    vi.stubEnv('BOTMUX_WORKER_HTTP_HOST', '0.0.0.0');
+    vi.stubEnv('BOTMUX_WORKER_HOST', '::');
     io.spawn.mockClear();
     io.openSync.mockClear();
     vi.resetModules();
@@ -54,5 +57,7 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.WEB_HOST).toBe('10.9.9.9');
     expect(options.env.WEB_EXTERNAL_PORT).toBe('9100');
     expect(options.env.BOTMUX_WEB_PROXY_BASE_PORT).toBe('8900');
+    expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('127.0.0.2');
+    expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
 });
