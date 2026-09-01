@@ -3844,6 +3844,59 @@ describe('blocker #3: forkAdoptWorker refuses sandbox-enabled bots', () => {
 });
 
 describe('managed turn authority worker generations', () => {
+  it('keeps policy authority but invalidates live authority across claude_exit auto-restart', async () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'live-before-crash',
+      policyCapability: 'policy-worker-generation',
+      turnId: 'turn-before-crash',
+    });
+
+    worker.emit('message', { type: 'claude_exit', code: 17, signal: null });
+
+    await vi.waitFor(() => expect(worker.send).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'restart',
+      reason: 'cli_crash',
+    })));
+    expect(ds.managedTurnOrigin).toEqual({
+      capability: expect.any(String),
+      policyCapability: 'policy-worker-generation',
+    });
+    expect(ds.managedTurnOrigin?.capability).not.toBe('live-before-crash');
+  });
+
+  it('ignores claude_exit authority changes from a stale worker generation', async () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const staleWorker = forkMock.mock.results.at(-1)!.value;
+    forkWorker(ds, 'replacement', false);
+    const currentWorker = forkMock.mock.results.at(-1)!.value;
+    currentWorker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'current-live-capability',
+      policyCapability: 'current-policy-capability',
+      turnId: 'current-turn',
+    });
+
+    staleWorker.emit('message', { type: 'claude_exit', code: 17, signal: null });
+    await Promise.resolve();
+
+    expect(ds.managedTurnOrigin).toEqual({
+      capability: 'current-live-capability',
+      policyCapability: 'current-policy-capability',
+      turnId: 'current-turn',
+    });
+    expect(currentWorker.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'restart',
+      reason: 'cli_crash',
+    }));
+  });
+
   it('keeps daemon routing identity when publishing a protected origin claim', () => {
     const ds = makeDs();
     const channelId = 'd1'.repeat(32);
