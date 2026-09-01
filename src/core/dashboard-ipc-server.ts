@@ -3248,9 +3248,16 @@ ipcRoute('GET', '/api/groups', async (_req, res) => {
   if (!cachedLarkAppId) return jsonRes(res, 503, { error: 'larkAppId_not_set' });
   try {
     const chats = await groupsStore.listChats(cachedLarkAppId);
-    const botConfig = getBot(cachedLarkAppId).config;
-    const pinStreamingCardMasterEnabled = botConfig.pinStreamingCard === true;
-    const noPinStreamingCardChats = new Set(botConfig.noPinStreamingCardChats ?? []);
+    let pinStreamingCardMasterEnabled = false;
+    let noPinStreamingCardChats = new Set<string>();
+    try {
+      const botConfig = getBot(cachedLarkAppId).config;
+      pinStreamingCardMasterEnabled = botConfig.pinStreamingCard === true;
+      noPinStreamingCardChats = new Set(botConfig.noPinStreamingCardChats ?? []);
+    } catch {
+      // Fail open for the groups board when config lookup is unavailable:
+      // rows still render with safe defaults instead of dropping the whole list.
+    }
     // Stamp a firstSeenAt timestamp for every chat (preserve existing values,
     // backfill new ones with Date.now()). Lark doesn't expose chat create_time
     // anywhere, so the dashboard sorts by this client-side proxy instead.
