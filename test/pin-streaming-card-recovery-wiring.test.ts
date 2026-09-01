@@ -40,6 +40,16 @@ function region(source: string, startMarker: string, endMarker: string): string 
   return source.slice(start, end);
 }
 
+function deferred<T>() {
+  let resolve!: (value: T | PromiseLike<T>) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 describe('startup streaming-card Pin recovery helper', () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -71,15 +81,50 @@ describe('startup streaming-card Pin recovery helper', () => {
   });
 });
 
-describe('startDaemon wiring for restored streaming-card Pin recovery', () => {
-  it('wires one non-blocking recovery after restoreActiveSessions for the current bot', () => {
+describe('startup restore phase wiring for restored streaming-card Pin recovery', () => {
+  it('waits for restore, then marks ready without waiting for the Pin recovery task', async () => {
+    const restoreGate = deferred<void>();
+    const events: string[] = [];
+    reconcileRestoredStreamingCardPinsMock.mockImplementation((appId: string) => {
+      events.push(`pin:${appId}`);
+    });
+    const daemon = await import('../src/daemon.js');
+    await Promise.resolve();
+    vi.clearAllMocks();
+
+    const startupPhase = daemon.__testOnly_restoreSessionsAndScheduleStartupRecovery({
+      larkAppId: 'app-pin',
+      restoreSessions: async () => {
+        events.push('restore:start');
+        await restoreGate.promise;
+        events.push('restore:done');
+      },
+      markSessionsRestored: () => {
+        events.push('ready');
+      },
+    });
+
+    await Promise.resolve();
+    expect(events).toEqual(['restore:start']);
+    expect(reconcileRestoredStreamingCardPinsMock).not.toHaveBeenCalled();
+
+    restoreGate.resolve();
+    await startupPhase;
+
+    expect(reconcileRestoredStreamingCardPinsMock).toHaveBeenCalledTimes(1);
+    expect(reconcileRestoredStreamingCardPinsMock).toHaveBeenCalledWith('app-pin');
+    expect(events).toEqual(['restore:start', 'restore:done', 'ready', 'pin:app-pin']);
+  });
+
+  it('keeps the startDaemon call site after restore as a supplemental source lock', () => {
     const block = region(
       daemonSource,
-      'await restoreActiveSessions(activeSessions, idempotencyQuarantinedSessionIds);',
-      'sessionsRestored = true;',
+      'await restoreSessionsAndScheduleStartupRecovery({',
+      'if (selfDaemonLarkAppId) {',
     );
 
-    expect(block).toContain('scheduleRestoredStreamingCardPinRecovery(cfg.larkAppId);');
-    expect(block).not.toContain('await scheduleRestoredStreamingCardPinRecovery');
+    expect(block).toContain('restoreSessions: () => restoreActiveSessions(activeSessions, idempotencyQuarantinedSessionIds),');
+    expect(block).toContain('larkAppId: cfg.larkAppId,');
+    expect(block).toContain('sessionsRestored = true;');
   });
 });

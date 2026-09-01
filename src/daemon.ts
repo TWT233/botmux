@@ -683,6 +683,16 @@ function scheduleRestoredStreamingCardPinRecovery(larkAppId: string): void {
     }
   });
 }
+
+async function restoreSessionsAndScheduleStartupRecovery(opts: {
+  larkAppId: string;
+  restoreSessions: () => Promise<void>;
+  markSessionsRestored: () => void;
+}): Promise<void> {
+  await opts.restoreSessions();
+  scheduleRestoredStreamingCardPinRecovery(opts.larkAppId);
+  opts.markSessionsRestored();
+}
 /** Once-per-daemon guard for the mojo containment boot reconciliation. The store
  *  is bot-agnostic, so it must run once regardless of how many bots start. */
 let mojoContainmentReconciledThisBoot = false;
@@ -3686,6 +3696,7 @@ async function sessionReply(
 export const __testOnly_sessionReply = sessionReply;
 export const __testOnly_activeSessions = activeSessions;
 export const __testOnly_scheduleRestoredStreamingCardPinRecovery = scheduleRestoredStreamingCardPinRecovery;
+export const __testOnly_restoreSessionsAndScheduleStartupRecovery = restoreSessionsAndScheduleStartupRecovery;
 
 async function maybeSeedCardlessForceTopicTurn(args: {
   ds: DaemonSession;
@@ -22541,11 +22552,15 @@ export async function startDaemon(botIndex?: number): Promise<void> {
 
   // Restore active sessions from previous run
   // Restore active sessions from previous run
-  await restoreActiveSessions(activeSessions, idempotencyQuarantinedSessionIds);
-  scheduleRestoredStreamingCardPinRecovery(cfg.larkAppId);
-  // Restore complete → /api/asks may now safely 403 unknown sessions again; a
-  // reconnecting ask hook that raced the restore got retryable 503s until here.
-  sessionsRestored = true;
+  await restoreSessionsAndScheduleStartupRecovery({
+    larkAppId: cfg.larkAppId,
+    restoreSessions: () => restoreActiveSessions(activeSessions, idempotencyQuarantinedSessionIds),
+    // Restore complete → /api/asks may now safely 403 unknown sessions again; a
+    // reconnecting ask hook that raced the restore got retryable 503s until here.
+    markSessionsRestored: () => {
+      sessionsRestored = true;
+    },
+  });
 
   // Close CoT thinking bubbles orphaned by the previous daemon generation
   // (created mid-turn, never settled — their in-memory state died with the
