@@ -58,16 +58,8 @@ import {
   type UpdateStrategy,
 } from './binary-self-update.js';
 import { globalWrapperPath } from '../utils/local-dev-update.js';
-
-export const DETACHED_RESTART_ENV_REFRESH = 'BOTMUX_INTERNAL_REFRESH_DAEMON_ENV';
-
-export function consumeDetachedRestartEnvRefresh(
-  env: NodeJS.ProcessEnv = process.env,
-): boolean {
-  const refresh = Boolean(env[DETACHED_RESTART_ENV_REFRESH]?.trim());
-  delete env[DETACHED_RESTART_ENV_REFRESH];
-  return refresh;
-}
+import { DETACHED_RESTART_ENV_REFRESH } from './restart-env-refresh.js';
+export { DETACHED_RESTART_ENV_REFRESH, consumeDetachedRestartEnvRefresh } from './restart-env-refresh.js';
 
 export interface MaintenanceState {
   /** Local date the auto-update run was last handled (fired or skipped). */
