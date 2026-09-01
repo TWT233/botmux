@@ -19,6 +19,7 @@ import { enqueueFleetCommand } from './fleet-command-queue.js';
 import type { FleetProcState, FleetState } from './fleet-supervisor-policy.js';
 import { FLEET_GRACEFUL_EXIT_CODE } from './fleet-supervisor-policy.js';
 import { botProcessName } from '../setup/bot-config-editor.js';
+import { resolveDaemonEnv } from '../cli/daemon-lifecycle-env.js';
 
 const CONFIG_DIR = join(homedir(), '.botmux');
 const HEAPSHOT_DIR = join(CONFIG_DIR, 'heapshots');
@@ -56,11 +57,18 @@ export function fleetDaemonNodeArgs(): string[] {
 /** The shared env every supervised member (bot daemons + the dashboard) inherits.
  *  Loads the legacy global .env for backward compat (WEB_HOST etc.), same as
  *  index-daemon did via dotenv. */
-export function resolveFleetDaemonEnv(): NodeJS.ProcessEnv {
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  // Legacy: the daemon reads ~/.botmux/.env for global settings. We surface the
-  // file's presence to the caller by NOT parsing here — index-daemon's own
-  // dotenvConfig loads it. Keeping env pass-through avoids double-parsing.
+export function resolveFleetDaemonEnv(
+  inheritedEnv: NodeJS.ProcessEnv = process.env,
+  envFileText: string | undefined = existsSync(ENV_FILE) ? readFileSync(ENV_FILE, 'utf-8') : undefined,
+): NodeJS.ProcessEnv {
+  // A restart invoked inside a managed session inherits the old daemon's
+  // settings. Resolve the persisted lifecycle snapshot before spawning the
+  // supervisor; its entrypoint deliberately drops BOTMUX_SESSION_ID, after
+  // which it is too late to distinguish a session restart from a shell start.
+  const env: NodeJS.ProcessEnv = {
+    ...inheritedEnv,
+    ...resolveDaemonEnv(inheritedEnv, envFileText),
+  };
   //
   // MIGRATION-CRITICAL: pin SESSION_DATA_DIR for every supervised child. The old
   // pm2 ecosystem injected `SESSION_DATA_DIR: DATA_DIR` into both the bot daemons
@@ -197,7 +205,7 @@ export function startFleetViaSupervisor(): StartFleetResult {
     cwd: CONFIG_DIR,
     detached: true,
     stdio: ['ignore', out, err],
-    env: { ...process.env },
+    env: resolveFleetDaemonEnv(),
   });
   child.unref();
   return { action: 'started', supervisorPid: child.pid ?? 0, botCount: bots.length };

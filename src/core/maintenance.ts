@@ -338,14 +338,15 @@ export function buildRestartLauncher(
 export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env): NodeJS.ProcessEnv {
   const env = { ...inheritedEnv };
   // Defense in depth for dashboard/daemon processes resurrected from a stale
-  // PM2 snapshot. `botmux restart` checks workflow mode before pm2Env(), so it
+  // managed-runtime snapshot. `botmux restart` checks workflow mode before
+  // constructing the fresh fleet environment, so it
   // must not inherit node-worker identity even if a host boot scrub regresses.
   scrubWorkflowWorkerEnv(env);
   // The dashboard process legitimately holds the Feishu H5 credential family
   // (index-dashboard.ts dotenv-loads it from ~/.botmux/.env — deliberately NOT
-  // baked into the PM2 env block, see DAEMON_ENV_KEYS), so a detached restart
+  // included in the shared fleet env, see DAEMON_ENV_KEYS), so a detached restart
   // it spawns would inherit the APP_SECRET. The restart driver has no consumer
-  // for any of it and must not carry it toward pm2; the fresh dashboard reloads
+  // for any of it and must not carry it toward the fleet; the fresh dashboard reloads
   // the family from .env itself. Not part of the DAEMON_ENV_KEYS mirror below —
   // this is credential hygiene, not baked-snapshot invalidation.
   stripDashboardH5Env(env);
@@ -353,13 +354,14 @@ export function detachedRestartEnv(inheritedEnv: NodeJS.ProcessEnv = process.env
   // fresh CLI reload these settings from the file.
   //
   // This list MUST mirror DAEMON_ENV_KEYS in src/cli/daemon-lifecycle-env.ts:
-  // every key baked into the PM2 env block there has to be stripped here, or a
+  // every key included in the shared fleet env there has to be stripped here, or a
   // detached restart (dashboard update/restart, maintenance auto-update) keeps
   // the stale baked value instead of reloading from the file. Kept as a local
   // literal so this stays importable from the daemon/dashboard without pulling
   // in the CLI layer; test/maintenance.test.ts iterates the exported
   // DAEMON_ENV_KEYS and fails the moment the two drift apart.
   for (const key of [
+    'WEB_HOST',
     'WEB_EXTERNAL_HOST',
     'BOTMUX_DASHBOARD_EXTERNAL_HOST',
     'BOTMUX_DASHBOARD_HOST',
