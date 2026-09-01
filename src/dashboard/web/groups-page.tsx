@@ -1397,9 +1397,12 @@ function DialogHost(props: {
       />
     );
   } else if (props.dialog?.type === 'manage') {
+    const capturedChat = props.dialog.chat;
+    const chat = props.snapshot.chats.find(chat => chat.chatId === capturedChat.chatId)
+      ?? capturedChat;
     content = (
       <ManageDialog
-        chat={props.dialog.chat}
+        chat={chat}
         tr={props.tr}
         onClose={props.onClose}
         onReloadGroups={props.onReloadGroups}
