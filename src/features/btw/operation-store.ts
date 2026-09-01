@@ -575,7 +575,10 @@ function scanAndHandleSiblingCorruption(
 }
 
 function isPrimaryRecordFile(name: string): boolean {
-  return name.endsWith('.json') && !name.endsWith('.poison.json') && !name.includes('.corrupt.');
+  return name.endsWith('.json')
+    && !name.endsWith('.poison.json')
+    && !name.includes('.corrupt.')
+    && !name.includes('.terminal-conflict.');
 }
 
 function assertNotPoisoned(recordPath: string, scope: BtwOperationScope, btwOpId: string): void {
