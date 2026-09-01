@@ -4,7 +4,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CardBehaviorSection } from '../src/dashboard/web/bot-defaults-page.js';
 import { ManageDialog, renderGroupsPage } from '../src/dashboard/web/groups-page.js';
 import type { GroupChat } from '../src/dashboard/web/groups.js';
-import { fetchGroupsSnapshot, primeGroupsSnapshotCache } from '../src/dashboard/web/groups-api.js';
+import {
+  __testOnly_resetGroupsSnapshotCache,
+  fetchGroupsSnapshot,
+  primeGroupsSnapshotCache,
+} from '../src/dashboard/web/groups-api.js';
 import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-toggle.js';
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
@@ -215,6 +219,7 @@ describe('group manage streaming-card pin rows', () => {
 
   beforeEach(() => {
     vi.restoreAllMocks();
+    __testOnly_resetGroupsSnapshotCache();
     groupsPageMount.node = null;
     confirmDialog.confirm.mockReset();
     confirmDialog.confirm.mockResolvedValue(false);
