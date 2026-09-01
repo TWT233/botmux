@@ -7,18 +7,14 @@
 // Same boot hygiene as index-daemon: scrub any session-scoped env a parent may
 // have leaked, so children don't inherit a stale identity.
 
-import { config as dotenvConfig } from 'dotenv';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync } from 'node:fs';
 import { installStdioEpipeGuard } from './utils/stdio-epipe-guard.js';
-import { scrubClaudeSessionMarkerEnv, scrubSessionCliHomeEnv, scrubWorkflowWorkerEnv } from './utils/child-env.js';
+import { scrubClaudeSessionMarkerEnv, scrubSessionCliHomeEnv, scrubWorkflowWorkerEnv, stripDashboardH5Env } from './utils/child-env.js';
 
 installStdioEpipeGuard();
 
 const configDir = join(homedir(), '.botmux');
-const globalEnv = join(configDir, '.env');
-dotenvConfig({ path: existsSync(globalEnv) ? globalEnv : '.env' });
 
 // A supervisor is never a session (mirror index-daemon): scrub leaked identity.
 for (const k of ['BOTMUX_SESSION_ID', 'BOTMUX_LARK_APP_ID', 'BOTMUX_CHAT_ID', 'BOTMUX_CHAT_TYPE', 'BOTMUX_ROOT_MESSAGE_ID', 'BOTMUX_OWNER_OPEN_ID', '__OWNER_OPEN_ID']) {
@@ -27,6 +23,9 @@ for (const k of ['BOTMUX_SESSION_ID', 'BOTMUX_LARK_APP_ID', 'BOTMUX_CHAT_ID', 'B
 scrubSessionCliHomeEnv(process.env);
 scrubClaudeSessionMarkerEnv(process.env);
 scrubWorkflowWorkerEnv(process.env);
+// The dashboard loads its allowlisted H5 settings in index-dashboard.ts. The
+// shared, long-lived supervisor must never retain that credential family.
+stripDashboardH5Env(process.env);
 
 async function main(): Promise<void> {
   const { FleetSupervisor } = await import('./core/fleet-supervisor.js');
