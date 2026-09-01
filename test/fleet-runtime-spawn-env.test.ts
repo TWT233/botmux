@@ -36,7 +36,7 @@ describe('startFleetViaSupervisor restart environment', () => {
     vi.stubEnv('WEB_HOST', '127.0.0.1');
     vi.stubEnv('WEB_EXTERNAL_PORT', '9000');
     vi.stubEnv('BOTMUX_WEB_PROXY_BASE_PORT', '8800');
-    vi.stubEnv('BOTMUX_WORKER_HTTP_HOST', '0.0.0.0');
+    vi.stubEnv('BOTMUX_WORKER_HTTP_HOST', '127.0.0.3');
     vi.stubEnv('BOTMUX_WORKER_HOST', '::');
     io.spawn.mockClear();
     io.openSync.mockClear();
@@ -61,19 +61,35 @@ describe('startFleetViaSupervisor restart environment', () => {
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
 
-  it('keeps restart non-fatal when the persisted .env cannot be read', async () => {
-    const envPath = join(home, '.botmux', '.env');
-    rmSync(envPath);
-    mkdirSync(envPath); // deterministic EISDIR from readFileSync on Linux
+  it('clears inherited lifecycle settings when the persisted .env is absent', async () => {
+    rmSync(join(home, '.botmux', '.env'));
+    delete process.env.BOTMUX_SESSION_ID;
     const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
 
-    expect(startFleetViaSupervisor()).toMatchObject({ action: 'started', supervisorPid: 4321 });
+    expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({ action: 'started', supervisorPid: 4321 });
     expect(io.spawn).toHaveBeenCalledOnce();
     const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
     expect(options.env.WEB_HOST).toBe('0.0.0.0');
     expect(options.env.WEB_EXTERNAL_PORT).toBe('');
     expect(options.env.BOTMUX_WEB_PROXY_BASE_PORT).toBe('');
     expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('0.0.0.0');
+    expect(options.env.BOTMUX_WORKER_HOST).toBe('');
+  });
+
+  it('preserves the inherited lifecycle snapshot when the persisted .env cannot be read', async () => {
+    const envPath = join(home, '.botmux', '.env');
+    rmSync(envPath);
+    mkdirSync(envPath); // deterministic EISDIR from readFileSync on Linux
+    delete process.env.BOTMUX_SESSION_ID;
+    const { startFleetViaSupervisor } = await import('../src/core/fleet-runtime.js');
+
+    expect(startFleetViaSupervisor({ refreshPersistedEnv: true })).toMatchObject({ action: 'started', supervisorPid: 4321 });
+    expect(io.spawn).toHaveBeenCalledOnce();
+    const options = io.spawn.mock.calls[0]?.[2] as { env: NodeJS.ProcessEnv };
+    expect(options.env.WEB_HOST).toBe('127.0.0.1');
+    expect(options.env.WEB_EXTERNAL_PORT).toBe('9000');
+    expect(options.env.BOTMUX_WEB_PROXY_BASE_PORT).toBe('8800');
+    expect(options.env.BOTMUX_WORKER_HTTP_HOST).toBe('127.0.0.3');
     expect(options.env.BOTMUX_WORKER_HOST).toBe('');
   });
 });

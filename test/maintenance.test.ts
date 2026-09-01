@@ -7,6 +7,8 @@ import {
   readMaintenanceStateTo,
   writeMaintenanceStateTo,
   buildRestartLauncher,
+  consumeDetachedRestartEnvRefresh,
+  DETACHED_RESTART_ENV_REFRESH,
   detachedRestartEnv,
   maintenanceRestartLogPath,
   globalInstallUpdateCwd,
@@ -268,7 +270,7 @@ describe('buildRestartLauncher', () => {
 });
 
 describe('detachedRestartEnv', () => {
-  it('drops runtime env snapshots before launching a managed restart', () => {
+  it('keeps the runtime snapshot as a read-failure fallback and marks it for refresh', () => {
     const inherited = {
       WEB_HOST: '127.0.0.1',
       WEB_EXTERNAL_HOST: '10.255.64.131',
@@ -281,37 +283,49 @@ describe('detachedRestartEnv', () => {
       BOTMUX_DASHBOARD_PORT: '7991',
       BOTMUX_DAEMON_IPC_BASE_PORT: '7992',
       BOTMUX_DASHBOARD_PUBLIC_READONLY: 'false',
-      // Mirrors DAEMON_ENV_KEYS: a carried BOTMUX_PUBLIC_URL must be stripped too,
-      // else a detached restart keeps the stale proxy base instead of reloading
-      // it from ~/.botmux/.env.
+      // Mirrors DAEMON_ENV_KEYS: this snapshot is retained only as the safe
+      // fallback when ~/.botmux/.env cannot be read. A successful refresh still
+      // replaces it before the supervisor starts.
       BOTMUX_PUBLIC_URL: 'http://stale.proxy.example.com',
       ...Object.fromEntries(WORKFLOW_WORKER_ENV_KEYS.map((key) => [key, 'leaked'])),
       PATH: '/usr/bin',
     };
 
-    expect(detachedRestartEnv(inherited)).toEqual({ PATH: '/usr/bin' });
+    expect(detachedRestartEnv(inherited)).toEqual({
+      PATH: '/usr/bin',
+      [DETACHED_RESTART_ENV_REFRESH]: '1',
+      ...Object.fromEntries(DAEMON_ENV_KEYS
+        .filter((key) => inherited[key] !== undefined)
+        .map((key) => [key, inherited[key]])),
+    });
     expect(inherited.WEB_EXTERNAL_HOST).toBe('10.255.64.131');
     expect(inherited.BOTMUX_WORKFLOW).toBe('leaked');
   });
 
-  it('strips every key DAEMON_ENV_KEYS carries into the fleet env (mirror guard)', () => {
-    // The two lists are deliberately separate literals (maintenance.ts must not
-    // import the CLI layer), and the comment on each says they MUST stay
-    // mirrored. This is what enforces it: a key added to DAEMON_ENV_KEYS but not
-    // to detachedRestartEnv survives a detached restart (dashboard
-    // update/restart, maintenance auto-update) as a stale baked value, so the
-    // operator's ~/.botmux/.env edit never takes effect — the exact failure that
-    // kept a re-keyed H5 APP_SECRET / a revoked open_id allowlist alive.
+  it('keeps every lifecycle key available as a fallback when refresh cannot read .env', () => {
     const inherited = {
       ...Object.fromEntries(DAEMON_ENV_KEYS.map((key) => [key, 'stale'])),
       PATH: '/usr/bin',
     };
 
-    expect(detachedRestartEnv(inherited)).toEqual({ PATH: '/usr/bin' });
+    const detached = detachedRestartEnv(inherited);
+    expect(detached).toEqual({
+      PATH: '/usr/bin',
+      [DETACHED_RESTART_ENV_REFRESH]: '1',
+      ...Object.fromEntries(DAEMON_ENV_KEYS.map((key) => [key, 'stale'])),
+    });
+  });
+
+  it('consumes the refresh marker exactly once', () => {
+    const env = { [DETACHED_RESTART_ENV_REFRESH]: '1', PATH: '/usr/bin' };
+
+    expect(consumeDetachedRestartEnvRefresh(env)).toBe(true);
+    expect(env).toEqual({ PATH: '/usr/bin' });
+    expect(consumeDetachedRestartEnvRefresh(env)).toBe(false);
   });
 
   it('strips the Dashboard H5 credential family the dashboard dotenv-loaded for itself', () => {
-    // The H5 keys are deliberately OFF the DAEMON_ENV_KEYS mirror above (never
+    // The H5 keys are deliberately OFF DAEMON_ENV_KEYS (never
     // included in the shared fleet env), but the DASHBOARD process legitimately
     // holds them: index-dashboard.ts dotenv-loads ~/.botmux/.env. The detached
     // `botmux restart` it spawns (update/restart button) inherits the
@@ -324,7 +338,10 @@ describe('detachedRestartEnv', () => {
       PATH: '/usr/bin',
     };
 
-    expect(detachedRestartEnv(inherited)).toEqual({ PATH: '/usr/bin' });
+    expect(detachedRestartEnv(inherited)).toEqual({
+      PATH: '/usr/bin',
+      [DETACHED_RESTART_ENV_REFRESH]: '1',
+    });
     // In place on the copy only — the dashboard keeps its own working env.
     expect(inherited.BOTMUX_DASHBOARD_FEISHU_H5_APP_SECRET).toBe('secret');
   });

@@ -161,7 +161,12 @@ import {
   formatDashboardUnreachable,
   shouldKeepWaitingForDashboard,
 } from './cli/dashboard-command.js';
-import { globalInstallUpdateLockTarget, globalInstallUpdateLockTargetIn, installLatestBotmuxSync } from './core/maintenance.js';
+import {
+  consumeDetachedRestartEnvRefresh,
+  globalInstallUpdateLockTarget,
+  globalInstallUpdateLockTargetIn,
+  installLatestBotmuxSync,
+} from './core/maintenance.js';
 import {
   formatGlobalInstallCommand,
   resolveGlobalInstallPlan,
@@ -2598,6 +2603,8 @@ interface RestartLifecycleFlags {
 
 
 async function cmdRestart(): Promise<void> {
+  const refreshPersistedEnv = consumeDetachedRestartEnvRefresh()
+    || Boolean(process.env.BOTMUX_SESSION_ID?.trim());
   const restartLeaseId = process.env.BOTMUX_RESTART_LEASE_ID;
   const restartLeaseDir = process.env.BOTMUX_RESTART_LEASE_DIR;
   delete process.env.BOTMUX_RESTART_LEASE_ID;
@@ -2651,7 +2658,7 @@ async function cmdRestart(): Promise<void> {
       const { restartFleet, fleetMemberNames, waitFleetOnline } = await import('./core/fleet-runtime.js');
       let health: ReturnType<typeof waitFleetOnline>;
       try {
-        const r = restartFleet();
+        const r = restartFleet({ refreshPersistedEnv });
         if (r.stop.action === 'timeout') {
           throw new Error(
             `[restart] 旧 supervisor (pid ${r.stop.supervisorPid}) 未在超时时间内退出；已 SIGKILL 后仍存活，中止重启。`,

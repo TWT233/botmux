@@ -1,11 +1,10 @@
 import { parse } from 'dotenv';
 
 // Settings pinned into the environment used to launch the fleet supervisor.
-// This list MUST stay mirrored by detachedRestartEnv() in
-// src/core/maintenance.ts: any key added here also has to be stripped there, or
-// a detached restart (dashboard update/restart, maintenance auto-update) reuses
-// the stale runtime value instead of reloading it from ~/.botmux/.env.
-// test/maintenance.test.ts pins that mirror by iterating this exported list.
+// A detached restart carries the previous snapshot only as a fallback for an
+// unreadable ~/.botmux/.env. Its one-shot refresh marker makes a successfully
+// read (or confirmed absent) file authoritative before the new supervisor is
+// spawned.
 //
 // This resolved block is SHARED: the same values land in the env of the
 // supervisor, dashboard, and every bot daemon. Only non-secret settings belong
@@ -76,11 +75,11 @@ export type DaemonEnvKey = (typeof DAEMON_ENV_KEYS)[number];
 export function resolveDaemonEnv(
   inheritedEnv: NodeJS.ProcessEnv,
   envFileText?: string,
+  refreshPersistedEnv = Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim()),
 ): Record<DaemonEnvKey, string> {
   const fileEnv = envFileText === undefined ? {} : parse(envFileText);
-  const sessionOrigin = Boolean(inheritedEnv.BOTMUX_SESSION_ID?.trim());
   const resolve = (key: DaemonEnvKey): string => {
-    const value = sessionOrigin ? fileEnv[key] : inheritedEnv[key] ?? fileEnv[key];
+    const value = refreshPersistedEnv ? fileEnv[key] : inheritedEnv[key] ?? fileEnv[key];
     return value?.trim() ?? '';
   };
 
@@ -97,7 +96,7 @@ export function resolveDaemonEnv(
   // getConfiguredWorkerHttpHost deliberately gives the canonical name priority.
   // For ordinary shell starts this ordering reproduces dotenv's no-override
   // behavior per key, followed by the worker resolver's canonical-key priority.
-  const workerHost = sessionOrigin
+  const workerHost = refreshPersistedEnv
     ? fileEnv.BOTMUX_WORKER_HTTP_HOST ?? fileEnv.BOTMUX_WORKER_HOST
     : inheritedEnv.BOTMUX_WORKER_HTTP_HOST
       ?? fileEnv.BOTMUX_WORKER_HTTP_HOST
