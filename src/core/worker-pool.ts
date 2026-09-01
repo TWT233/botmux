@@ -2430,7 +2430,9 @@ async function unpinProvenStreamingCardTargets(
             }
             for (const owner of owners) rememberOwnedStreamingCard(owner, messageId, chatId);
             if (await unpinMessage(larkAppId, messageId)) {
-              for (const owner of owners) forgetOwnedStreamingCard(owner, messageId, chatId);
+              if (ownershipEpoch === ownedStreamingCardRegistryEpoch) {
+                for (const owner of owners) forgetOwnedStreamingCard(owner, messageId, chatId);
+              }
               succeeded.push(messageId);
             }
           } catch (err) {
