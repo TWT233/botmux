@@ -561,6 +561,10 @@ describe('btw operation store', () => {
     store.prepareBtwSubmission(scope, unknown.btwOpId, unknown.parent.runtimeEpoch);
     const unknownState = store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'send timeout');
     expect(unknownState.execution.state).toBe('submission_unknown');
+    const duplicateUnknown = store.recordBtwSubmissionUnknown(scope, unknown.btwOpId, 'send timeout');
+    expect(duplicateUnknown).toEqual(unknownState);
+    expect(duplicateUnknown.revision).toBe(unknownState.revision);
+    expect(duplicateUnknown.updatedAt).toBe(unknownState.updatedAt);
     const settled = store.recordBtwTerminal(scope, unknown.btwOpId, {
       status: 'failed',
       errorCode: 'BTW_AFTER_UNKNOWN',
@@ -605,6 +609,7 @@ describe('btw operation store', () => {
     });
     expect(duplicateTerminal.kind).toBe('duplicate');
     expect(duplicateTerminal.operation.revision).toBe(terminalBeforeAck.operation.revision);
+    expect(duplicateTerminal.operation.updatedAt).toBe(terminalBeforeAck.operation.updatedAt);
 
     const conflictingTerminal = store.recordBtwTerminal(scope, opId, {
       status: 'failed',
@@ -662,6 +667,59 @@ describe('btw operation store', () => {
     expect(Array.isArray(reconciled)).toBe(true);
     expect(readFileSync(diagnosticPath, 'utf8')).toBe(diagnosticBytes);
     expect(readdirSync(dirname(recordPath)).some(name => name.startsWith(`${diagnosticName}.corrupt.`))).toBe(false);
+  });
+
+  it('quarantines malformed terminal-conflict-looking siblings while preserving valid diagnostics verbatim', () => {
+    const dataDir = newDataDir();
+    const store = createStore(dataDir);
+    const input = makeBtwPrepareInput();
+    const scope = makeBtwScope();
+    const opId = store.prepareBtw(input).operation.btwOpId;
+    store.recordBtwCard(scope, opId, 'om_card_conflict_marker_1');
+    store.prepareBtwSubmission(scope, opId, input.parent.runtimeEpoch);
+    store.recordBtwTerminal(scope, opId, {
+      status: 'completed',
+      answer: 'done before malformed marker scan',
+    });
+    store.recordBtwTerminal(scope, opId, {
+      status: 'failed',
+      errorCode: 'BTW_CONFLICT_MARKER',
+      message: 'conflict for marker test',
+    });
+
+    const recordPath = store.pathFor(scope, opId);
+    const partitionDir = dirname(recordPath);
+    const validDiagnosticName = readdirSync(partitionDir).find(name =>
+      name.startsWith(`${basenameWithoutJson(recordPath)}.terminal-conflict.`));
+    expect(validDiagnosticName).toBeDefined();
+    const validDiagnosticPath = join(partitionDir, validDiagnosticName!);
+    const validDiagnosticBytes = readFileSync(validDiagnosticPath, 'utf8');
+
+    const malformedMarkerPath = join(partitionDir, 'junk.terminal-conflict.ignore.json');
+    writeFileSync(malformedMarkerPath, JSON.stringify({
+      fake: true,
+      why: 'malformed marker filename must still be scanned as a primary candidate',
+    }, null, 2));
+
+    const later = store.prepareBtw({
+      ...makeBtwPrepareInput(),
+      requestId: 'om_request_after_malformed_marker',
+    });
+    expect(later.kind).toBe('created');
+    expect(readFileSync(validDiagnosticPath, 'utf8')).toBe(validDiagnosticBytes);
+    expect(readdirSync(partitionDir).some(name =>
+      name.startsWith('junk.terminal-conflict.ignore.corrupt.'))).toBe(true);
+    expect(existsSync(malformedMarkerPath)).toBe(false);
+
+    const afterList = readFileSync(validDiagnosticPath, 'utf8');
+    void store.listExecutableBtwOperations(input.parent.runtimeEpoch);
+    void store.reconcileBtwOperations({
+      runtimeEpoch: input.parent.runtimeEpoch,
+      liveSessionIds: new Set([scope.botmuxSessionId]),
+    });
+    expect(readFileSync(validDiagnosticPath, 'utf8')).toBe(afterList);
+    expect(readdirSync(partitionDir).some(name =>
+      name.startsWith(`${validDiagnosticName}.corrupt.`))).toBe(false);
   });
 
   it('reconciles old epochs and dead sessions without reviving terminal records', () => {

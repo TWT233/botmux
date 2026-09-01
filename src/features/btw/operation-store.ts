@@ -536,7 +536,7 @@ function writePoisonMarker(recordPath: string, marker: BtwOperationPoisonMarker)
 }
 
 function writeTerminalConflict(recordPath: string, diagnostic: BtwTerminalConflictDiagnostic): void {
-  const conflictPath = `${recordPath.slice(0, -'.json'.length)}.terminal-conflict.${digestOfString(JSON.stringify(diagnostic))}.json`;
+  const conflictPath = `${recordPath.slice(0, -'.json'.length)}.terminal-conflict.${fullDigestOfString(JSON.stringify(diagnostic))}.json`;
   assertLeafIsNotSymlink(conflictPath);
   atomicWriteFileSync(conflictPath, `${JSON.stringify(diagnostic, null, 2)}\n`, {
     mode: 0o600,
@@ -578,7 +578,7 @@ function isPrimaryRecordFile(name: string): boolean {
   return name.endsWith('.json')
     && !name.endsWith('.poison.json')
     && !name.includes('.corrupt.')
-    && !name.includes('.terminal-conflict.');
+    && !isTerminalConflictDiagnosticFile(name);
 }
 
 function assertNotPoisoned(recordPath: string, scope: BtwOperationScope, btwOpId: string): void {
@@ -1186,13 +1186,27 @@ function pathExistsNoFollow(filePath: string): boolean {
 }
 
 function assertValidBtwOpId(btwOpId: string): void {
-  if (!/^[a-z][a-z0-9-]*_[0-9a-f]+$/.test(btwOpId)) {
+  if (!isValidBtwOpId(btwOpId)) {
     throw new Error(`invalid btwOpId: ${btwOpId}`);
   }
 }
 
+function isValidBtwOpId(btwOpId: string): boolean {
+  return /^[a-z][a-z0-9-]*_[0-9a-f]+$/.test(btwOpId);
+}
+
+function isTerminalConflictDiagnosticFile(name: string): boolean {
+  const match = /^(?<btwOpId>.+)\.terminal-conflict\.(?<digest>[0-9a-f]{64})\.json$/.exec(name);
+  if (!match?.groups) return false;
+  return isValidBtwOpId(match.groups.btwOpId);
+}
+
 function digestOfString(value: string): string {
   return createHash('sha256').update(value).digest('hex').slice(0, 24);
+}
+
+function fullDigestOfString(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
 }
 
 function freezeDeep<T>(value: T): T {
