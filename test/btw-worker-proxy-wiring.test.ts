@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { isPersistentTraeRpcColdStart } from '../src/codex-rpc-lifecycle.js';
+import { requiresPersistedManagedTraeAttachment } from '../src/core/worker-pool.js';
 import { ManagedTraeNotificationBridge } from '../src/features/btw/managed-notification-bridge.js';
 import type { BtwRuntimeNotification } from '../src/features/btw/runtime-protocol.js';
 import type { BtwCursorCommitAck } from '../src/types.js';
@@ -19,6 +20,12 @@ function cfg(over: Partial<InitCfg> = {}): InitCfg {
 }
 
 describe('managed Trae worker selection', () => {
+  it('keeps an eligible Trae launch on the local path when live native BTW capability is unavailable', () => {
+    expect(requiresPersistedManagedTraeAttachment({
+      cliId: 'traex', resume: false, cliSessionId: undefined, hasBtwRuntime: false, codexRpcInput: true,
+    })).toBe(false);
+  });
+
   it('uses persistent ownership only for a Trae generation carrying a persisted attachment', () => {
     expect(isPersistentTraeRpcColdStart(cfg())).toBe(true);
     expect(isPersistentTraeRpcColdStart(cfg({ cliId: 'codex' }))).toBe(false);
@@ -54,6 +61,32 @@ function persisted(request: { requestId: string; fromSeq: number; throughSeq: nu
 }
 
 describe('managed Trae notification bridge', () => {
+  it('leaves a detached pending ask unacknowledged so a replacement observer can replay it', async () => {
+    let releaseAsk!: () => void;
+    const requestCommit = vi.fn();
+    const ackEvents = vi.fn(async () => undefined);
+    const ask: BtwRuntimeNotification = {
+      sessionId: 'session-1', fromSeq: 1, throughSeq: 1, kind: 'request_user_input',
+      payload: { requestId: 'ask-1', params: { questions: [{ id: 'choice' }] } },
+    };
+    const bridge = new ManagedTraeNotificationBridge({
+      sessionId: 'session-1', workerGeneration: 7, runtimeEpoch: 'epoch-1', cursor: 0,
+      notifications: notifications([ask]),
+      apply: async () => await new Promise<void>(resolve => { releaseAsk = resolve; }),
+      requestCommit, ackEvents, detach: async () => undefined, requestId: () => 'unused',
+    });
+
+    const running = bridge.run();
+    await vi.waitFor(() => expect(releaseAsk).toBeTypeOf('function'));
+    await bridge.stop();
+    releaseAsk();
+    await running;
+
+    expect(requestCommit).not.toHaveBeenCalled();
+    expect(ackEvents).not.toHaveBeenCalled();
+    expect(bridge.cursor).toBe(0);
+  });
+
   it('applies an interval, persists it, then cumulatively ACKs runtime last', async () => {
     const order: string[] = [];
     let commit: { requestId: string; fromSeq: number; throughSeq: number } | undefined;

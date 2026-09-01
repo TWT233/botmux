@@ -34,7 +34,7 @@ import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTu
 import { codexServiceTierBadge } from '../services/codex-service-tier.js';
 import { cliModelSupportsReasoningEffort, isConfigurableReasoningCliId } from '../services/codex-reasoning-effort.js';
 import { RPC_CAPABLE_CLIS, codexRpcEligible } from '../codex-rpc-lifecycle.js';
-import { supportsManagedBtw } from '../adapters/cli/btw.js';
+import { managedBtwLaunchContract, supportsManagedBtw } from '../adapters/cli/btw.js';
 import { connectBtwRuntime } from '../features/btw/runtime-client.js';
 import type { FrozenBtwSessionProfile } from '../features/btw/runtime-protocol.js';
 import { readSessionMcpRuntimeManifest } from './plugins/mcp/session-runtime.js';
@@ -1635,6 +1635,8 @@ export async function prepareManagedTraeLaunch(ds: DaemonSession): Promise<void>
   } as Extract<DaemonToWorker, { type: 'init' }>;
   if (!codexRpcEligible(initLike, { sandboxForced: sandboxEnabled() }) || agentCfg.cliId !== 'traex') return;
 
+  const managedBtwCapabilities = managedBtwLaunchContract(agentCfg.cliId);
+  if (!managedBtwCapabilities) return;
   const cliBin = createCliAdapterSync(agentCfg.cliId, agentCfg.cliPathOverride).resolvedBin;
   const manifest = readSessionMcpRuntimeManifest(ds.session.sessionId, config.session.dataDir);
   const profileBase = {
@@ -1648,6 +1650,7 @@ export async function prepareManagedTraeLaunch(ds: DaemonSession): Promise<void>
     ...(agentCfg.model ? { model: agentCfg.model } : {}),
     ...(agentCfg.reasoningEffort ? { reasoningEffort: agentCfg.reasoningEffort } : {}),
     appServerFeatures: ['default_mode_request_user_input'],
+    managedBtwCapabilities,
     mcpManifest: manifest,
     mcpManifestDigest: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
   } satisfies Omit<FrozenBtwSessionProfile, 'configHash'>;
@@ -1662,7 +1665,7 @@ export async function prepareManagedTraeLaunch(ds: DaemonSession): Promise<void>
     let persisted = false;
     try {
       const ensured = await connected.client.ensureSession(profile);
-      if (!supportsManagedBtw(ensured.capabilities)) return;
+      if (!supportsManagedBtw(ensured.capabilities) || !ensured.attachment) return;
       if (findActiveBySessionId(ds.session.sessionId) !== ds || ds.session.btwRuntime !== prior) {
         await connected.client.detachSession(ds.session.sessionId);
         return;
@@ -1692,6 +1695,28 @@ export async function prepareManagedTraeLaunch(ds: DaemonSession): Promise<void>
   })().finally(() => { managedTraePreparations.delete(key); });
   managedTraePreparations.set(key, prepare);
   return await prepare;
+}
+
+/**
+ * A missing attachment is fatal only after the BTW-specific launch contract
+ * proves every managed capability. Task 7's Trae contract intentionally lacks
+ * live native BTW evidence, so it selects the unchanged local RPC path.
+ */
+export function requiresPersistedManagedTraeAttachment(input: {
+  cliId: string;
+  resume: boolean;
+  cliSessionId?: string;
+  hasBtwRuntime: boolean;
+  codexRpcInput: boolean;
+}): boolean {
+  const contract = managedBtwLaunchContract(input.cliId);
+  return input.cliId === 'traex'
+    && !input.resume
+    && !input.cliSessionId
+    && !input.hasBtwRuntime
+    && input.codexRpcInput
+    && !!contract
+    && supportsManagedBtw({ ...contract, persistentRuntime: true });
 }
 
 
@@ -10097,11 +10122,10 @@ export function forkWorker(
   // An eligible fresh Trae launch must have crossed prepareManagedTraeLaunch's
   // durable ownership boundary before this synchronous fork. Do not create an
   // app-server locally if that preparation was skipped or lost.
-  if (agentCfg.cliId === 'traex'
-    && !resume
-    && !ds.session.cliSessionId
-    && !ds.session.btwRuntime
-    && botCfg.codexRpcInput === true) {
+  if (requiresPersistedManagedTraeAttachment({
+    cliId: agentCfg.cliId, resume, cliSessionId: ds.session.cliSessionId,
+    hasBtwRuntime: !!ds.session.btwRuntime, codexRpcInput: botCfg.codexRpcInput === true,
+  })) {
     throw new Error('eligible fresh Trae launch requires a persisted BTW runtime attachment');
   }
   if (!initTurnId && prompt.length > 0 && agentCfg.cliId === 'codex-app') {
