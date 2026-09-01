@@ -275,7 +275,7 @@ Automated coverage will prove:
   not expose it;
 - `collab_agent_spawn_end` no longer changes parent runtime while later
   `turn_context` records still do;
-- the stable daemon-written wrapper is used for the hook command, and persistent
+- the dedicated daemon-written `botmux-native-subagent-runtime-hook` entrypoint is used for the hook command, and persistent
   sandboxed panes cold-spawn when the isolation policy digest drifts instead of
   inheriting stale hook/runtime assumptions;
 - build, focused suites, the full unit suite, and a real isolated TraeCode spawn
