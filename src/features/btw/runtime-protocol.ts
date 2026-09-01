@@ -1,4 +1,5 @@
 import type { BtwCapabilities } from '../../adapters/cli/btw.js';
+import type { ManagedBtwLaunchContract } from '../../adapters/cli/btw.js';
 import type { CodexRpcTurnIdentity, CodexRpcTurnTerminal } from '../../codex-rpc-engine.js';
 import type { SessionMcpRuntimeManifest } from '../../core/plugins/mcp/session-runtime.js';
 import type { CotEntry } from '../../types.js';
@@ -48,6 +49,8 @@ export interface FrozenBtwSessionProfile {
   model?: string;
   reasoningEffort?: string;
   appServerFeatures: string[];
+  /** Frozen from the selected Trae adapter's verified managed-runtime contract. */
+  managedBtwCapabilities: ManagedBtwLaunchContract;
   nativeThreadId?: string;
   configHash: string;
   mcpManifest: SessionMcpRuntimeManifest | null;
@@ -93,7 +96,7 @@ export interface BtwRuntimeEnvelope {
 }
 
 export interface BtwRuntimeResultMap {
-  ensure_session: { attachment: BtwRuntimeAttachment; capabilities: BtwCapabilities; configDrift: boolean };
+  ensure_session: { attachment: BtwRuntimeAttachment | null; capabilities: BtwCapabilities; configDrift: boolean };
   attach_session: { attachment: BtwRuntimeAttachment };
   watch_projection_wakes: { subscribed: true };
   detach_session: { done: true };
@@ -160,7 +163,7 @@ export interface AttachedBtwRuntimeSession {
 }
 
 export interface BtwRuntimeClient {
-  ensureSession(profile: FrozenBtwSessionProfile): Promise<{ attachment: BtwRuntimeAttachment; capabilities: BtwCapabilities; configDrift: boolean }>;
+  ensureSession(profile: FrozenBtwSessionProfile): Promise<{ attachment: BtwRuntimeAttachment | null; capabilities: BtwCapabilities; configDrift: boolean }>;
   attachSession(input: { sessionId: string; cursor: number }): Promise<AttachedBtwRuntimeSession>;
   detachSession(sessionId: string): Promise<void>;
   quiesceSession(sessionId: string): Promise<BtwQuiesceResult>;

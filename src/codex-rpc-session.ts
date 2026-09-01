@@ -80,13 +80,14 @@ export class CodexRpcSession extends CodexRpcEngineCore {
  * a later explicit lifecycle operation and cannot be reached through a worker.
  */
 export class PersistentTraeRpcProxy {
+  private observerClosed = false;
   constructor(private readonly input: {
     runtime: Pick<BtwRuntimeClient,
-      'detachSession' | 'submitFirstTurn' | 'submitMainTurn' | 'readThreadMetadata' | 'setThreadName'>;
+      'detachSession' | 'submitFirstTurn' | 'submitMainTurn' | 'readThreadMetadata' | 'setThreadName' | 'answerUserInput'>;
     sessionId: string;
     appServerUrl: string;
     nativeThreadId: string;
-    closeSubscription?: () => Promise<void>;
+    closeSubscription?: () => void | Promise<void>;
   }) {}
 
   get wsUrl(): string { return this.input.appServerUrl; }
@@ -112,6 +113,9 @@ export class PersistentTraeRpcProxy {
     return await this.input.runtime.readThreadMetadata(this.input.sessionId, timeoutMs);
   }
   async setThreadName(name: string): Promise<void> { await this.input.runtime.setThreadName(this.input.sessionId, name); }
+  async answerUserInput(requestId: string, result: unknown): Promise<void> {
+    await this.input.runtime.answerUserInput(this.input.sessionId, requestId, result);
+  }
   async waitForThreadPreview(timeoutMs = 10_000): Promise<string | undefined> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
@@ -129,8 +133,18 @@ export class PersistentTraeRpcProxy {
       await new Promise(resolve => setTimeout(resolve, 100));
     }
   }
+  /**
+   * Synchronously revoke this worker's observer lease. The runtime connection
+   * socket is destroyed before a parent-exit path can call process.exit(); the
+   * later detach RPC is bookkeeping only and never owns the app-server.
+   */
+  closeObserver(): void {
+    if (this.observerClosed) return;
+    this.observerClosed = true;
+    void this.input.closeSubscription?.();
+  }
   async stop(): Promise<void> {
-    await this.input.closeSubscription?.();
+    this.closeObserver();
     await this.input.runtime.detachSession(this.input.sessionId);
   }
 }

@@ -567,24 +567,51 @@ type ManagedTraeTurn = {
 const managedTraeTurnsAwaitingSubmit = new Map<string, ManagedTraeTurn>();
 const managedTraeTurnsActive = new Map<string, ManagedTraeTurn>();
 const pendingManagedTraeTerminals = new Map<string, CodexRpcTurnTerminal>();
+type ManagedTraePendingUserInput = {
+  attachment: NonNullable<typeof managedTraeAttachment>;
+  release(): void;
+};
+// A request_user_input is a custody boundary, not a terminal. The bridge holds
+// its cursor at this journal entry until an exact answer is accepted by the
+// runtime. Detach deliberately drops only this observer-local waiter: the
+// runtime keeps the journal entry and replays it to the replacement worker.
+const pendingManagedTraeUserInputs = new Map<string, ManagedTraePendingUserInput>();
 
 function managedTraeTurnKey(identity: CodexRpcTurnIdentity): string {
   return `${identity.turnId}|${identity.dispatchAttempt ?? ''}`;
 }
 
-async function detachManagedTraeAttachment(): Promise<void> {
+/**
+ * Revoke the worker observer synchronously, then let the best-effort runtime
+ * detach finish in the background. Parent-exit paths may call process.exit()
+ * immediately afterwards, so safety must not depend on the server noticing a
+ * later socket close.
+ */
+function invalidateManagedTraeAttachment(): Promise<void> {
   const attachment = managedTraeAttachment;
   managedTraeAttachment = undefined;
-  if (!attachment) return;
-  await attachment.bridge.stop();
-  await attachment.proxy.stop().catch(() => undefined);
-  attachment.close();
+  if (!attachment) return Promise.resolve();
+  attachment.proxy.closeObserver();
   for (const [key, turn] of managedTraeTurnsAwaitingSubmit) {
     if (turn.attachment === attachment) managedTraeTurnsAwaitingSubmit.delete(key);
   }
   for (const [key, turn] of managedTraeTurnsActive) {
     if (turn.attachment === attachment) managedTraeTurnsActive.delete(key);
   }
+  for (const [requestId, ask] of pendingManagedTraeUserInputs) {
+    if (ask.attachment === attachment) {
+      pendingManagedTraeUserInputs.delete(requestId);
+      ask.release();
+    }
+  }
+  return attachment.bridge.stop()
+    .then(() => attachment.proxy.stop())
+    .catch(() => undefined)
+    .finally(() => attachment.close());
+}
+
+async function detachManagedTraeAttachment(): Promise<void> {
+  await invalidateManagedTraeAttachment();
 }
 
 async function attachManagedTraeRuntime(cfg: Extract<DaemonToWorker, { type: 'init' }>): Promise<void> {
@@ -667,11 +694,31 @@ async function applyManagedTraeNotification(notification: BtwRuntimeNotification
     return;
   }
   if (notification.kind === 'request_user_input') {
-    failManagedTraeTurns('managed_trae_request_user_input');
-    throw new Error('managed Trae request_user_input requires an explicit worker interruption path');
+    const attachment = managedTraeAttachment;
+    if (!attachment) throw new Error('managed Trae request_user_input arrived without an attachment');
+    await new Promise<void>(resolveInput => {
+      pendingManagedTraeUserInputs.set(notification.payload.requestId, { attachment, release: resolveInput });
+    });
+    return;
   }
   failManagedTraeTurns(notification.payload.errorCode);
   throw new Error(`managed Trae app-server died: ${notification.payload.errorCode}`);
+}
+
+/**
+ * Task 8's Lark ask-card flow resolves this exact request ID. Answer the
+ * runtime before releasing the journal cursor; this preserves both the native
+ * turn and replay evidence if the worker disappears mid-ask.
+ */
+export async function resolveManagedTraeUserInput(requestId: string, result: unknown): Promise<void> {
+  const pending = pendingManagedTraeUserInputs.get(requestId);
+  if (!pending || managedTraeAttachment !== pending.attachment) {
+    throw new Error('managed Trae user input request is not pending on this worker');
+  }
+  await pending.attachment.proxy.answerUserInput(requestId, result);
+  if (pendingManagedTraeUserInputs.get(requestId) !== pending) return;
+  pendingManagedTraeUserInputs.delete(requestId);
+  pending.release();
 }
 
 function activateManagedTraeTurn(identity: CodexRpcTurnIdentity, attachment: NonNullable<typeof managedTraeAttachment>): void {
@@ -16440,7 +16487,7 @@ function killCli(opts: {
   stopSessionMcpGatewayHost();
   // Scheme B keeps this orthogonal to local RPC ownership. The managed runtime
   // stays alive; worker teardown merely closes its observer and detaches.
-  void detachManagedTraeAttachment();
+  void invalidateManagedTraeAttachment();
   stopCodexRpcEngine();
   cleanupCodexAppControlBootstrap();
   stopCodexAppControlChannel();

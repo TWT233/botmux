@@ -88,6 +88,11 @@ export class ManagedTraeNotificationBridge {
         throw new Error('non-contiguous managed Trae notification interval');
       }
       await this.input.apply(notification);
+      // A worker can be torn down while an ask is intentionally held in
+      // custody. Its release only unblocks this loop; stop still means no
+      // durable cursor commit and no runtime ACK, so the journal entry replays
+      // to the replacement observer.
+      if (this.stopped) return;
     }
 
     const request: BtwCursorCommitRequest = {

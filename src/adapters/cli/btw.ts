@@ -22,6 +22,19 @@ export interface BtwCapabilities {
   stableParentThread: boolean;
 }
 
+/**
+ * BTW-specific launch evidence available before a live adapter exists.
+ * `nativeBtw` intentionally remains false for Trae in Task 7: Task 9 owns
+ * construction/proof of a live `BtwAdapter` and is the only layer allowed to
+ * upgrade that fact. This keeps the generic CLI adapter contract unchanged.
+ */
+export type ManagedBtwLaunchContract = Omit<BtwCapabilities, 'persistentRuntime'>;
+
+export function managedBtwLaunchContract(cliId: string): ManagedBtwLaunchContract | undefined {
+  if (cliId !== 'traex') return undefined;
+  return { nativeBtw: false, structuredTerminal: true, stableParentThread: true };
+}
+
 export function supportsManagedBtw(capabilities: BtwCapabilities): boolean {
   return capabilities.nativeBtw === true
     && capabilities.persistentRuntime === true

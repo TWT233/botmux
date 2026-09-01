@@ -186,11 +186,12 @@ function isQuiesceResult(value: unknown): boolean {
 
 function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unknown): boolean {
   switch (commandType) {
-    case 'ensure_session': return isRecord(value) && isRecord(value.attachment) && isRecord(value.capabilities);
+    case 'ensure_session': return isRecord(value) && (value.attachment === null || isRecord(value.attachment)) && isRecord(value.capabilities);
     case 'attach_session': return isRecord(value) && isRecord(value.attachment);
     case 'detach_session':
     case 'ack_events':
     case 'set_thread_name': return isRecord(value) && value.done === true;
+    case 'answer_user_input': return isRecord(value) && value.done === true;
     case 'submit_first_turn': return isRecord(value) && (value.outcome === 'accepted' || value.outcome === 'not-sent' || value.outcome === 'ambiguous');
     case 'submit_main_turn': return isRecord(value) && typeof value.nativeTurnId === 'string';
     case 'read_thread_metadata': return isRecord(value);
@@ -266,8 +267,8 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return BtwProjectionWakeSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, larkAppId);
   }
 
-  async ensureSession(profile: FrozenBtwSessionProfile) {
-    return await this.request<any>({ type: 'ensure_session', profile });
+  async ensureSession(profile: FrozenBtwSessionProfile): Promise<import('./runtime-protocol.js').BtwRuntimeResultMap['ensure_session']> {
+    return await this.request({ type: 'ensure_session', profile });
   }
   async attachSession(input: { sessionId: string; cursor: number }): Promise<AttachedBtwRuntimeSession> {
     const subscription = new BtwSessionNotificationSubscription(() => this.createAuthenticatedSocket(), this.input.descriptor, input);
@@ -282,7 +283,9 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
   async readThreadMetadata(sessionId: string, timeoutMs?: number) { return await this.request<{ name?: string; preview?: string; updatedAt?: number }>({ type: 'read_thread_metadata', sessionId, timeoutMs }); }
   async setThreadName(sessionId: string, name: string): Promise<void> { await this.request({ type: 'set_thread_name', sessionId, name }); }
   async ackEvents(sessionId: string, seq: number): Promise<void> { await this.request({ type: 'ack_events', sessionId, seq }); }
-  answerUserInput(): Promise<never> { throw new Error('Task 6 does not implement answerUserInput'); }
+  async answerUserInput(sessionId: string, requestId: string, result: unknown): Promise<void> {
+    await this.request({ type: 'answer_user_input', sessionId, requestId, result });
+  }
   quiesceApp(): Promise<never> { throw new Error('Task 6 does not implement quiesceApp'); }
   closeApp(): Promise<never> { throw new Error('Task 6 does not implement closeApp'); }
 

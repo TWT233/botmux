@@ -12,7 +12,7 @@ import { withFileLock } from '../../utils/file-lock.js';
 import { runtimeBuildIdentity } from '../../utils/runtime-build-id.js';
 import { createBtwOperationStore } from './operation-store.js';
 import { CodexRpcSession } from '../../codex-rpc-session.js';
-import type { BtwCapabilities } from '../../adapters/cli/btw.js';
+import { supportsManagedBtw, type BtwCapabilities } from '../../adapters/cli/btw.js';
 import type { CodexRpcTurnIdentity } from '../../codex-rpc-engine.js';
 import {
   BTW_RUNTIME_PROTOCOL_VERSION,
@@ -114,15 +114,14 @@ interface ManagedSession {
   nextSeq: number;
   journal: BtwRuntimeNotification[];
   subscribers: Set<Socket>;
+  pendingUserInputs: Map<string, { resolve(result: unknown): void }>;
 }
 
-const MANAGED_CAPABILITIES: BtwCapabilities = {
-  nativeBtw: true,
-  persistentRuntime: true,
-  structuredTerminal: true,
-  stableParentThread: true,
-};
 const MANAGED_JOURNAL_MAX_ENTRIES = 1024;
+
+function admissionCapabilities(profile: import('./runtime-protocol.js').FrozenBtwSessionProfile, persistentRuntime: boolean): BtwCapabilities {
+  return { ...profile.managedBtwCapabilities, persistentRuntime };
+}
 
 function managedAttachment(state: RuntimeState, managed: ManagedSession) {
   return {
@@ -138,15 +137,15 @@ function publishManagedNotification(
   managed: ManagedSession,
   notification: Omit<BtwRuntimeNotification, 'sessionId' | 'fromSeq' | 'throughSeq'>,
 ): void {
+  if (managed.journal.length >= MANAGED_JOURNAL_MAX_ENTRIES) {
+    throw new Error('managed Trae journal is full; durable worker acknowledgement required');
+  }
   const seq = ++managed.nextSeq;
   const sequenced = { ...notification, sessionId: managed.profile.sessionId, fromSeq: seq, throughSeq: seq } as BtwRuntimeNotification;
   managed.journal.push(sequenced);
   // A journal entry can only be discarded by the worker's durable ACK. Never
-  // silently evict replay evidence: submit commands apply backpressure before
-  // a new main turn is allowed to generate more events.
-  if (managed.journal.length > MANAGED_JOURNAL_MAX_ENTRIES) {
-    throw new Error('managed Trae journal overflow');
-  }
+  // silently evict replay evidence. Capacity was checked before assigning a
+  // sequence, so an overflow cannot create an un-replayable notification.
   for (const socket of [...managed.subscribers]) {
     if (socket.destroyed) { managed.subscribers.delete(socket); continue; }
     writeFrame(socket, { kind: 'session_notification', notification: sequenced });
@@ -161,9 +160,16 @@ async function ensureManagedSession(
   if (existing) {
     return {
       attachment: managedAttachment(state, existing),
-      capabilities: MANAGED_CAPABILITIES,
+      capabilities: admissionCapabilities(existing.profile, true),
       configDrift: existing.profile.configHash !== profile.configHash,
     };
+  }
+  // This is a frozen adapter launch contract, not a self-asserted runtime
+  // constant. Do not spawn an app-server merely to discover it: a missing bit
+  // is an admission denial and must leave no runtime-owned session behind.
+  const declared = admissionCapabilities(profile, false);
+  if (!declared.nativeBtw || !declared.structuredTerminal || !declared.stableParentThread) {
+    return { attachment: null, capabilities: declared, configDrift: false };
   }
   const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
   if (profile.ownerOpenId) env.BOTMUX_OWNER_OPEN_ID = profile.ownerOpenId;
@@ -182,15 +188,23 @@ async function ensureManagedSession(
     }),
     onTurnTerminal: terminal => publishManagedNotification(managed, { kind: 'main_terminal', payload: terminal }),
     onRequestUserInput: async params => {
-      publishManagedNotification(managed, { kind: 'request_user_input', payload: { requestId: randomToken(), params } });
-      throw new Error('managed Trae request_user_input requires explicit worker interruption');
+      const requestId = randomToken();
+      return await new Promise<unknown>((resolveInput, rejectInput) => {
+        try {
+          managed.pendingUserInputs.set(requestId, { resolve: resolveInput });
+          publishManagedNotification(managed, { kind: 'request_user_input', payload: { requestId, params } });
+        } catch (error) {
+          managed.pendingUserInputs.delete(requestId);
+          rejectInput(error);
+        }
+      });
     },
     onDead: () => publishManagedNotification(managed, {
       kind: 'app_server_dead', payload: { errorCode: 'app_server_dead', message: 'Trae app server exited' },
     }),
   });
   managed = {
-    profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(),
+    profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(), pendingUserInputs: new Map(),
   };
   await engine.start();
   managed.nativeThreadId = profile.nativeThreadId
@@ -198,7 +212,7 @@ async function ensureManagedSession(
     : await engine.startThread();
   managed.appServerUrl = engine.wsUrl;
   state.managedSessions.set(profile.sessionId, managed);
-  return { attachment: managedAttachment(state, managed), capabilities: MANAGED_CAPABILITIES, configDrift: false };
+  return { attachment: managedAttachment(state, managed), capabilities: admissionCapabilities(profile, true), configDrift: false };
 }
 
 function assertManagedJournalCapacity(managed: ManagedSession): void {
@@ -582,6 +596,14 @@ async function handleRuntimeCommand(
         managed.journal = managed.journal.filter(notification => notification.throughSeq > command.seq);
       }
       return { done: true };
+    case 'answer_user_input': {
+      const managed = state.managedSessions.get(command.sessionId);
+      const pending = managed?.pendingUserInputs.get(command.requestId);
+      if (!managed || !pending) throw new Error('managed Trae user input request not found');
+      managed.pendingUserInputs.delete(command.requestId);
+      pending.resolve(command.result);
+      return { done: true };
+    }
     case 'prepare_btw':
       return state.store.prepareBtw(command.input);
     case 'record_initial_card_attempt': {
@@ -773,6 +795,7 @@ function isSupportedRuntimeCommand(value: unknown): value is BtwRuntimeCommand {
     case 'read_thread_metadata': return typeof command.sessionId === 'string';
     case 'set_thread_name': return typeof command.sessionId === 'string' && typeof command.name === 'string';
     case 'ack_events': return typeof command.sessionId === 'string' && Number.isSafeInteger(command.seq);
+    case 'answer_user_input': return typeof command.sessionId === 'string' && typeof command.requestId === 'string' && 'result' in command;
     case 'prepare_btw': return !!command.input && typeof command.input === 'object';
     case 'record_initial_card_attempt': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && !!command.outcome && typeof command.outcome === 'object';
     case 'record_card': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && typeof command.messageId === 'string';
