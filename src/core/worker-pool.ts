@@ -33,7 +33,11 @@ import { updateMessage, deleteMessage, pinMessage, unpinMessage, sendEphemeralCa
 import { buildStreamingCard, buildPrivateSnapshotCard, buildSessionCard, buildTuiPromptCard, buildTuiPromptResolvedCard, buildTuiPromptFailedCard, buildRelayedFrozenCard, buildTurnFailedCard, getCliDisplayName } from '../im/lark/card-builder.js';
 import { codexServiceTierBadge } from '../services/codex-service-tier.js';
 import { cliModelSupportsReasoningEffort, isConfigurableReasoningCliId } from '../services/codex-reasoning-effort.js';
-import { RPC_CAPABLE_CLIS } from '../codex-rpc-lifecycle.js';
+import { RPC_CAPABLE_CLIS, codexRpcEligible } from '../codex-rpc-lifecycle.js';
+import { supportsManagedBtw } from '../adapters/cli/btw.js';
+import { connectBtwRuntime } from '../features/btw/runtime-client.js';
+import type { FrozenBtwSessionProfile } from '../features/btw/runtime-protocol.js';
+import { readSessionMcpRuntimeManifest } from './plugins/mcp/session-runtime.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
 import { hashUrlForLog } from '../adapters/backend/riff-backend.js';
 import { cancelMojoSessionById } from '../adapters/backend/mojo-backend.js';
@@ -113,6 +117,7 @@ const DAEMON_BOOT_ID = randomUUID();
 const restartCoordinator = new RestartCoordinator();
 const lifecycleRetiringWorkers = new WeakMap<DaemonSession, Set<ChildProcess>>();
 const transferRetiringWorkers = new WeakSet<ChildProcess>();
+const managedTraePreparations = new Map<string, Promise<void>>();
 
 /** 从 bot 配置解析定价（bots.json pricing 块 → 内置表）。未配置时返回 undefined。 */
 function resolvePricingForBot(larkAppId?: string): ResolvedModelPricing | undefined {
@@ -402,6 +407,7 @@ import type {
   CodexAppDispatchLedgerEntry,
   CodexAppGenerationCommit,
   CodexAppTurnInput,
+  BtwCursorCommitAck,
   FrozenSessionReplyTarget,
   DaemonToWorker,
   TrustedCaller,
@@ -1596,6 +1602,97 @@ function sessionAgentConfig(
  * (incl. the /cli cliLaunchSnapshot branch's live model resolution) directly,
  * without spawning a real worker. */
 export const __testOnly_sessionAgentConfig = sessionAgentConfig;
+
+/**
+ * Establish daemon-owned Trae runtime ownership before a fresh worker is
+ * allowed to spawn. This stays outside forkWorker because forkWorker is
+ * intentionally synchronous and cannot safely hide an async preparation.
+ */
+export async function prepareManagedTraeLaunch(ds: DaemonSession): Promise<void> {
+  if (ds.session.btwRuntime || ds.session.cliSessionId || ds.hasHistory) return;
+  const botCfg = getBot(ds.larkAppId).config;
+  const agentCfg = sessionAgentConfig(ds, botCfg);
+  const cwd = ds.workingDir ?? ds.session.workingDir ?? homedir();
+  const initLike = {
+    type: 'init' as const,
+    sessionId: ds.session.sessionId,
+    chatId: ds.chatId,
+    rootMessageId: sessionAnchorId(ds),
+    workingDir: cwd,
+    cliId: agentCfg.cliId,
+    backendType: resolvePairedSpawnBackendType(agentCfg.cliId, ds.session.backendType, botCfg.backendType, config.daemon.backendType),
+    prompt: 'managed-trae-preflight',
+    codexRpcInput: (botCfg.codexRpcInput === true && RPC_CAPABLE_CLIS.has(agentCfg.cliId)) || config.codexRpcInputDefault,
+    larkAppId: ds.larkAppId,
+    larkAppSecret: '',
+    cliRuntime: agentCfg.cliRuntime,
+    cliPathOverride: agentCfg.cliPathOverride,
+    wrapperCli: agentCfg.wrapperCli,
+    startupCommands: agentCfg.startupCommands,
+    sandbox: ds.session.sandbox === true,
+    readIsolation: botCfg.readIsolation === true,
+    disableCliBypass: botCfg.disableCliBypass === true,
+  } as Extract<DaemonToWorker, { type: 'init' }>;
+  if (!codexRpcEligible(initLike, { sandboxForced: sandboxEnabled() }) || agentCfg.cliId !== 'traex') return;
+
+  const cliBin = createCliAdapterSync(agentCfg.cliId, agentCfg.cliPathOverride).resolvedBin;
+  const manifest = readSessionMcpRuntimeManifest(ds.session.sessionId, config.session.dataDir);
+  const profileBase = {
+    sessionId: ds.session.sessionId,
+    larkAppId: ds.larkAppId,
+    cliId: 'traex' as const,
+    cliBin,
+    cwd,
+    env: sanitizePerBotEnv(botCfg.env),
+    ...(ds.ownerOpenId ? { ownerOpenId: ds.ownerOpenId } : {}),
+    ...(agentCfg.model ? { model: agentCfg.model } : {}),
+    ...(agentCfg.reasoningEffort ? { reasoningEffort: agentCfg.reasoningEffort } : {}),
+    appServerFeatures: ['default_mode_request_user_input'],
+    mcpManifest: manifest,
+    mcpManifestDigest: createHash('sha256').update(JSON.stringify(manifest)).digest('hex'),
+  } satisfies Omit<FrozenBtwSessionProfile, 'configHash'>;
+  const configHash = createHash('sha256').update(JSON.stringify(profileBase)).digest('hex');
+  const profile: FrozenBtwSessionProfile = { ...profileBase, configHash };
+  const key = `${ds.session.sessionId}\0${configHash}`;
+  const running = managedTraePreparations.get(key);
+  if (running) return await running;
+  const prepare = (async () => {
+    const prior = ds.session.btwRuntime;
+    const connected = await connectBtwRuntime({ dataDir: config.session.dataDir });
+    let persisted = false;
+    try {
+      const ensured = await connected.client.ensureSession(profile);
+      if (!supportsManagedBtw(ensured.capabilities)) return;
+      if (findActiveBySessionId(ds.session.sessionId) !== ds || ds.session.btwRuntime !== prior) {
+        await connected.client.detachSession(ds.session.sessionId);
+        return;
+      }
+      ds.session.btwRuntime = {
+        socket: ensured.attachment.runtime.socket,
+        epoch: ensured.attachment.runtime.epoch,
+        protocolVersion: ensured.attachment.runtime.protocolVersion,
+        buildId: ensured.attachment.runtime.buildId,
+        configHash,
+        notificationCursor: ensured.attachment.notificationCursor,
+      };
+      try {
+        sessionStore.updateSession(ds.session);
+        persisted = true;
+      } catch (error) {
+        ds.session.btwRuntime = prior;
+        await connected.client.detachSession(ds.session.sessionId).catch(() => undefined);
+        throw error;
+      }
+    } finally {
+      if (!persisted && ds.session.btwRuntime === prior) {
+        await connected.client.detachSession(ds.session.sessionId).catch(() => undefined);
+      }
+      connected.close();
+    }
+  })().finally(() => { managedTraePreparations.delete(key); });
+  managedTraePreparations.set(key, prepare);
+  return await prepare;
+}
 
 
 export { freezeMojoIdentityForSession } from './mojo-session-identity.js';
@@ -9997,6 +10094,16 @@ export function forkWorker(
   if (!isSharedAdoptSession(ds)) reclaimParkedCrashDiagnostic(ds);
 
   agentCfg = sessionAgentConfig(ds, botCfg);
+  // An eligible fresh Trae launch must have crossed prepareManagedTraeLaunch's
+  // durable ownership boundary before this synchronous fork. Do not create an
+  // app-server locally if that preparation was skipped or lost.
+  if (agentCfg.cliId === 'traex'
+    && !resume
+    && !ds.session.cliSessionId
+    && !ds.session.btwRuntime
+    && botCfg.codexRpcInput === true) {
+    throw new Error('eligible fresh Trae launch requires a persisted BTW runtime attachment');
+  }
   if (!initTurnId && prompt.length > 0 && agentCfg.cliId === 'codex-app') {
     initAttributionTurnId = `codex-app-dispatch-${randomUUID()}`;
   }
@@ -10485,6 +10592,8 @@ export function forkWorker(
       : {}),
     ...(ds.session.runnerBuildId ? { persistedRunnerBuildId: ds.session.runnerBuildId } : {}),
     ...(restartAttemptId ? { restartAttemptId } : {}),
+    ...(ds.session.btwRuntime ? { btwRuntime: ds.session.btwRuntime } : {}),
+    workerGeneration,
   };
   // A persisted port from an older ZMX implementation must never revive the
   // removed Web TUI or get forwarded as a preferred listen port. The worker
@@ -11032,6 +11141,51 @@ function setupWorkerHandlers(
     }
     const effectiveCliId = sessionCliId(ds, botCfg);
     switch (msg.type) {
+      case 'btw_notification_cursor_commit': {
+        const reply = (ok: boolean, error?: BtwCursorCommitAck['error'], persistedSeq?: number): void => {
+          try {
+            worker.send({
+              type: 'btw_notification_cursor_persisted',
+              requestId: msg.requestId,
+              sessionId: msg.sessionId,
+              workerGeneration: msg.workerGeneration,
+              runtimeEpoch: msg.runtimeEpoch,
+              fromSeq: msg.fromSeq,
+              throughSeq: msg.throughSeq,
+              ok,
+              ...(persistedSeq !== undefined ? { persistedSeq } : {}),
+              ...(error ? { error } : {}),
+            });
+          } catch { /* worker exited before its ACK */ }
+        };
+        if (msg.sessionId !== ds.session.sessionId) { reply(false, 'session_mismatch'); break; }
+        if (msg.workerGeneration !== workerGeneration || ds.session.workerGeneration !== workerGeneration) {
+          reply(false, 'stale_worker_generation'); break;
+        }
+        const attachment = ds.session.btwRuntime;
+        if (!attachment || attachment.epoch !== msg.runtimeEpoch) { reply(false, 'runtime_epoch_mismatch'); break; }
+        if (!Number.isSafeInteger(msg.fromSeq) || !Number.isSafeInteger(msg.throughSeq) || msg.fromSeq < 1 || msg.throughSeq < msg.fromSeq) {
+          reply(false, 'cursor_invalid_range'); break;
+        }
+        const persisted = attachment.notificationCursor;
+        if (msg.throughSeq < persisted) { reply(false, 'cursor_regression'); break; }
+        if (msg.throughSeq === persisted) {
+          if (msg.fromSeq > persisted) reply(false, 'cursor_invalid_range');
+          else reply(true, undefined, persisted);
+          break;
+        }
+        if (msg.fromSeq <= persisted) { reply(false, 'cursor_overlap'); break; }
+        if (msg.fromSeq !== persisted + 1) { reply(false, 'cursor_gap'); break; }
+        attachment.notificationCursor = msg.throughSeq;
+        try {
+          sessionStore.updateSession(ds.session);
+          reply(true, undefined, msg.throughSeq);
+        } catch {
+          attachment.notificationCursor = persisted;
+          reply(false, 'session_store_write_failed');
+        }
+        break;
+      }
       case 'persistent_backend_target': {
         ds.session.persistentBackendTarget = msg.target;
         sessionStore.updateSession(ds.session);

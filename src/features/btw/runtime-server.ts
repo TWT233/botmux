@@ -11,6 +11,9 @@ import { atomicWriteFileSync } from '../../utils/atomic-write.js';
 import { withFileLock } from '../../utils/file-lock.js';
 import { runtimeBuildIdentity } from '../../utils/runtime-build-id.js';
 import { createBtwOperationStore } from './operation-store.js';
+import { CodexRpcSession } from '../../codex-rpc-session.js';
+import type { BtwCapabilities } from '../../adapters/cli/btw.js';
+import type { CodexRpcTurnIdentity } from '../../codex-rpc-engine.js';
 import {
   BTW_RUNTIME_PROTOCOL_VERSION,
   type BtwProjectionWake,
@@ -19,6 +22,7 @@ import {
   type BtwRuntimeEnvelope,
   type BtwRuntimeFrame,
   type BtwRuntimeResultMap,
+  type BtwRuntimeNotification,
 } from './runtime-protocol.js';
 
 const AUTH_TIMEOUT_MS = 2_000;
@@ -99,6 +103,108 @@ interface RuntimeState {
   projectionWakeScheduled: boolean;
   executorWakeQueue: BtwExecutorWakeQueue;
   executorWakeScheduled: boolean;
+  managedSessions: Map<string, ManagedSession>;
+}
+
+interface ManagedSession {
+  profile: import('./runtime-protocol.js').FrozenBtwSessionProfile;
+  engine: CodexRpcSession;
+  appServerUrl: string;
+  nativeThreadId: string;
+  nextSeq: number;
+  journal: BtwRuntimeNotification[];
+  subscribers: Set<Socket>;
+}
+
+const MANAGED_CAPABILITIES: BtwCapabilities = {
+  nativeBtw: true,
+  persistentRuntime: true,
+  structuredTerminal: true,
+  stableParentThread: true,
+};
+const MANAGED_JOURNAL_MAX_ENTRIES = 1024;
+
+function managedAttachment(state: RuntimeState, managed: ManagedSession) {
+  return {
+    runtime: state.descriptor,
+    appServerUrl: managed.appServerUrl,
+    nativeThreadId: managed.nativeThreadId,
+    configHash: managed.profile.configHash,
+    notificationCursor: managed.nextSeq,
+  };
+}
+
+function publishManagedNotification(
+  managed: ManagedSession,
+  notification: Omit<BtwRuntimeNotification, 'sessionId' | 'fromSeq' | 'throughSeq'>,
+): void {
+  const seq = ++managed.nextSeq;
+  const sequenced = { ...notification, sessionId: managed.profile.sessionId, fromSeq: seq, throughSeq: seq } as BtwRuntimeNotification;
+  managed.journal.push(sequenced);
+  // A journal entry can only be discarded by the worker's durable ACK. Never
+  // silently evict replay evidence: submit commands apply backpressure before
+  // a new main turn is allowed to generate more events.
+  if (managed.journal.length > MANAGED_JOURNAL_MAX_ENTRIES) {
+    throw new Error('managed Trae journal overflow');
+  }
+  for (const socket of [...managed.subscribers]) {
+    if (socket.destroyed) { managed.subscribers.delete(socket); continue; }
+    writeFrame(socket, { kind: 'session_notification', notification: sequenced });
+  }
+}
+
+async function ensureManagedSession(
+  state: RuntimeState,
+  profile: import('./runtime-protocol.js').FrozenBtwSessionProfile,
+): Promise<import('./runtime-protocol.js').BtwRuntimeResultMap['ensure_session']> {
+  const existing = state.managedSessions.get(profile.sessionId);
+  if (existing) {
+    return {
+      attachment: managedAttachment(state, existing),
+      capabilities: MANAGED_CAPABILITIES,
+      configDrift: existing.profile.configHash !== profile.configHash,
+    };
+  }
+  const env: NodeJS.ProcessEnv = { ...process.env, ...profile.env, BOTMUX_SESSION_ID: profile.sessionId };
+  if (profile.ownerOpenId) env.BOTMUX_OWNER_OPEN_ID = profile.ownerOpenId;
+  let managed!: ManagedSession;
+  const engine = new CodexRpcSession({
+    cliBin: profile.cliBin,
+    cwd: profile.cwd,
+    env,
+    sessionId: profile.sessionId,
+    model: profile.model,
+    reasoningEffort: profile.reasoningEffort,
+    appServerFeatures: profile.appServerFeatures,
+    onNotification: notification => publishManagedNotification(managed, {
+      kind: 'main_event',
+      payload: { type: 'delta', text: typeof notification.params === 'string' ? notification.params : JSON.stringify(notification.params) },
+    }),
+    onTurnTerminal: terminal => publishManagedNotification(managed, { kind: 'main_terminal', payload: terminal }),
+    onRequestUserInput: async params => {
+      publishManagedNotification(managed, { kind: 'request_user_input', payload: { requestId: randomToken(), params } });
+      throw new Error('managed Trae request_user_input requires explicit worker interruption');
+    },
+    onDead: () => publishManagedNotification(managed, {
+      kind: 'app_server_dead', payload: { errorCode: 'app_server_dead', message: 'Trae app server exited' },
+    }),
+  });
+  managed = {
+    profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(),
+  };
+  await engine.start();
+  managed.nativeThreadId = profile.nativeThreadId
+    ? await engine.resumeThread(profile.nativeThreadId)
+    : await engine.startThread();
+  managed.appServerUrl = engine.wsUrl;
+  state.managedSessions.set(profile.sessionId, managed);
+  return { attachment: managedAttachment(state, managed), capabilities: MANAGED_CAPABILITIES, configDrift: false };
+}
+
+function assertManagedJournalCapacity(managed: ManagedSession): void {
+  if (managed.journal.length >= MANAGED_JOURNAL_MAX_ENTRIES) {
+    throw new Error('managed Trae journal is full; durable worker acknowledgement required');
+  }
 }
 
 const runtimeStates = new Map<string, RuntimeState>();
@@ -432,6 +538,50 @@ async function handleRuntimeCommand(
   command: BtwRuntimeCommand,
 ): Promise<BtwRuntimeResultMap[keyof BtwRuntimeResultMap]> {
   switch (command.type) {
+    case 'ensure_session':
+      return await ensureManagedSession(state, command.profile);
+    case 'attach_session': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (!managed) throw new Error('managed btw session not found');
+      if (!Number.isSafeInteger(command.cursor) || command.cursor < 0 || command.cursor > managed.nextSeq) {
+        throw new Error('stale managed btw notification cursor');
+      }
+      return { attachment: managedAttachment(state, managed) };
+    }
+    case 'detach_session':
+      return { done: true };
+    case 'submit_first_turn': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (!managed) throw new Error('managed btw session not found');
+      assertManagedJournalCapacity(managed);
+      return await managed.engine.sendFirstTurn(command.content, command.identity, async () => false);
+    }
+    case 'submit_main_turn': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (!managed) throw new Error('managed btw session not found');
+      assertManagedJournalCapacity(managed);
+      return await managed.engine.sendTurn(command.content, command.identity);
+    }
+    case 'read_thread_metadata': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (!managed) throw new Error('managed btw session not found');
+      return await managed.engine.readThreadMetadata(command.timeoutMs);
+    }
+    case 'set_thread_name': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (!managed) throw new Error('managed btw session not found');
+      await managed.engine.setThreadName(command.name);
+      return { done: true };
+    }
+    case 'ack_events':
+      {
+        const managed = state.managedSessions.get(command.sessionId);
+        if (!managed || !Number.isSafeInteger(command.seq) || command.seq < 0 || command.seq > managed.nextSeq) {
+          throw new Error('invalid managed btw notification acknowledgement');
+        }
+        managed.journal = managed.journal.filter(notification => notification.throughSeq > command.seq);
+      }
+      return { done: true };
     case 'prepare_btw':
       return state.store.prepareBtw(command.input);
     case 'record_initial_card_attempt': {
@@ -538,6 +688,9 @@ async function handleAuthedSocket(state: RuntimeState, socket: Socket): Promise<
             }
           });
         }
+        const attachCommand = envelope.command.type === 'attach_session'
+          ? envelope.command
+          : undefined;
         writeFrame(socket, {
           kind: 'reply',
           ok: true,
@@ -548,6 +701,15 @@ async function handleAuthedSocket(state: RuntimeState, socket: Socket): Promise<
           setImmediate(() => {
             void shutdownRuntime({ dataDir: state.dataDir }).finally(() => process.exit(0));
           });
+        } : attachCommand ? () => {
+          const managed = state.managedSessions.get(attachCommand.sessionId)!;
+          managed.subscribers.add(socket);
+          socket.once('close', () => managed.subscribers.delete(socket));
+          for (const notification of managed.journal) {
+            if (notification.throughSeq > attachCommand.cursor) {
+              writeFrame(socket, { kind: 'session_notification', notification });
+            }
+          }
         } : undefined);
       } catch (error) {
         writeFrame(socket, {
@@ -601,6 +763,16 @@ function isSupportedRuntimeCommand(value: unknown): value is BtwRuntimeCommand {
   const type = command.type;
   if (typeof type !== 'string') return false;
   switch (type) {
+    case 'ensure_session': return !!command.profile && typeof command.profile === 'object';
+    case 'attach_session': return typeof command.sessionId === 'string' && Number.isSafeInteger(command.cursor);
+    case 'detach_session':
+    case 'quiesce_session':
+    case 'close_session': return typeof command.sessionId === 'string';
+    case 'submit_first_turn':
+    case 'submit_main_turn': return typeof command.sessionId === 'string' && typeof command.content === 'string' && !!command.identity && typeof command.identity === 'object';
+    case 'read_thread_metadata': return typeof command.sessionId === 'string';
+    case 'set_thread_name': return typeof command.sessionId === 'string' && typeof command.name === 'string';
+    case 'ack_events': return typeof command.sessionId === 'string' && Number.isSafeInteger(command.seq);
     case 'prepare_btw': return !!command.input && typeof command.input === 'object';
     case 'record_initial_card_attempt': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && !!command.outcome && typeof command.outcome === 'object';
     case 'record_card': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && typeof command.messageId === 'string';
@@ -859,5 +1031,6 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
     projectionWakeScheduled: false,
     executorWakeQueue: new RetainedBtwExecutorWakeQueue(),
     executorWakeScheduled: false,
+    managedSessions: new Map(),
   });
 }

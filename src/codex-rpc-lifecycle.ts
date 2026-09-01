@@ -146,6 +146,22 @@ export function codexRpcEligible(cfg: InitCfg, runtime: CodexRpcRuntimeGates = {
   );
 }
 
+/**
+ * Managed BTW is deliberately narrower than the normal Codex-family RPC gate.
+ * A worker may reconnect to a durable runtime only when the daemon already
+ * committed the attachment before this generation was spawned.  In particular,
+ * a restored legacy Trae session cannot silently acquire a second owner just
+ * because its current bot configuration happens to be eligible.
+ */
+export function isPersistentTraeRpcColdStart(
+  cfg: InitCfg,
+  runtime: CodexRpcRuntimeGates = {},
+): boolean {
+  return cfg.cliId === 'traex'
+    && cfg.btwRuntime !== undefined
+    && codexRpcEligible(cfg, runtime);
+}
+
 /** Positive rollout evidence that THIS turn's user message was persisted (P1-1).
  *  Given a thread's drained rollout events, is there a user turn matching the
  *  prompt? session_meta (written at thread/start) is not a `kind:'user'` event,
