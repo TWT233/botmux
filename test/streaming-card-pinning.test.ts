@@ -424,7 +424,7 @@ describe('streaming-card pin policy', () => {
     await unpinStarted.promise;
 
     __testOnly_resetPinStreamingCardReconcileQueue();
-    const replacement = makeDs('om_current', undefined, 'pin-session-replacement');
+    const replacement = makeDs('om_current');
     activate(replacement);
     await expect(pinStreamingCardIfEnabled(replacement, 'om_current')).resolves.toBe(true);
     releaseUnpin.resolve(true);
