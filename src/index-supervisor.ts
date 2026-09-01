@@ -7,10 +7,8 @@
 // Same boot hygiene as index-daemon: scrub any session-scoped env a parent may
 // have leaked, so children don't inherit a stale identity.
 
-import { config as dotenvConfig } from 'dotenv';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
-import { existsSync, readFileSync } from 'node:fs';
 import { installStdioEpipeGuard } from './utils/stdio-epipe-guard.js';
 import {
   scrubClaudeSessionMarkerEnv,
@@ -24,8 +22,6 @@ import {
 installStdioEpipeGuard();
 
 const configDir = join(homedir(), '.botmux');
-const globalEnv = join(configDir, '.env');
-dotenvConfig({ path: existsSync(globalEnv) ? globalEnv : '.env' });
 
 // The dotenv load above pulls in ~/.botmux/.env WHOLESALE, same as
 // index-daemon.ts — including the Dashboard-only Feishu H5 login family. The
