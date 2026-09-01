@@ -202,10 +202,12 @@ override in a pure helper, and add a generic app-server spawn-config argument to
 `CodexRpcEngine`. Pass it only for `cliId === 'traex'`. Always install the hook
 for managed Trae sessions—even when the current policy is absent—so a Dashboard
 change can affect the next spawn without restarting a newly created session. The
-rendered command must go through the stable daemon-written `botmux` wrapper
-rather than a checkout-local entrypoint, so long-lived panes pick up the current
-Node or standalone build. Persistent sandboxed panes still warm-reattach only
-when the daemon-managed isolation marker and policy digest match; install-root or
+rendered command must go through the dedicated daemon-written
+`botmux-native-subagent-runtime-hook` entrypoint rather than a checkout-local
+entrypoint or the generic `botmux` wrapper, so long-lived panes pick up the
+current Node or standalone build without exempting the hook path inside sandbox
+overlay selection. Persistent sandboxed panes still warm-reattach only when the
+daemon-managed isolation marker and policy digest match; install-root or
 native-hook protocol drift forces a cold spawn under the current policy.
 
 - [ ] **Step 4: Verify GREEN, commit, and push**

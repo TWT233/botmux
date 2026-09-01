@@ -31,7 +31,7 @@
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { isStandaloneBinary } from '../core/self-spawn.js';
-import { resolveStableBotmuxWrapperPath } from '../core/botmux-wrapper.js';
+import { resolveNativeSubagentRuntimeHookWrapperPath } from '../core/botmux-wrapper.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -127,8 +127,7 @@ export function nativeSubagentRuntimeHookCommand(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ): string {
-  const executable = resolveStableBotmuxWrapperPath(env, platform);
-  return `"${executable}" native-subagent-runtime-hook`;
+  return `"${resolveNativeSubagentRuntimeHookWrapperPath(env, platform)}"`;
 }
 
 >>>>>>> be1a303b (feat(subagent): 接入运行时策略钩子)

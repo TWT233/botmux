@@ -789,10 +789,6 @@ export function prepareDirectSandbox(opts: {
   // different files — still gets the overlay.
   let selfExec: string | undefined;
   try { selfExec = realpathSync(process.execPath); } catch { selfExec = undefined; }
-  const stableWrapperTarget = canonical(
-    opts.stableBotmuxWrapperPath
-      ?? resolveStableBotmuxWrapperPath(process.env, process.platform),
-  );
   for (const rawTarget of [...new Set(opts.trustedBotmuxCommandPaths ?? [])]) {
     if (typeof rawTarget !== 'string' || !isAbsolute(rawTarget)) continue;
     const target = resolve(rawTarget);
@@ -800,7 +796,6 @@ export function prepareDirectSandbox(opts: {
       if (!lstatSync(target).isFile()) continue;
       const resolvedTarget = realpathSync(target);
       // Compare resolved paths: either side may be reached through a symlink.
-      if (resolvedTarget === stableWrapperTarget) continue;
       if (selfExec !== undefined && resolvedTarget === selfExec) continue;
       args.push('--ro-bind', shim, target);
     } catch { /* missing/stale config target — PATH shim remains available */ }

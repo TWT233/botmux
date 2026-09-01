@@ -224,12 +224,23 @@ describe('sandbox shim overlay — install.sh layout (shim path === exec target)
     expect(overlayTargets(launcher)).toEqual([launcher]);
   });
 
-  it('skips the overlay for the stable daemon-updated wrapper path too', () => {
+  it('still overlays the stable main wrapper path so gateway/default botmux keeps relay mode', () => {
     const dir = mkdtempSync(join(tmpdir(), 'sbx-stable-wrapper-'));
     const stable = join(dir, 'botmux');
     writeFileSync(stable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
     chmodSync(stable, 0o755);
-    expect(overlayTargets(stable, stable)).toEqual([]);
+    expect(overlayTargets(stable, stable)).toEqual([stable]);
+  });
+
+  it('still overlays the dedicated native hook wrapper if someone explicitly trusts that path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'sbx-native-hook-wrapper-'));
+    const stable = join(dir, 'botmux');
+    const nativeHook = join(dir, 'botmux-native-subagent-runtime-hook');
+    writeFileSync(stable, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    writeFileSync(nativeHook, '#!/bin/sh\nexit 0\n', { mode: 0o755 });
+    chmodSync(stable, 0o755);
+    chmodSync(nativeHook, 0o755);
+    expect(overlayTargets(nativeHook, stable)).toEqual([nativeHook]);
   });
 
   it('still overlays a separate configured gateway launcher', () => {
