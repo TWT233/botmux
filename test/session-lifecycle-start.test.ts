@@ -162,6 +162,7 @@ import {
   getDaemonBootId,
   initWorkerPool,
   promoteQueuedActivationTail,
+  restartCounts,
   sendWorkerInput,
   suspendWorker,
 } from '../src/core/worker-pool.js';
@@ -242,6 +243,7 @@ beforeEach(() => {
   __testOnly_resetOrdinaryImDeliveries();
   vi.mocked(getBot).mockImplementation(() => defaultBot());
   __testOnly_resetSessionLifecycleHooks();
+  restartCounts.clear();
   forkMock.mockImplementation(() => makeFakeWorker());
   initWorkerPool({
     sessionReply: vi.fn(async () => 'om_reply'),
@@ -3867,6 +3869,59 @@ describe('managed turn authority worker generations', () => {
       policyCapability: 'policy-worker-generation',
     });
     expect(ds.managedTurnOrigin?.capability).not.toBe('live-before-crash');
+  });
+
+  it('clears policy authority when a remote backend exits without restart', async () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    // Freeze this already-running generation as remote after the generic test
+    // helper has populated its local default init snapshot.
+    ds.initConfig = { ...(ds.initConfig ?? {}), backendType: 'riff' } as any;
+    ds.session.backendType = 'riff';
+    const worker = forkMock.mock.results.at(-1)!.value;
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'remote-live-capability',
+      policyCapability: 'remote-policy-capability',
+      turnId: 'remote-turn',
+    });
+
+    worker.emit('message', { type: 'claude_exit', code: 17, signal: null });
+
+    await vi.waitFor(() => expect(ds.managedTurnOrigin).toBeUndefined());
+    expect(worker.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'restart',
+      reason: 'cli_crash',
+    }));
+  });
+
+  it('clears policy authority when crash-loop protection parks the worker', async () => {
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'crash-loop-live-capability',
+      policyCapability: 'crash-loop-policy-capability',
+      turnId: 'crash-loop-turn',
+    });
+    restartCounts.set(ds.session.sessionId, { count: 3, lastAt: Date.now() });
+
+    worker.emit('message', {
+      type: 'claude_exit',
+      code: 17,
+      signal: null,
+      canParkDiagnostic: true,
+    });
+
+    await vi.waitFor(() => expect(worker.send).toHaveBeenCalledWith({ type: 'park_diagnostic' }));
+    expect(ds.managedTurnOrigin).toBeUndefined();
+    expect(worker.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'restart',
+      reason: 'cli_crash',
+    }));
   });
 
   it('ignores claude_exit authority changes from a stale worker generation', async () => {
