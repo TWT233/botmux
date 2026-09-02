@@ -6,6 +6,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createBtwOperationStore } from '../src/features/btw/operation-store.js';
 import { createBtwProjector } from '../src/features/btw/projector.js';
 import type { BtwRuntimeClient } from '../src/features/btw/runtime-protocol.js';
+import type { BtwProjectionWatermark } from '../src/features/btw/types.js';
 import type { BtwOperation, BtwProjectionItem, FrozenBtwReplyTarget } from '../src/features/btw/types.js';
 import { MessageWithdrawnError } from '../src/im/lark/client.js';
 import { makeBtwOperation, makeBtwPrepareInput, makeBtwScope } from './fixtures/btw-fixtures.js';
@@ -78,6 +79,7 @@ function harness(listings: BtwProjectionItem[][] = []) {
     listPendingProjections: vi.fn(),
     recordProjectionFailure: vi.fn(),
     ackProjection: vi.fn(),
+    getBtwOperation: vi.fn(),
   };
   for (const listing of listings) runtime.listPendingProjections.mockResolvedValueOnce(listing);
   runtime.listPendingProjections.mockResolvedValue([]);
@@ -102,6 +104,9 @@ function harness(listings: BtwProjectionItem[][] = []) {
         reminderState: outcome.kind === 'patched' || outcome.kind === 'replacement_created' ? 'pending' : 'none',
       },
     }),
+  }));
+  runtime.getBtwOperation.mockImplementation(async () => projectedOperation({
+    projection: { ...projectedOperation().projection, patchedRevision: 4 },
   }));
   runtime.recordProjectionFailure.mockImplementation(async (_scope, _opId, _expected, failure) => ({
     kind: 'applied',
@@ -212,6 +217,37 @@ describe('BTW initial card projection', () => {
 });
 
 describe('BTW terminal card projection', () => {
+  it('drains exactly the quiesce watermarks and reports only durable terminal outcomes as reached', async () => {
+    const terminal = projectedOperation();
+    const { projector } = harness([[projectionItem(terminal)], []]);
+    const watermarks: BtwProjectionWatermark[] = [{
+      scope: makeBtwScope(),
+      btwOpId: terminal.btwOpId,
+      projectionRevision: terminal.projection.desiredRevision,
+    }];
+
+    await expect(projector.drainUntil({ watermarks, drainMs: 1_000 })).resolves.toEqual({
+      reached: watermarks,
+      pending: [],
+    });
+  });
+
+  it('keeps a watermark pending when it merely disappeared from the pending scan without an ACK or permanent provider block', async () => {
+    const terminal = projectedOperation();
+    const { projector, runtime } = harness([[projectionItem(terminal)], []]);
+    runtime.getBtwOperation.mockResolvedValue({
+      ...terminal,
+      projection: { ...terminal.projection, patchedRevision: 2, blockedRevision: undefined },
+    });
+    const watermarks: BtwProjectionWatermark[] = [{
+      scope: makeBtwScope(), btwOpId: terminal.btwOpId, projectionRevision: terminal.projection.desiredRevision,
+    }];
+
+    await expect(projector.drainUntil({ watermarks, drainMs: 0 })).resolves.toEqual({
+      reached: [], pending: watermarks,
+    });
+  });
+
   it('rebinds an existing withdrawal intent after oversized fallback and creates one durable replacement', async () => {
     const { store, runtime } = durableRuntime();
     const scope = makeBtwScope();

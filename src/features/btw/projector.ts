@@ -14,6 +14,7 @@ import type {
   BtwOperationScope,
   BtwProjectionItem,
   BtwProjectionProviderOutcome,
+  BtwProjectionWatermark,
 } from './types.js';
 
 const MAX_CARD_JSON_BYTES = 100_000;
@@ -27,7 +28,7 @@ type InitialCardResult =
 type ProjectorRuntime = Pick<
   BtwRuntimeClient,
   'recordInitialCardAttempt' | 'recordCard' | 'listPendingProjections'
-  | 'recordProjectionFailure' | 'ackProjection'
+  | 'recordProjectionFailure' | 'ackProjection' | 'getBtwOperation'
 >;
 
 type SendMessage = typeof defaultSendMessage;
@@ -37,6 +38,7 @@ type UpdateMessage = typeof defaultUpdateMessage;
 export interface BtwProjector {
   ensureInitialCard(operation: BtwOperation): Promise<InitialCardResult>;
   drainApp(larkAppId: string): Promise<void>;
+  drainUntil(input: { watermarks: readonly BtwProjectionWatermark[]; drainMs: number }): Promise<{ reached: BtwProjectionWatermark[]; pending: BtwProjectionWatermark[] }>;
 }
 
 export interface BtwProjectorOptions {
@@ -287,6 +289,33 @@ export function createBtwProjector(options: BtwProjectorOptions): BtwProjector {
         if (items.length === 0) return;
         await Promise.all(items.map(item => singleFlight(item.operation, () => handleProjection(item))));
       }
+    },
+
+    async drainUntil({ watermarks, drainMs }) {
+      const pending = new Map(watermarks.map(mark => [
+        `${mark.scope.larkAppId}\0${mark.scope.botmuxSessionId}\0${mark.btwOpId}\0${mark.projectionRevision}`, mark,
+      ]));
+      const deadline = Date.now() + Math.max(0, drainMs);
+      while (pending.size > 0 && Date.now() <= deadline) {
+        const appIds = new Set([...pending.values()].map(mark => mark.scope.larkAppId));
+        for (const appId of appIds) {
+          const items = await options.runtime.listPendingProjections(appId);
+          await Promise.all(items.map(item => singleFlight(item.operation, () => handleProjection(item))));
+        }
+        for (const [key, mark] of pending) {
+          const operation = await options.runtime.getBtwOperation(mark.scope, mark.btwOpId);
+          if (!operation) continue;
+          const reached = operation.projection.patchedRevision === mark.projectionRevision
+            || (operation.projection.blockedRevision === mark.projectionRevision
+              && operation.projection.deliveryFailure?.kind === 'provider_permanent');
+          if (reached) pending.delete(key);
+        }
+      }
+      const pendingMarks = [...pending.values()];
+      return {
+        reached: watermarks.filter(mark => !pendingMarks.includes(mark)),
+        pending: pendingMarks,
+      };
     },
   };
 }

@@ -36,6 +36,7 @@ import { cliModelSupportsReasoningEffort, isConfigurableReasoningCliId } from '.
 import { RPC_CAPABLE_CLIS, codexRpcEligible } from '../codex-rpc-lifecycle.js';
 import { managedBtwLaunchContract, supportsManagedBtw } from '../adapters/cli/btw.js';
 import { connectBtwRuntime } from '../features/btw/runtime-client.js';
+import { fetchDaemonIpc } from './daemon-ipc-auth.js';
 import type { FrozenBtwSessionProfile } from '../features/btw/runtime-protocol.js';
 import { readSessionMcpRuntimeManifest } from './plugins/mcp/session-runtime.js';
 import { loadFrozenCards, saveFrozenCards } from '../services/frozen-card-store.js';
@@ -6250,6 +6251,27 @@ export async function closeSession(
   const awaitWorkerExit = opts?.awaitWorkerExit ?? true;
   const ds = findActiveBySessionId(sessionId);
   const stored = sessionStore.getOwnedSession(sessionId);
+  // Managed BTW owns its App Server outside the worker. Close that owner before
+  // the ordinary worker/store teardown makes this session unreachable. Failure
+  // is deliberately non-fatal to the existing close contract: stale runtimes
+  // are reconciled durably on their next lifecycle operation.
+  const lifecycleSession = ds?.session ?? stored;
+  if (lifecycleSession?.btwRuntime) {
+    const runtime = await connectBtwRuntime({ dataDir: config.session.dataDir });
+    try {
+      const quiesced = await runtime.client.quiesceSession(sessionId);
+      const drainMs = 5_000;
+      const appId = ds?.larkAppId ?? stored?.larkAppId;
+      const ipcPort = Number(process.env.BOTMUX_DAEMON_IPC_PORT);
+      if (Number.isSafeInteger(ipcPort) && ipcPort > 0 && quiesced.projectionWatermarks.length > 0) {
+        await fetchDaemonIpc(ipcPort, '/api/btw/drain-projections', {
+          method: 'POST', headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ larkAppId: appId, watermarks: quiesced.projectionWatermarks, drainMs }),
+        }).catch(() => undefined);
+      }
+      await runtime.client.closeSession(sessionId);
+    } finally { runtime.close(); }
+  }
   const closeFrozenBackendType = ds?.initConfig?.backendType
     ?? ds?.session.backendType ?? stored?.backendType;
   const isOwnedClose = !(ds && isSharedAdoptSession(ds))

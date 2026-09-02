@@ -2567,6 +2567,7 @@ async function cmdStop(): Promise<void> {
   const includePluginServices = process.argv.includes('--with-plugin');
   ensureConfigDir();
   await withFileLock(PM2_FLEET_MUTATION_LOCK_TARGET, async () => {
+    await stopAllManagedBtwRuntime();
     cleanupLegacyPm2('stop'); // reap any pre-migration pm2 God still holding botmux procs
     const { stopFleet } = await import('./core/fleet-runtime.js');
     const result = stopFleet();
@@ -2586,6 +2587,48 @@ async function cmdStop(): Promise<void> {
     if (includePluginServices) await stopPluginServicesForCli(undefined, { autoOnly: true });
     console.log(`✅ daemon 已停止 (supervisor pid ${result.supervisorPid})`);
   }, { maxWaitMs: 5_000 });
+}
+
+const BTW_LIFECYCLE_DRAIN_MS = 5_000;
+
+async function drainManagedBtwProjections(result: { affectedAppIds: string[]; projectionWatermarks: unknown[] }, deadline: number): Promise<void> {
+  for (const appId of result.affectedAppIds) {
+    const daemon = findDaemon(appId);
+    if (!daemon) continue;
+    const drainMs = Math.max(0, deadline - Date.now());
+    if (drainMs <= 0) return;
+    const watermarks = result.projectionWatermarks.filter((mark: any) => mark?.scope?.larkAppId === appId);
+    try {
+      await fetchDaemonIpc(daemon.ipcPort, '/api/btw/drain-projections', {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ larkAppId: appId, watermarks, drainMs }),
+      });
+    } catch { /* drain is bounded best effort; phase two must still proceed */ }
+  }
+}
+
+async function stopAllManagedBtwRuntime(): Promise<void> {
+  try {
+    const { connectBtwRuntime } = await import('./features/btw/runtime-client.js');
+    const runtime = await connectBtwRuntime({ dataDir: resolveDataDir() });
+    try {
+      const quiesced = await runtime.client.quiesceAll();
+      await drainManagedBtwProjections(quiesced, Date.now() + BTW_LIFECYCLE_DRAIN_MS);
+      await runtime.client.shutdownRuntime();
+    } finally { runtime.close(); }
+  } catch { /* no runtime/unreachable runtime must not block fleet stop */ }
+}
+
+async function stopManagedBtwApp(larkAppId: string): Promise<void> {
+  try {
+    const { connectBtwRuntime } = await import('./features/btw/runtime-client.js');
+    const runtime = await connectBtwRuntime({ dataDir: resolveDataDir() });
+    try {
+      const quiesced = await runtime.client.quiesceApp(larkAppId);
+      await drainManagedBtwProjections(quiesced, Date.now() + BTW_LIFECYCLE_DRAIN_MS);
+      await runtime.client.closeApp(larkAppId);
+    } finally { runtime.close(); }
+  } catch { /* phase two/fleet stop stays available when runtime is unreachable */ }
 }
 
 interface RestartLifecycleFlags {
@@ -2879,6 +2922,7 @@ async function cmdStopBot(argv: string[]): Promise<void> {
     process.exit(1);
   }
   ensureConfigDir();
+  await stopManagedBtwApp(appId);
   const r = await ensureBotDaemonStopped(appId, { quiet: wantsJson });
   if (wantsJson) {
     console.log(JSON.stringify(r, null, 2));

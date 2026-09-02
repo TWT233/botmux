@@ -1,5 +1,6 @@
 import type { BtwProjector } from './projector.js';
 import type { BtwRuntimeClient } from './runtime-protocol.js';
+import type { BtwProjectionWatermark } from './types.js';
 
 type RuntimeConnection = {
   client: BtwRuntimeClient;
@@ -55,6 +56,12 @@ export class BtwProjectorService {
     await this.start();
     if (!this.connection) throw new Error('BTW projector service is not connected');
     return this.connection.client;
+  }
+
+  async drainUntil(input: { watermarks: readonly BtwProjectionWatermark[]; drainMs: number }) {
+    await this.start();
+    if (!this.projector) throw new Error('BTW projector service is not connected');
+    return await this.projector.drainUntil(input);
   }
 
   async stop(input: { drainMs?: number } = {}): Promise<void> {

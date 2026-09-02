@@ -202,10 +202,15 @@ function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unk
     case 'list_pending_initial_cards': return Array.isArray(value) && value.every(isOperation);
     case 'next_btw_retry_at': return value === undefined || (typeof value === 'string' && !Number.isNaN(Date.parse(value)));
     case 'list_pending_projections': return Array.isArray(value) && value.every(isProjectionItem);
+    case 'get_btw_operation': return value === null || isOperation(value);
     case 'record_projection_failure':
     case 'ack_projection': return isRecord(value) && (value.kind === 'applied' || value.kind === 'stale') && isOperation(value.operation);
     case 'watch_projection_wakes': return isRecord(value) && value.subscribed === true;
+    case 'quiesce_session':
     case 'quiesce_all': return isQuiesceResult(value);
+    case 'quiesce_app': return isQuiesceResult(value);
+    case 'close_session':
+    case 'close_app': return isRecord(value) && value.done === true;
     case 'shutdown_runtime': return isRecord(value) && value.done === true;
     default: return false;
   }
@@ -277,8 +282,10 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return { attachment, notifications: subscription, detach: async () => { await subscription.return(); await this.detachSession(input.sessionId); } };
   }
   async detachSession(sessionId: string): Promise<void> { await this.request({ type: 'detach_session', sessionId }); }
-  quiesceSession(): Promise<never> { throw new Error('Task 6 does not implement quiesceSession'); }
-  closeSession(): Promise<never> { throw new Error('Task 6 does not implement closeSession'); }
+  async quiesceSession(sessionId: string): Promise<BtwQuiesceResult> {
+    return await this.request<BtwQuiesceResult>({ type: 'quiesce_session', sessionId });
+  }
+  async closeSession(sessionId: string): Promise<void> { await this.request({ type: 'close_session', sessionId }); }
   async submitFirstTurn(sessionId: string, content: string, identity: any): Promise<BtwFirstTurnResult> { return await this.request({ type: 'submit_first_turn', sessionId, content, identity }); }
   async submitMainTurn(sessionId: string, content: string, identity: any): Promise<{ nativeTurnId: string }> { return await this.request({ type: 'submit_main_turn', sessionId, content, identity }); }
   async readThreadMetadata(sessionId: string, timeoutMs?: number) { return await this.request<{ name?: string; preview?: string; updatedAt?: number }>({ type: 'read_thread_metadata', sessionId, timeoutMs }); }
@@ -287,8 +294,10 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
   async answerUserInput(sessionId: string, requestId: string, result: unknown): Promise<void> {
     await this.request({ type: 'answer_user_input', sessionId, requestId, result });
   }
-  quiesceApp(): Promise<never> { throw new Error('Task 6 does not implement quiesceApp'); }
-  closeApp(): Promise<never> { throw new Error('Task 6 does not implement closeApp'); }
+  async quiesceApp(larkAppId: string): Promise<BtwQuiesceResult> {
+    return await this.request<BtwQuiesceResult>({ type: 'quiesce_app', larkAppId });
+  }
+  async closeApp(larkAppId: string): Promise<void> { await this.request({ type: 'close_app', larkAppId }); }
 
   async prepareBtw(input: PrepareBtwInput): Promise<PrepareBtwResult> {
     return await this.request<PrepareBtwResult>({ type: 'prepare_btw', input });
@@ -316,6 +325,10 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
 
   async listPendingProjections(larkAppId: string): Promise<BtwProjectionItem[]> {
     return await this.request<BtwProjectionItem[]>({ type: 'list_pending_projections', larkAppId });
+  }
+
+  async getBtwOperation(scope: BtwOperationScope, btwOpId: string): Promise<BtwOperation | null> {
+    return await this.request<BtwOperation | null>({ type: 'get_btw_operation', scope, btwOpId });
   }
 
   async recordProjectionFailure(

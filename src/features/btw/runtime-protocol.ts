@@ -76,6 +76,7 @@ export type BtwRuntimeCommand =
   | { type: 'record_card'; scope: BtwOperationScope; btwOpId: string; messageId: string }
   | { type: 'submit_btw'; scope: BtwOperationScope; btwOpId: string }
   | { type: 'list_pending_projections'; larkAppId: string }
+  | { type: 'get_btw_operation'; scope: BtwOperationScope; btwOpId: string }
   | { type: 'list_pending_initial_cards'; larkAppId: string }
   | { type: 'next_btw_retry_at'; larkAppId: string }
   | { type: 'record_projection_failure'; scope: BtwOperationScope; btwOpId: string; expected: { operationRevision: number; projectionRevision: number }; failure: BtwProjectionFailure }
@@ -112,6 +113,7 @@ export interface BtwRuntimeResultMap {
   list_pending_initial_cards: BtwOperation[];
   next_btw_retry_at: string | undefined;
   list_pending_projections: BtwProjectionItem[];
+  get_btw_operation: BtwOperation | null;
   record_projection_failure: { kind: 'applied' | 'stale'; operation: BtwOperation };
   ack_projection: { kind: 'applied' | 'stale'; operation: BtwOperation };
   read_thread_metadata: { name?: string; preview?: string; updatedAt?: number };
@@ -179,6 +181,7 @@ export interface BtwRuntimeClient {
   listPendingInitialCards(larkAppId: string): Promise<BtwOperation[]>;
   nextBtwRetryAt(larkAppId: string): Promise<string | undefined>;
   listPendingProjections(larkAppId: string): Promise<BtwProjectionItem[]>;
+  getBtwOperation(scope: BtwOperationScope, btwOpId: string): Promise<BtwOperation | null>;
   recordProjectionFailure(scope: BtwOperationScope, btwOpId: string, expected: { operationRevision: number; projectionRevision: number }, failure: BtwProjectionFailure): Promise<{ kind: 'applied' | 'stale'; operation: BtwOperation }>;
   ackProjection(scope: BtwOperationScope, btwOpId: string, expected: { operationRevision: number; projectionRevision: number }, outcome: BtwProjectionProviderOutcome): Promise<{ kind: 'applied' | 'stale'; operation: BtwOperation }>;
   readThreadMetadata(sessionId: string, timeoutMs?: number): Promise<{ name?: string; preview?: string; updatedAt?: number }>;

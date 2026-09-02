@@ -126,6 +126,41 @@ interface ManagedSession {
   mcpGatewayHost: SessionMcpGatewayHost | null;
   btwAdapter?: TraeBtwAdapter;
   activeTurnIdentity?: CodexRpcTurnIdentity;
+  quiesced?: boolean;
+}
+
+function projectionWatermarks(state: RuntimeState, appIds: readonly string[], sessionId?: string) {
+  return appIds.flatMap(larkAppId => state.store.listPendingBtwProjections(larkAppId)
+    .filter(item => !sessionId || item.operation.parent.botmuxSessionId === sessionId)
+    .map(item => ({
+      scope: { larkAppId, botmuxSessionId: item.operation.parent.botmuxSessionId },
+      btwOpId: item.btwOpId, projectionRevision: item.projectionRevision,
+    })));
+}
+
+function quiesceManaged(state: RuntimeState, sessions: readonly ManagedSession[]) {
+  const ids = new Set(sessions.map(managed => managed.profile.sessionId));
+  for (const managed of sessions) {
+    managed.quiesced = true;
+    for (const pending of managed.pendingUserInputs.values()) pending.reject(new Error('managed BTW session quiesced'));
+    managed.pendingUserInputs.clear();
+    // Durable state is recovered by the store's existing exact live-session
+    // reconciliation; terminal rows are intentionally left untouched.
+  }
+  const liveSessionIds = new Set([...state.managedSessions.keys()].filter(id => !ids.has(id)));
+  state.store.reconcileBtwOperations({ runtimeEpoch: state.descriptor.epoch, liveSessionIds });
+  const appIds = [...new Set(sessions.map(managed => managed.profile.larkAppId))];
+  for (const appId of appIds) publishProjectionWake(state, appId);
+  return { affectedAppIds: appIds, projectionWatermarks: projectionWatermarks(state, appIds, sessions.length === 1 ? sessions[0].profile.sessionId : undefined) };
+}
+
+function closeManaged(state: RuntimeState, sessions: readonly ManagedSession[]): void {
+  for (const managed of sessions) {
+    managed.quiesced = true;
+    managed.engine.closeOwnedProcess();
+    managed.btwAdapter?.close();
+    state.managedSessions.delete(managed.profile.sessionId);
+  }
 }
 
 const MANAGED_JOURNAL_MAX_ENTRIES = 1024;
@@ -805,6 +840,7 @@ async function handleRuntimeCommand(
     case 'submit_first_turn': {
       const managed = state.managedSessions.get(command.sessionId);
       if (!managed) throw new Error('managed btw session not found');
+      if (managed.quiesced) throw new Error('managed btw session is quiesced');
       assertManagedJournalCapacity(managed);
       managed.activeTurnIdentity = command.identity;
       try { return await managed.engine.sendFirstTurn(command.content, command.identity, async () => false); }
@@ -813,6 +849,7 @@ async function handleRuntimeCommand(
     case 'submit_main_turn': {
       const managed = state.managedSessions.get(command.sessionId);
       if (!managed) throw new Error('managed btw session not found');
+      if (managed.quiesced) throw new Error('managed btw session is quiesced');
       assertManagedJournalCapacity(managed);
       managed.activeTurnIdentity = command.identity;
       try { return await managed.engine.sendTurn(command.content, command.identity); }
@@ -866,6 +903,9 @@ async function handleRuntimeCommand(
     case 'submit_btw': {
       const operation = state.store.getBtwOperation(command.scope, command.btwOpId);
       if (!operation) throw new Error(`btw operation not found: ${command.btwOpId}`);
+      if (state.managedSessions.get(operation.parent.botmuxSessionId)?.quiesced) {
+        throw new Error('managed btw session is quiesced');
+      }
       publishProjectionWake(state, command.scope.larkAppId);
       scheduleExecutorWake(state, command.btwOpId);
       return operation;
@@ -876,6 +916,8 @@ async function handleRuntimeCommand(
       return state.store.nextBtwRetryAt(command.larkAppId);
     case 'list_pending_projections':
       return state.store.listPendingBtwProjections(command.larkAppId);
+    case 'get_btw_operation':
+      return state.store.getBtwOperation(command.scope, command.btwOpId) ?? null;
     case 'record_projection_failure': {
       const result = state.store.recordBtwProjectionFailure(command.scope, command.btwOpId, command.expected, command.failure);
       publishProjectionWake(state, command.scope.larkAppId);
@@ -888,12 +930,25 @@ async function handleRuntimeCommand(
     }
     case 'watch_projection_wakes':
       return { subscribed: true };
-    case 'quiesce_all':
-      return { affectedAppIds: [], projectionWatermarks: [] };
-    case 'shutdown_runtime':
+    case 'quiesce_session': {
+      const managed = state.managedSessions.get(command.sessionId);
+      return managed ? quiesceManaged(state, [managed]) : { affectedAppIds: [], projectionWatermarks: [] };
+    }
+    case 'close_session': {
+      const managed = state.managedSessions.get(command.sessionId);
+      if (managed) closeManaged(state, [managed]);
       return { done: true };
-    default:
-      throw new Error(`unsupported btw runtime command: ${command.type}`);
+    }
+    case 'quiesce_all':
+      return quiesceManaged(state, [...state.managedSessions.values()]);
+    case 'quiesce_app':
+      return quiesceManaged(state, [...state.managedSessions.values()].filter(managed => managed.profile.larkAppId === command.larkAppId));
+    case 'close_app':
+      closeManaged(state, [...state.managedSessions.values()].filter(managed => managed.profile.larkAppId === command.larkAppId));
+      return { done: true };
+    case 'shutdown_runtime':
+      closeManaged(state, [...state.managedSessions.values()]);
+      return { done: true };
   }
 }
 
@@ -1053,10 +1108,13 @@ function isSupportedRuntimeCommand(value: unknown): value is BtwRuntimeCommand {
     case 'next_btw_retry_at':
     case 'list_pending_projections':
     case 'watch_projection_wakes': return typeof command.larkAppId === 'string';
+    case 'get_btw_operation': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string';
     case 'record_projection_failure':
     case 'ack_projection': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && !!command.expected && typeof command.expected === 'object';
     case 'quiesce_all':
     case 'shutdown_runtime': return Object.keys(command).length === 1;
+    case 'quiesce_app':
+    case 'close_app': return typeof command.larkAppId === 'string';
     default: return false;
   }
 }

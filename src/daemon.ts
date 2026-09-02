@@ -4268,6 +4268,28 @@ function ensureBtwProjectorService(larkAppId: string): BtwProjectorService {
   return service;
 }
 
+// Host CLI owns lifecycle sequencing; this daemon owns only its app-scoped
+// Lark projection. The HMAC gate is enforced by the IPC server before routes.
+ipcRoute('POST', '/api/btw/drain-projections', async (req, res) => {
+  if (!isTrustedHostIpcRequest(req)) return jsonRes(res, 403, { ok: false, error: 'trusted_host_required' });
+  let body: { larkAppId?: unknown; watermarks?: unknown; drainMs?: unknown };
+  try { body = await readJsonBody(req); } catch { return jsonRes(res, 400, { ok: false, error: 'bad_json' }); }
+  if (body.larkAppId !== selfDaemonLarkAppId || !Array.isArray(body.watermarks)
+    || typeof body.larkAppId !== 'string'
+    || !Number.isSafeInteger(body.drainMs) || (body.drainMs as number) < 0) {
+    return jsonRes(res, 400, { ok: false, error: 'invalid_drain_request' });
+  }
+  try {
+    const result = await ensureBtwProjectorService(body.larkAppId).drainUntil({
+      watermarks: body.watermarks as import('./features/btw/types.js').BtwProjectionWatermark[],
+      drainMs: body.drainMs as number,
+    });
+    return jsonRes(res, 200, { ok: true, ...result });
+  } catch (error) {
+    return jsonRes(res, 503, { ok: false, error: error instanceof Error ? error.message : 'drain_failed' });
+  }
+});
+
 interface V3SavedWorkflowImInvocation {
   content: string;
   anchor: string;
