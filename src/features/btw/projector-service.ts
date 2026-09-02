@@ -78,13 +78,16 @@ export class BtwProjectorService {
         this.connection?.close();
         this.connection = connection;
         this.projector = this.options.createProjector(connection.client);
-        await this.drainNow();
-        this.resolveFirstScan?.();
-        this.resolveFirstScan = undefined;
         const wakes = connection.client.watchProjectionWakes(this.options.larkAppId);
         this.wakeIterator = wakes[Symbol.asyncIterator]();
         const ready = (wakes as { ready?: Promise<void> }).ready;
         await ready;
+        // The durable scan happens only after the subscription is acknowledged:
+        // pre-subscription mutations are caught by the scan, later mutations by
+        // the queued payload-free wake.
+        await this.drainNow();
+        this.resolveFirstScan?.();
+        this.resolveFirstScan = undefined;
         while (!this.stopped) {
           const next = await this.wakeIterator.next();
           if (next.done) break;
