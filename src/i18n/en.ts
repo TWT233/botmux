@@ -74,6 +74,9 @@ export const messages: Record<string, string> = {
   'btw.card.default_card_unknown': 'Whether the side-question card was created could not be confirmed',
   'btw.card.payload_too_large': 'The full answer exceeds the Lark card size limit',
   'btw.reminder.completed': 'Side question completed',
+  'btw.usage': 'Usage: /btw <question>',
+  'btw.unsupported': 'This session cannot deliver side-question answers back to Lark.',
+  'btw.legacy_warning': 'Forwarded to the terminal; the answer will appear only there and will not be sent back to Lark.',
   'card.pending.detoured_title': 'Sent',
   'card.pending.detoured_body': 'The final reply was sent to another target.',
 

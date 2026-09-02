@@ -2711,6 +2711,9 @@ function shortCorrelationId(value: string | undefined): string {
  * an owned CLI restart was fenced. Normal raw_input commands are still
  * delivered immediately (including while busy). */
 const pendingRawInputs = freshnessInputQueue.raw;
+/** Legacy BTW has no main-turn lifecycle payload and must stay distinguishable
+ * while safety gates defer literal writes. */
+const pendingLegacyBtwInputs: Extract<DaemonToWorker, { type: 'legacy_btw_raw_input' }>[] = [];
 /** Adopt messages accepted while native /rename owns the TUI. They cannot use
  *  pendingMessages because adopt writes need writeAdoptMessage's transcript
  *  baseline + complete adapter lifecycle. flushPending drains them only after
@@ -2751,6 +2754,7 @@ function hasPendingInputForFlush(): boolean {
   return pendingMessages.length > 0
     || pendingAdoptMessages.length > 0
     || pendingRawInputs.length > 0
+    || pendingLegacyBtwInputs.length > 0
     || pendingSessionRename !== null;
 }
 let nativeSessionTitleResumeUpdatedAt: number | undefined;
@@ -2992,6 +2996,20 @@ async function deliverRawInput(msg: Extract<DaemonToWorker, { type: 'raw_input' 
   // A pending /rename may have been held by the command-write mutex. It still
   // waits for a genuine prompt because isPromptReady was cleared above.
   void flushPending();
+}
+
+async function deliverLegacyBtwRawInput(
+  msg: Extract<DaemonToWorker, { type: 'legacy_btw_raw_input' }>,
+): Promise<void> {
+  const targetBackend = backend;
+  if (!targetBackend) {
+    pendingLegacyBtwInputs.push(msg);
+    return;
+  }
+  await sendRawCommandLineWithRecoveryFence(targetBackend, msg.content, () => {
+    renderer?.markNewTurn();
+    if (tmuxScrolledHalfPages > 0) exitTmuxScrollMode();
+  });
 }
 /** Inputs written to the CLI whose turn hasn't completed — re-queued across a
  *  CLI crash so a submit-time death can't silently eat user messages. */
@@ -11292,6 +11310,7 @@ async function flushPending(): Promise<void> {
   // message. It must wait for a real prompt even on type-ahead CLIs. Normal
   // pending messages can still drain while busy; the rename stays queued.
   const sessionRenameReady = isPromptReady && pendingSessionRename !== null;
+  const legacyBtwReady = isPromptReady && pendingLegacyBtwInputs.length > 0;
   const rawInputReady = isPromptReady && pendingRawInputs.length > 0;
   const adoptInputReady = isPromptReady && lastInitConfig?.adoptMode === true && pendingAdoptMessages.length > 0;
   let supportedSessionRenameReady = sessionRenameReady;
@@ -11311,7 +11330,7 @@ async function flushPending(): Promise<void> {
   // pending adopt writes re-arm inside writeAdoptMessage. Clearing readiness
   // here would make an adopt rename's in-queue readiness recheck always see a
   // synthetic false. Normal prompt/startup flushes keep the original re-arm.
-  if (!rawInputReady && !supportedSessionRenameReady && !adoptInputReady) {
+  if (!rawInputReady && !legacyBtwReady && !supportedSessionRenameReady && !adoptInputReady) {
     beginCliWriteCycle();
   }
 
@@ -11352,6 +11371,12 @@ async function flushPending(): Promise<void> {
     // Commands deferred behind a previous rename run before the latest pending
     // rename. Some passthroughs (/clear, /new) can rotate the native session;
     // applying the canonical title last keeps the resume-picker label aligned.
+    if (legacyBtwReady && pendingLegacyBtwInputs.length > 0 && backend) {
+      const legacy = pendingLegacyBtwInputs.shift();
+      if (!legacy) return;
+      await deliverLegacyBtwRawInput(legacy);
+      return;
+    }
     if (rawInputReady && pendingRawInputs.length > 0 && backend) {
       const raw = freshnessInputQueue.takeRaw();
       if (!raw) return;
@@ -19097,6 +19122,20 @@ process.on('message', async (raw: unknown) => {
         }
       } else {
         await deliverRawInput(msg);
+      }
+      break;
+    }
+
+    case 'legacy_btw_raw_input': {
+      refreshHookReviewInputHold(lastAnalyzerSnapshot || renderer?.rawSnapshot() || '');
+      if (cliRestartInProgress || rawInputRestartGate || sessionRenameInFlight()
+        || shouldHoldCodexRunnerInput(codexRunnerFreshness)
+        || injectionFlushing || shouldDeferUserFlush(pendingInjections)
+        || bareShellCheckInProgress || bareShellLaunchBlocked
+        || hookReviewInputHold) {
+        pendingLegacyBtwInputs.push(msg);
+      } else {
+        await deliverLegacyBtwRawInput(msg);
       }
       break;
     }

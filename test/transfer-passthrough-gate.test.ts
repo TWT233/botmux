@@ -150,4 +150,97 @@ describe('mid-transfer literal passthrough', () => {
       turnId: 'om_passthrough_turn',
     });
   });
+
+  it('replays legacy BTW during transfer without borrowing main-turn ids', async () => {
+    const ds = {
+      session: {
+        sessionId: 'session-transfer-btw',
+        chatId: 'oc_source',
+        rootMessageId: 'om_source',
+        title: 'btw transfer',
+        status: 'active',
+        createdAt: new Date().toISOString(),
+        scope: 'thread',
+        chatType: 'group',
+        larkAppId: 'app-transfer-passthrough',
+        ownerOpenId: 'ou_owner',
+        workingDir: '/tmp',
+        cliId: 'traex',
+      },
+      worker: null,
+      workerPort: null,
+      workerToken: null,
+      larkAppId: 'app-transfer-passthrough',
+      chatId: 'oc_source',
+      chatType: 'group',
+      scope: 'thread',
+      spawnedAt: Date.now(),
+      cliVersion: '1.0.0',
+      lastMessageAt: Date.now(),
+      hasHistory: true,
+      workingDir: '/tmp',
+      lastScreenStatus: 'idle',
+    } as DaemonSession;
+    const registry = new Map<string, DaemonSession>([
+      [sessionKey('om_source', ds.larkAppId), ds],
+    ]);
+    setActiveSessionsRegistry(registry);
+
+    let releaseDetach!: (completed: boolean) => void;
+    const detach = vi.fn(() => new Promise<boolean>((resolve) => {
+      releaseDetach = resolve;
+    }));
+    const replacementSend = vi.fn();
+    const replacement = Object.assign(new EventEmitter(), {
+      killed: false,
+      connected: true,
+      exitCode: null,
+      signalCode: null,
+      send: replacementSend,
+      kill: vi.fn(),
+    }) as any;
+    const replacementFork = vi.fn(() => {
+      ds.worker = replacement;
+    });
+
+    const moving = transferSession(
+      ds.session.sessionId,
+      'oc_target',
+      'om_target',
+      'group',
+      'chat',
+      {
+        detachWorkerImpl: detach,
+        forkWorkerImpl: replacementFork as any,
+      },
+    );
+    await vi.waitFor(() => expect(detach).toHaveBeenCalledOnce());
+
+    deliverPassthrough(
+      ds,
+      '/btw',
+      '/btw explain this change',
+      'om_source',
+      ds.larkAppId,
+      {
+        messageId: 'om_btw_turn',
+        senderOpenId: 'ou_owner',
+        senderIsBot: false,
+        substitute: false,
+      },
+    );
+
+    releaseDetach(true);
+    await expect(moving).resolves.toEqual({ ok: true });
+
+    expect(replacementFork).toHaveBeenCalledWith(ds, '', true);
+    expect(replacementSend).toHaveBeenCalledWith({
+      type: 'legacy_btw_raw_input',
+      content: '/btw explain this change',
+    });
+    expect(replacementSend).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'legacy_btw_raw_input',
+      turnId: expect.anything(),
+    }));
+  });
 });

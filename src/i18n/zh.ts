@@ -77,6 +77,9 @@ export const messages: Record<string, string> = {
   'btw.card.default_card_unknown': '旁问卡片是否已创建无法确认',
   'btw.card.payload_too_large': '完整答案超过飞书卡片大小限制',
   'btw.reminder.completed': '旁问已完成',
+  'btw.usage': '用法：/btw <问题>',
+  'btw.unsupported': '当前会话不支持旁问回传飞书。',
+  'btw.legacy_warning': '已转发到终端；答案只会出现在终端，不会回传飞书。',
   'card.pending.detoured_title': '已发送',
   'card.pending.detoured_body': '最终回复已发送到其他目标。',
 

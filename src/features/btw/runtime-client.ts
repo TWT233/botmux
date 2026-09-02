@@ -309,6 +309,10 @@ export class BtwRuntimeClientImpl implements BtwRuntimeClient {
     return await this.request<BtwOperation[]>({ type: 'list_pending_initial_cards', larkAppId });
   }
 
+  async nextBtwRetryAt(larkAppId: string): Promise<string | undefined> {
+    return await this.request<string | undefined>({ type: 'next_btw_retry_at', larkAppId });
+  }
+
   async listPendingProjections(larkAppId: string): Promise<BtwProjectionItem[]> {
     return await this.request<BtwProjectionItem[]>({ type: 'list_pending_projections', larkAppId });
   }

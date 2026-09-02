@@ -77,6 +77,28 @@ afterEach(() => {
 });
 
 describe('btw operation store', () => {
+  it('returns the earliest future retry deadline across initial-card and projection work', () => {
+    const dataDir = newDataDir();
+    const clock = createAdvancingClock();
+    const store = createStoreWithClock(dataDir, clock);
+    const first = store.prepareBtw({ ...makeBtwPrepareInput(), requestId: 'om_retry_card' }).operation;
+    const second = store.prepareBtw({ ...makeBtwPrepareInput(), requestId: 'om_retry_projection' }).operation;
+    const cardRetryAt = new Date(Date.parse(FIXED_NOW) + 20_000).toISOString();
+    const projectionRetryAt = new Date(Date.parse(FIXED_NOW) + 10_000).toISOString();
+    store.recordInitialCardAttempt(makeBtwScope(), first.btwOpId, {
+      kind: 'definitely_unsent', errorCode: 'network', message: 'retry', retryAt: cardRetryAt,
+    });
+    store.recordBtwCard(makeBtwScope(), second.btwOpId, 'om_card');
+    store.prepareBtwSubmission(makeBtwScope(), second.btwOpId, second.parent.runtimeEpoch);
+    store.recordBtwTerminal(makeBtwScope(), second.btwOpId, { status: 'completed', answer: 'done' });
+    const pending = store.listPendingBtwProjections(makeBtwScope().larkAppId)[0]!;
+    store.ackBtwProjection(makeBtwScope(), second.btwOpId, {
+      operationRevision: pending.expectedOperationRevision, projectionRevision: pending.projectionRevision,
+    }, { kind: 'retryable_failure', errorCode: 'network', message: 'retry', retryAt: projectionRetryAt });
+
+    expect(store.nextBtwRetryAt(makeBtwScope().larkAppId)).toBe(projectionRetryAt);
+  });
+
   it('partitions by exact scope hash, writes 0600 records, and preserves frozen defaults', () => {
     const dataDir = newDataDir();
     const store = createStore(dataDir);

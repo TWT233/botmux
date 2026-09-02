@@ -25,8 +25,6 @@ export const PASSTHROUGH_COMMANDS = new Set([
   // 只读 / 低副作用，飞书卡片里能直接吐文本：
   '/context', '/cost', '/mcp', '/diff',
   '/code-review', '/security-review', '/review',
-  // Codex：/btw 向当前会话追加一条旁注/引导消息
-  '/btw',
   // 推理强度调档。放全局（而非某个 adapter 的 defaultPassthroughCommands）是刻意的：
   //   ① 这里的命令本就是「尽力透传」——/plugin /mcp /btw 也并非所有 CLI 都支持，
   //      CLI 认得就生效、认不得顶多回一句 unknown-command（不崩溃 / 不损坏 / 不泄露）。
