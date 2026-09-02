@@ -2234,6 +2234,25 @@ describe('readyPattern', () => {
 });
 
 describe('traex automation trust flags', () => {
+  it('injects an explicit TraeX backend variant as a process config', () => {
+    const args = createTraexAdapter('/bin/traex').buildArgs({
+      sessionId: 'traex-variant',
+      resume: false,
+      modelBackendVariant: 'max',
+    });
+    const i = args.indexOf('model_backend_variant="max"');
+    expect(i).toBeGreaterThan(0);
+    expect(args[i - 1]).toBe('-c');
+  });
+
+  it('omits the TraeX backend-variant config when inheriting', () => {
+    const args = createTraexAdapter('/bin/traex').buildArgs({
+      sessionId: 'traex-variant',
+      resume: false,
+    });
+    expect(args.join(' ')).not.toContain('model_backend_variant');
+  });
+
   it('injects structured reasoning effort as a TraeX launch config', () => {
     const args = createTraexAdapter('/bin/traex').buildArgs({
       sessionId: 'traex-effort',

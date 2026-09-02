@@ -1433,6 +1433,8 @@ export interface BotConfig {
    * `modelChoices` for the curated candidates surfaced in `botmux setup`.
    */
   model?: string;
+  /** Optional TraeX backend variant. Missing inherits TraeX global config. */
+  modelBackendVariant?: 'standard' | 'max';
   /**
    * Per-bot dsh runner turn timeout in milliseconds. The dsh adapter forwards
    * it as `--turn-timeout-ms` to the runner, overriding the built-in 10-minute
@@ -3338,6 +3340,10 @@ export function parseBotConfigsFromText(jsonText: string): BotConfig[] {
         : undefined,
       model: typeof entry.model === 'string' && entry.model.trim()
         ? entry.model.trim()
+        : undefined,
+      modelBackendVariant: entryCliId === 'traex'
+        && (entry.modelBackendVariant === 'standard' || entry.modelBackendVariant === 'max')
+        ? entry.modelBackendVariant
         : undefined,
       // Positive integer within the arm-able bound only; anything else → undefined
       // (= runner default). See normalizeTurnTimeoutMs / MAX_TURN_TIMEOUT_MS.
