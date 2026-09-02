@@ -694,6 +694,7 @@ describe('DAEMON_COMMANDS set', () => {
     expect(DAEMON_COMMANDS.has('/cost')).toBe(false);
     expect(DAEMON_COMMANDS.has('/compact')).toBe(false);
     expect(DAEMON_COMMANDS.has('/model')).toBe(false);
+    expect(DAEMON_COMMANDS.has('/btw')).toBe(false);
     expect(DAEMON_COMMANDS.has('/usage')).toBe(false);
     expect(DAEMON_COMMANDS.has('/unknown')).toBe(false);
   });
@@ -708,6 +709,20 @@ describe('DAEMON_COMMANDS set', () => {
   it('contains the /list-slash-command lister and its /slash alias', () => {
     expect(DAEMON_COMMANDS.has('/list-slash-command')).toBe(true);
     expect(DAEMON_COMMANDS.has('/slash')).toBe(true);
+  });
+});
+
+describe('/btw command parsing and passthrough set', () => {
+  it('still parses /btw as a slash command invocation', () => {
+    expect(parseSlashCommandInvocation('/btw explain this diff')).toEqual({
+      cmd: '/btw',
+      content: '/btw explain this diff',
+    });
+  });
+
+  it('no longer exposes /btw through the generic passthrough command set', () => {
+    expect(PASSTHROUGH_COMMANDS.has('/btw')).toBe(false);
+    expect(resolvePassthroughCommands(LARK_APP_ID).has('/btw')).toBe(false);
   });
 });
 
@@ -1339,7 +1354,7 @@ describe('/vc preparation command', () => {
 
 describe('PASSTHROUGH_COMMANDS set', () => {
   it('should contain expected slash commands forwarded to CLI', () => {
-    for (const cmd of ['/compact', '/model', '/clear', '/plugin', '/usage', '/context', '/cost', '/mcp', '/diff', '/btw', '/effort']) {
+    for (const cmd of ['/compact', '/model', '/clear', '/plugin', '/usage', '/context', '/cost', '/mcp', '/diff', '/effort']) {
       expect(PASSTHROUGH_COMMANDS.has(cmd), `Expected PASSTHROUGH_COMMANDS to contain ${cmd}`).toBe(true);
     }
   });

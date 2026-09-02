@@ -165,6 +165,7 @@ import { isLocalCliOpenReady } from './services/local-cli-opener.js';
 import { RECEIVED_REACTION_EMOJI_TYPE, SUBSTITUTE_RECEIVED_REACTION_EMOJI_TYPE } from './core/pending-response.js';
 import { t as tr, botLocale, localeForBot } from './i18n/index.js';
 import { createCliAdapterSync } from './adapters/cli/registry.js';
+import { supportsManagedBtw, type BtwCapabilities } from './adapters/cli/btw.js';
 import {
   initWorkerPool,
   setActiveSessionsRegistry,
@@ -295,6 +296,10 @@ import {
 } from './core/session-title.js';
 import { settleDeferredScheduleRun } from './core/deferred-schedule-settlement.js';
 import { renderMessageListenerPrompt, refreshListenerCardTextFromResolved } from './services/message-listener.js';
+import { connectBtwRuntime } from './features/btw/runtime-client.js';
+import { btwFrozenParent, btwFrozenReplyTarget, handleBtwInvocation } from './features/btw/coordinator.js';
+import { BtwProjectorService } from './features/btw/projector-service.js';
+import { createBtwProjector } from './features/btw/projector.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
@@ -4244,6 +4249,22 @@ function configuredCodexUpdateTargets() {
 
 function tag(ds: DaemonSession): string {
   return ds.session.sessionId.substring(0, 8);
+}
+
+const btwProjectorServices = new Map<string, BtwProjectorService>();
+
+function ensureBtwProjectorService(larkAppId: string): BtwProjectorService {
+  const existing = btwProjectorServices.get(larkAppId);
+  if (existing) return existing;
+
+  const service = new BtwProjectorService({
+    larkAppId,
+    connect: () => connectBtwRuntime({ dataDir: config.session.dataDir }),
+    createProjector: runtime => createBtwProjector({ runtime }),
+    onError: error => logger.warn(`[btw] projector service ${larkAppId} reconnect failed: ${error instanceof Error ? error.message : String(error)}`),
+  });
+  btwProjectorServices.set(larkAppId, service);
+  return service;
 }
 
 interface V3SavedWorkflowImInvocation {
@@ -17145,6 +17166,67 @@ function isInitialSessionPassthrough(larkAppId: string, cmd: string): boolean {
   return resolveAdapterDefaultPassthroughCommands(larkAppId).includes(cmd);
 }
 
+function btwCapabilitiesForSession(ds: DaemonSession): BtwCapabilities {
+  const attachment = ds.session.btwRuntime;
+  // A persisted attachment exists only after prepareManagedTraeLaunch verified
+  // the frozen Trae managed capability contract. Do not infer this from cliId.
+  const attached = attachment !== undefined;
+  return {
+    nativeBtw: attached,
+    structuredTerminal: attached,
+    persistentRuntime: attached,
+    stableParentThread: attached && !!ds.session.cliSessionId,
+  };
+}
+
+async function handleDedicatedBtwCommand(
+  ds: DaemonSession,
+  anchor: string,
+  commandContent: string,
+  requestId: string,
+  larkAppId: string,
+  markAccepted?: () => void,
+): Promise<'managed' | 'legacy' | 'unsupported' | 'usage'> {
+  const parent = btwFrozenParent(ds);
+  const capabilities = btwCapabilitiesForSession(ds);
+  const question = commandContent.replace(/^\/btw\b/i, '').trim();
+  // Usage, legacy and unsupported paths must never construct a runtime.
+  const managed = supportsManagedBtw(capabilities) && parent !== null && question.length > 0;
+  const projectorService = managed ? ensureBtwProjectorService(larkAppId) : undefined;
+  const runtime = managed ? await projectorService!.runtime() : undefined;
+  const result = await handleBtwInvocation({
+      ds,
+      commandContent,
+      requestId,
+      capabilities,
+      replyTarget: btwFrozenReplyTarget(ds),
+      parent: parent ?? {
+        botmuxSessionId: ds.session.sessionId,
+        cliId: ds.session.cliId ?? ds.initConfig?.cliId ?? 'traex',
+        nativeThreadId: ds.session.cliSessionId ?? '',
+        runtimeEpoch: ds.session.btwRuntime?.epoch ?? '',
+        configHash: ds.session.btwRuntime?.configHash ?? '',
+        cwd: ds.workingDir ?? ds.session.workingDir ?? homedir(),
+      },
+      deps: {
+        ...(runtime ? { runtime } : {}),
+        projector: projectorService ?? { ensureInitialCard: async () => { throw new Error('managed BTW requires projector'); } },
+        reply: async (content, msgType = 'text') => {
+          const replyId = await sessionReply(anchor, content, msgType, larkAppId);
+          markAccepted?.();
+          return replyId;
+        },
+        sendLegacy: (message) => {
+          const accepted = sendWorkerSessionInput(ds, message);
+          if (accepted) markAccepted?.();
+          return accepted;
+        },
+      },
+    });
+  if (result === 'managed') projectorService?.wake();
+  return result;
+}
+
 /** `/fast` is a passthrough keystroke to Codex's native tier toggle — it only
  *  reaches the executor on a real paste TUI. In RPC input mode the pane is a
  *  pure viewer (turns go over JSON-RPC, keystrokes never reach the app-server),
@@ -17235,6 +17317,19 @@ function deliverPassthroughToExistingSession(
   },
 ): void {
   if ((ds.worker && !ds.worker.killed) || isSessionTransferring(ds)) {
+    if (cmd === '/btw') {
+      const accepted = sendWorkerSessionInput(ds, {
+        type: 'legacy_btw_raw_input',
+        content: commandContent,
+      });
+      if (!accepted) {
+        logger.warn(`[${anchor.substring(0, 12)}] Legacy BTW ${cmd} was not accepted by the worker`);
+        return;
+      }
+      turn.onDelivered?.();
+      logger.info(`[${anchor.substring(0, 12)}] Legacy BTW ${cmd} → worker`);
+      return;
+    }
     // Passthrough commands bypass the normal message-forwarding block, so bind
     // the accepted Lark turn before the worker rotates its marker at the PTY
     // write boundary. This helper also covers a cold-start registration race.
@@ -17971,6 +18066,15 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
     // pre-create a worker=null phantom session just to reply "no session".
     if (cmd === '/term') {
       await handleTermLinkCommand(anchor, larkAppId, chatId, senderOpenId, commandContent, invocationDeps);
+      return;
+    }
+    if (cmd === '/btw') {
+      const ds = activeSessions.get(sessionKey(anchor, larkAppId));
+      if (!ds) {
+        await invocationDeps.sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
+        return;
+      }
+      await handleDedicatedBtwCommand(ds, anchor, commandContent, messageId, larkAppId, () => markIngressAdmitted(ctx));
       return;
     }
     if (resolvePassthroughCommands(larkAppId).has(cmd)) {
@@ -19430,6 +19534,14 @@ async function handleThreadReplyAdmitted(
     const passthroughCliId = existingDs?.session.cliLaunchSnapshot?.cliId
       ?? existingDs?.session.cliId
       ?? getBot(larkAppId).config.cliId;
+    if (cmd === '/btw') {
+      if (existingDs) {
+        await handleDedicatedBtwCommand(existingDs, anchor, commandContent, parsed.messageId, larkAppId, () => markIngressAdmitted(ctx));
+      } else {
+        await invocationDeps.sessionReply(anchor, tr('daemon.cmd_needs_active_cli', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
+      }
+      return;
+    }
     if (resolvePassthroughCommands(larkAppId, passthroughCliId).has(cmd)) {
       if (!existingDs && threadChatId && isInitialSessionPassthrough(larkAppId, cmd)) {
         await startInitialPassthroughSession({
@@ -22517,6 +22629,9 @@ export async function startDaemon(botIndex?: number): Promise<void> {
 
     const vcCfg = effectiveVcMeetingAgentConfig(cfg.larkAppId);
     if (vcCfg) restoreVcMeetingRuntimeSessionsForBot(cfg.larkAppId, vcCfg);
+    void ensureBtwProjectorService(cfg.larkAppId).start().catch((error) => {
+      logger.warn(`[btw] projector service bootstrap failed for ${cfg.larkAppId}: ${error instanceof Error ? error.message : String(error)}`);
+    });
   }
 
   // Reap workers orphaned by a previous daemon that was hard-killed (SIGKILL /
@@ -23077,6 +23192,8 @@ export async function startDaemon(botIndex?: number): Promise<void> {
     // completed/failed/cancelled after the fact). Keep the queue and dispatcher
     // live through worker teardown.
     stopMaintenance();
+    await Promise.all([...btwProjectorServices.values()].map(service => service.stop({ drainMs: 500 })));
+    btwProjectorServices.clear();
     vcMeetingTerminalReconciler?.stop();
     clearInterval(vcMeetingDeliveryLeaseTimer);
     for (const timer of vcMeetingReceiverRecoveryTimers.values()) clearTimeout(timer);

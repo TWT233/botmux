@@ -154,6 +154,7 @@ export interface BtwOperationStore {
   prepareBtw(input: PrepareBtwInput): PrepareBtwResult;
   getBtwOperation(scope: BtwOperationScope, btwOpId: string): BtwOperation | undefined;
   listPendingInitialCards(larkAppId: string): BtwOperation[];
+  nextBtwRetryAt(larkAppId: string): string | undefined;
   recordInitialCardAttempt(scope: BtwOperationScope, btwOpId: string, outcome: BtwInitialCardAttemptOutcome): BtwOperation;
   recordBtwCard(scope: BtwOperationScope, btwOpId: string, messageId: string): BtwOperation;
   listExecutableBtwOperations(runtimeEpoch: string): BtwOperation[];

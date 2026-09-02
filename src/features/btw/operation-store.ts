@@ -391,6 +391,22 @@ export function createBtwOperationStore(options: {
       )
       .sort(compareOperationsForListing);
 
+  const nextBtwRetryAt = (larkAppId: string): string | undefined => {
+    const current = now().getTime();
+    const future = listAllOperations(options.dataDir)
+      .filter(operation => operation.replyTarget.larkAppId === larkAppId)
+      .flatMap(operation => {
+        const candidates: Array<string | undefined> = [];
+        if (operation.execution.state === 'card_pending') candidates.push(operation.card.nextCreateAttemptAt);
+        if (isContentProjectionPending(operation)) candidates.push(operation.projection.nextAttemptAt);
+        if (isReminderPhase(operation)) candidates.push(operation.projection.reminderNextAttemptAt);
+        return candidates;
+      })
+      .filter((value): value is string => value !== undefined && Date.parse(value) > current)
+      .sort((left, right) => Date.parse(left) - Date.parse(right));
+    return future[0];
+  };
+
   const recordInitialCardAttempt = (
     scope: BtwOperationScope,
     btwOpId: string,
@@ -765,6 +781,7 @@ export function createBtwOperationStore(options: {
     prepareBtw,
     getBtwOperation,
     listPendingInitialCards,
+    nextBtwRetryAt,
     recordInitialCardAttempt,
     recordBtwCard,
     listExecutableBtwOperations,

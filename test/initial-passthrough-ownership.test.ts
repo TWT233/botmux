@@ -117,3 +117,10 @@ describe('registration loser command handoff', () => {
     expect(region).toMatch(/if \(!prepared\) \{[\s\S]*emitHookEvent\('thread\.reply'/);
   });
 });
+
+describe('/btw is no longer an initial passthrough cold-start command', () => {
+  it('does not route /btw through the generic initial passthrough path', () => {
+    expect(src).not.toContain("cmd === '/btw' && isInitialSessionPassthrough");
+    expect(src).not.toContain("cmd: '/btw'");
+  });
+});

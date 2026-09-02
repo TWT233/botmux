@@ -7033,6 +7033,7 @@ type TransferBufferedInput = Extract<
   {
     type:
       | 'message'
+      | 'legacy_btw_raw_input'
       | 'raw_input'
       | 'inject_command'
       | 'coco_drive_picker'

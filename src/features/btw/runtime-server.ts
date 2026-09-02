@@ -872,6 +872,8 @@ async function handleRuntimeCommand(
     }
     case 'list_pending_initial_cards':
       return state.store.listPendingInitialCards(command.larkAppId);
+    case 'next_btw_retry_at':
+      return state.store.nextBtwRetryAt(command.larkAppId);
     case 'list_pending_projections':
       return state.store.listPendingBtwProjections(command.larkAppId);
     case 'record_projection_failure': {
@@ -1048,6 +1050,7 @@ function isSupportedRuntimeCommand(value: unknown): value is BtwRuntimeCommand {
     case 'record_card': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string' && typeof command.messageId === 'string';
     case 'submit_btw': return !!command.scope && typeof command.scope === 'object' && typeof command.btwOpId === 'string';
     case 'list_pending_initial_cards':
+    case 'next_btw_retry_at':
     case 'list_pending_projections':
     case 'watch_projection_wakes': return typeof command.larkAppId === 'string';
     case 'record_projection_failure':
