@@ -49,9 +49,12 @@ modelBackendVariant?: ModelBackendVariant;
    `standard` and `max` replace it. For other CLI selections the field is
    cleared regardless of body content. The response returns the normalized
    value.
-4. The session launch snapshot, daemon-to-worker init payload, and TraeX
-   adapter carry the field. The adapter appends exactly one process-local
+4. The session launch snapshot and daemon-to-worker init payload carry the
+   field. A normal TraeX adapter appends exactly one process-local
    `-c model_backend_variant=<JSON-string>` only when the frozen value exists.
+   The Codex/TraeX RPC engine writes the same key into a fresh `thread/start`
+   configuration, but never sends it on `thread/resume`; TraeX restores the
+   persisted thread configuration on resume.
 5. Runtime/card state carries the frozen variant. The session card displays it
    between model and reasoning effort, for example `GPT-5.6-Terra · Max ·
    xhigh`. Omitted means there is no extra label, because the inherited value
@@ -88,8 +91,9 @@ created before this feature.
 
 - Parsing tests prove valid TraeX values survive and non-TraeX/invalid values
   are dropped.
-- Adapter tests prove explicit values add the exact config argument and absent
-  values add none.
+- Adapter and RPC-engine tests prove fresh explicit values add the exact
+  configuration key, inherited values add none, and resume requests do not
+  restamp it.
 - Dashboard IPC tests cover persistence, clear-to-inherit, invalid 400, and
   cleanup on a CLI switch.
 - Worker/session tests prove frozen values reach fresh and resumed TraeX

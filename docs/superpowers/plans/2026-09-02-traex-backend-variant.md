@@ -116,8 +116,11 @@ git push fork HEAD:feat/traex-backend-variant
 - Modify: `src/types.ts: Session, SessionCliLaunchSnapshotV1, and daemon-to-worker init message`
 - Modify: `src/core/worker-pool.ts: sessionAgentConfig, fork clone, worker init and card usage projection`
 - Modify: `src/worker.ts: init config consumption and active-runtime publication`
+- Modify: `src/codex-rpc-engine.ts: fresh thread configuration`
 - Modify: `src/im/lark/md-card.ts: CardUsageSnapshot and cardUsageRuntimeSegment`
 - Modify: `test/fork-session.test.ts: frozen/clone and legacy-session behavior`
+- Modify: `test/codex-rpc-engine.test.ts: fresh-thread and resume config coverage`
+- Modify: `test/worker-argv-reaction-status.integration.test.ts: worker-to-TraeX argv propagation`
 - Modify: `test/md-card.test.ts: runtime text rendering`
 
 **Interfaces:**
@@ -177,8 +180,8 @@ Expected: FAIL because `CardUsageSnapshot` and its formatter do not recognize th
 
 1. Add the optional `modelBackendVariant` union to `Session`, `SessionCliLaunchSnapshotV1`, and `DaemonToWorker.init` in `src/types.ts`. New `/cli` snapshots set it to `null`; do not borrow the live bot value for a cross-CLI `/cli` selection.
 2. Extend `sessionAgentConfig` input/result and freeze logic. For a newly frozen normal TraeX session, persist `botCfg.modelBackendVariant`; for a frozen historic session with no field, leave it absent (inherit), even if the current Bot now has an explicit value. Clear it when the frozen CLI is not TraeX.
-3. Include the field in `forkSession` cloning, worker init, and `worker.ts` adapter launch options. The card projection reads `ds.session.modelBackendVariant` directly; do not invent a dynamic runtime report or make a global-config inference.
-4. Extend `CardUsageSnapshot` and `cardUsageRuntimeSegment` to render a title-cased variant between model and effort. Existing model-only and model-plus-effort output must remain byte-for-byte unchanged.
+3. Include the field in `forkSession` cloning, worker init, and `worker.ts` adapter launch options. Pass it to `CodexRpcEngine` for a fresh TraeX `thread/start`; the engine must omit it from `thread/resume`, just as it omits model and reasoning effort. Add a worker integration test that starts a fake TraeX process and asserts the observed spawn argv contains `model_backend_variant="max"`.
+4. The card projection reads `ds.session.modelBackendVariant` directly; do not invent a dynamic runtime report or make a global-config inference. Extend `CardUsageSnapshot` and `cardUsageRuntimeSegment` to render a title-cased variant between model and effort. Existing model-only and model-plus-effort output must remain byte-for-byte unchanged.
 
 - [ ] **Step 6: Run targeted lifecycle and card tests plus build**
 
