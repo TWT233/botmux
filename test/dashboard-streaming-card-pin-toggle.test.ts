@@ -967,6 +967,66 @@ describe('group manage streaming-card pin rows', () => {
     expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  it.each([
+    { action: 'leave', buttonId: 'g-leave-btn' },
+    { action: 'disband', buttonId: 'g-disband-btn' },
+  ] as const)('closes the mounted manage dialog after successful $action when a concurrent refresh removes the chat', async ({ action, buttonId }) => {
+    const chat = makeChat([makeMember()]);
+    const mutationResponse = deferred<any>();
+    const mutationStarted = deferred<void>();
+    const requests: string[] = [];
+    primeGroupsSnapshotCache({ chats: [chat], bots: [] });
+    confirmDialog.confirm.mockResolvedValueOnce(true);
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      const method = String(init?.method ?? 'GET');
+      requests.push(`${method} ${url}`);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === `/api/groups/oc_group/${action}` && method === 'POST') {
+        mutationStarted.resolve();
+        return mutationResponse.promise;
+      }
+      if (url === '/api/groups?refresh=1') {
+        return Promise.resolve(jsonResponse({ chats: [], bots: [] }));
+      }
+      throw new Error(`Unexpected request: ${method} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(1);
+    });
+
+    act(() => { renderer.root.findByProps({ className: 'manage-chat' }).props.onClick(); });
+    if (action === 'leave') {
+      act(() => {
+        renderer.root.findByProps({ name: 'leave-bot', value: 'cli_a' })
+          .props.onChange({ currentTarget: { checked: true } });
+      });
+    }
+    act(() => { renderer.root.findByProps({ id: buttonId }).props.onClick(); });
+    await mutationStarted.promise;
+
+    act(() => { renderer.root.findByProps({ id: 'g-refresh' }).props.onClick(); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ 'data-chat-unavailable': true })).toHaveLength(1);
+    });
+
+    await act(async () => {
+      mutationResponse.resolve(jsonResponse(action === 'leave'
+        ? { result: [{ larkAppId: 'cli_a', ok: true, closedSessions: [] }] }
+        : { ok: true, closedSessions: [] }));
+      await mutationResponse.promise;
+      await Promise.resolve();
+    });
+
+    expect(renderer.root.findAllByType(ManageDialog)).toHaveLength(0);
+    expect(requests).toContain(`POST /api/groups/oc_group/${action}`);
+    act(() => renderer.unmount());
+  });
+
   it('stops disbanding remaining bots when the dialog unmounts before the first request fails', async () => {
     const firstDisband = deferred<any>();
     const requests: string[] = [];

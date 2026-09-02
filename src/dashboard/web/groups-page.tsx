@@ -1246,6 +1246,7 @@ export function ManageDialog(props: {
   useEffect(() => () => {
     mountedRef.current = false;
   }, []);
+  const isMounted = useCallback(() => mountedRef.current, []);
   const isAlive = useCallback(() => mountedRef.current && availableRef.current, []);
 
   useEffect(() => {
@@ -1279,9 +1280,9 @@ export function ManageDialog(props: {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ larkAppIds: checked }),
       });
-      if (!isAlive()) return;
+      if (!isMounted()) return;
       const respBody = await r.json();
-      if (!isAlive()) return;
+      if (!isMounted()) return;
       const lines = (respBody.result ?? []).map((x: any) => {
         if (!x.ok) return `${x.larkAppId}: 失败 (${x.error ?? 'unknown'})`;
         const closed = (x.closedSessions ?? []) as any[];
@@ -1299,12 +1300,12 @@ export function ManageDialog(props: {
       }).join('\n');
       toast(lines || `Unexpected: ${JSON.stringify(respBody)}`, { kind: 'success' });
       await props.onReloadGroups({ force: true });
-      if (!isAlive()) return;
+      if (!isMounted()) return;
     } catch (err) {
-      if (!isAlive()) return;
+      if (!isMounted()) return;
       toast('Network error: ' + err, { kind: 'error' });
     } finally {
-      if (isAlive()) props.onClose();
+      if (isMounted()) props.onClose();
     }
   }
 
@@ -1324,9 +1325,9 @@ export function ManageDialog(props: {
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ larkAppId: member.larkAppId }),
         });
-        if (!isAlive()) return;
+        if (!isMounted()) return;
         const respBody = await r.json();
-        if (!isAlive()) return;
+        if (!isMounted()) return;
         if (respBody.ok) {
           const closed = (respBody.closedSessions ?? []) as any[];
           const failed = closed.filter(c => !c.ok).length;
@@ -1339,7 +1340,7 @@ export function ManageDialog(props: {
               + `${residuals.length ? `\n⚠️ ${residuals.length} 个有残留需人工清理：${residuals.join(', ')}` : ''}。`;
           toast(`已解散（由 ${member.botName ?? member.larkAppId} 执行）${closedNote}`, { kind: 'success' });
           await props.onReloadGroups({ force: true });
-          if (!isAlive()) return;
+          if (!isMounted()) return;
           props.onClose();
           return;
         }
