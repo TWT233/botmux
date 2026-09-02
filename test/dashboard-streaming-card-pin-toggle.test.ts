@@ -667,6 +667,60 @@ describe('group manage streaming-card pin rows', () => {
     }
   });
 
+  it('does not let an older forced page reload overwrite a newer successful reload', async () => {
+    const initialChat = makeChat([makeMember()], { name: 'Initial Room' });
+    const olderChat = makeChat([makeMember()], { name: 'Older Room' });
+    const newerChat = makeChat([makeMember()], { name: 'Newer Room' });
+    const olderResponse = deferred<any>();
+    const newerResponse = deferred<any>();
+    let refreshCount = 0;
+
+    primeGroupsSnapshotCache({ chats: [initialChat], bots: [] });
+    (globalThis as any).fetch = vi.fn((input: string, init?: RequestInit) => {
+      const url = String(input);
+      if (url === '/api/role-profiles') return Promise.resolve(jsonResponse({ profiles: [] }));
+      if (url === '/api/groups?refresh=1') {
+        refreshCount += 1;
+        if (refreshCount === 1) return olderResponse.promise;
+        if (refreshCount === 2) return newerResponse.promise;
+      }
+      throw new Error(`Unexpected request: ${String(init?.method ?? 'GET')} ${url}`);
+    });
+
+    renderGroupsPage({} as HTMLElement);
+    let renderer!: TestRenderer.ReactTestRenderer;
+    act(() => { renderer = TestRenderer.create(groupsPageMount.node as React.ReactElement); });
+    await waitForRender(() => {
+      expect(renderer.root.findAllByProps({ className: 'manage-chat' })).toHaveLength(1);
+    });
+    act(() => { renderer.root.findByProps({ className: 'manage-chat' }).props.onClick(); });
+
+    const reloadGroups = renderer.root.findByType(ManageDialog).props.onReloadGroups as ReloadGroups;
+    let olderReload!: Promise<unknown>;
+    let newerReload!: Promise<unknown>;
+    act(() => {
+      olderReload = reloadGroups({ force: true });
+      newerReload = reloadGroups({ force: true });
+    });
+    await vi.waitFor(() => expect(refreshCount).toBe(2));
+
+    await act(async () => {
+      newerResponse.resolve(jsonResponse({ chats: [newerChat], bots: [] }));
+      await newerReload;
+    });
+    expect(renderer.root.findByProps({ 'data-chat': 'oc_group' }).findByType('b').children.join(''))
+      .toBe('Newer Room');
+
+    await act(async () => {
+      olderResponse.resolve(jsonResponse({ chats: [olderChat], bots: [] }));
+      await olderReload;
+    });
+    expect(renderer.root.findByProps({ 'data-chat': 'oc_group' }).findByType('b').children.join(''))
+      .toBe('Newer Room');
+
+    act(() => renderer.unmount());
+  });
+
   it('does not let an older page reload overwrite the shared cache after a newer external refresh succeeds', async () => {
     const initialChat = makeChat([makeMember({ botName: 'Claude (initial)' })], { name: 'Initial Room' });
     const pageAcceptedChat = makeChat([makeMember({ botName: 'Claude (older-page)' })], { name: 'Older Page Room' });
