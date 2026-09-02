@@ -4788,8 +4788,11 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     const storedModelBackendVariant = entry.modelBackendVariant === 'standard' || entry.modelBackendVariant === 'max'
       ? entry.modelBackendVariant
       : undefined;
+    const entryUsesTraex = entry.cliId === 'traex';
     const nextModelBackendVariant = supportsModelBackendVariant
-      ? (modelBackendVariantFieldPresent ? modelBackendVariant : storedModelBackendVariant)
+      ? (modelBackendVariantFieldPresent
+        ? modelBackendVariant
+        : entryUsesTraex ? storedModelBackendVariant : undefined)
       : undefined;
     const nextReasoningEffort = supportsReasoningEffort
       ? (reasoningEffortFieldPresent ? reasoningEffort ?? undefined : entry.reasoningEffort)
@@ -4818,6 +4821,8 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     else if (modelBackendVariantFieldPresent) {
       if (modelBackendVariant) entry.modelBackendVariant = modelBackendVariant;
       else delete entry.modelBackendVariant;
+    } else if (!entryUsesTraex) {
+      delete entry.modelBackendVariant;
     }
     if (!supportsReasoningEffort) delete entry.reasoningEffort;
     else if (reasoningEffortFieldPresent) {
