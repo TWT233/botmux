@@ -1259,7 +1259,7 @@ async function engageCodexRpc(cfg: Extract<DaemonToWorker, { type: 'init' }>): P
     applySessionOwnerEnv(engineEnv, cfg.ownerOpenId);
     engine = new CodexRpcEngine({
       cliBin, cwd: cfg.workingDir, env: engineEnv, sessionId: cfg.sessionId,
-      model: cfg.model, reasoningEffort: cfg.reasoningEffort, log: (m: string) => log(m),
+      model: cfg.model, modelBackendVariant: cfg.modelBackendVariant, reasoningEffort: cfg.reasoningEffort, log: (m: string) => log(m),
       appServerFeatures: cfg.cliId === 'traex' ? ['default_mode_request_user_input'] : undefined,
       onRequestUserInput: cfg.cliId === 'traex'
         ? (params: unknown) => bridgeTraexUserInput(cfg, params)
@@ -14112,6 +14112,7 @@ async function spawnCli(
     noTransport: noTransportSession,
     locale: cfg.locale,
     model: ttadkGateway ? undefined : cfg.model,
+    modelBackendVariant: cfg.modelBackendVariant,
     // dsh runner only; other adapters ignore the field.
     turnTimeoutMs: cfg.turnTimeoutMs,
     // dsh runner only; other adapters ignore the field.
