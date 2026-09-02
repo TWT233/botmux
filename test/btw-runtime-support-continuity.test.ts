@@ -12,6 +12,7 @@ import { sessionMcpGatewaySocketPath } from '../src/core/plugins/mcp/host.js';
 import { mcpGatewayAuthTokenPath } from '../src/core/plugins/mcp/socket-auth.js';
 import type { SessionMcpRuntimeManifest } from '../src/core/plugins/mcp/session-runtime.js';
 import { tsRunnerPrefix } from './helpers/ts-runner.js';
+import { waitForExactRuntimeExit } from './helpers/btw-runtime-test-cleanup.js';
 import type { FrozenBtwSessionProfile } from '../src/features/btw/runtime-protocol.js';
 
 const dirs: string[] = [];
@@ -21,8 +22,10 @@ const managedTraeContract = { nativeBtw: true, structuredTerminal: true, stableP
 
 afterEach(async () => {
   for (const runtime of runtimes.splice(0)) {
+    const descriptor = runtime.descriptor;
     await runtime.client.shutdownRuntime().catch(() => undefined);
     runtime.close();
+    await waitForExactRuntimeExit(descriptor.pid, descriptor.startIdentity);
   }
   for (const dataDir of dirs.splice(0)) {
     rmSync(dataDir, { recursive: true, force: true });

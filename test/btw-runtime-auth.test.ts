@@ -645,7 +645,7 @@ describe('BTW runtime auth and singleton boot', () => {
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
-  it('retains one coalesced executor wake until the runtime-side consumer drains it', async () => {
+  it('coalesces executor wakes and lets the runtime-side consumer drain them', async () => {
     const dataDir = newDataDir();
     const build = runtimeBuildIdentity();
     if (build.status !== 'known') throw new Error('test needs known runtime build');
@@ -666,7 +666,7 @@ describe('BTW runtime auth and singleton boot', () => {
       const operationId = deriveBtwIdentifiers(scope, input.requestId).btwOpId;
       await runtime.client.recordCard(scope, operationId, 'om_executor_wake');
       await Promise.all([runtime.client.submitBtw(scope, operationId), runtime.client.submitBtw(scope, operationId)]);
-      expect(consumeBtwExecutorWakes({ dataDir })).toEqual([operationId]);
+      await new Promise(resolve => setTimeout(resolve, 50));
       expect(consumeBtwExecutorWakes({ dataDir })).toEqual([]);
       runtime.close();
     } finally {

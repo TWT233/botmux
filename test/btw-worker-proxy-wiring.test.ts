@@ -20,10 +20,10 @@ function cfg(over: Partial<InitCfg> = {}): InitCfg {
 }
 
 describe('managed Trae worker selection', () => {
-  it('keeps an eligible Trae launch on the local path when live native BTW capability is unavailable', () => {
+  it('requires a persisted managed attachment for an eligible Trae cold start once Task 9 enables native BTW', () => {
     expect(requiresPersistedManagedTraeAttachment({
       cliId: 'traex', resume: false, cliSessionId: undefined, hasBtwRuntime: false, codexRpcInput: true,
-    })).toBe(false);
+    })).toBe(true);
   });
 
   it('uses persistent ownership only for a Trae generation carrying a persisted attachment', () => {

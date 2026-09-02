@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { PersistentTraeRpcProxy } from '../src/codex-rpc-session.js';
 import { connectBtwRuntime } from '../src/features/btw/runtime-client.js';
 import type { FrozenBtwSessionProfile } from '../src/features/btw/runtime-protocol.js';
+import { waitForExactRuntimeExit } from './helpers/btw-runtime-test-cleanup.js';
 
 const dirs: string[] = [];
 const fakeCli = fileURLToPath(new URL('./fixtures/fake-codex-rpc-server.mjs', import.meta.url));
@@ -16,8 +17,10 @@ afterEach(async () => {
   for (const dataDir of dirs.splice(0)) {
     const runtime = await connectBtwRuntime({ dataDir }).catch(() => undefined);
     if (runtime) {
+      const descriptor = runtime.descriptor;
       await runtime.client.shutdownRuntime().catch(() => undefined);
       runtime.close();
+      await waitForExactRuntimeExit(descriptor.pid, descriptor.startIdentity);
     }
     rmSync(dataDir, { recursive: true, force: true });
   }
@@ -68,6 +71,21 @@ describe('PersistentTraeRpcProxy', () => {
 });
 
 describe('managed BTW runtime session commands', () => {
+  it('waits for the exact runtime identity to exit after shutdown acknowledgement', async () => {
+    const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-runtime-shutdown-ack-'));
+    dirs.push(dataDir);
+    const runtime = await connectBtwRuntime({ dataDir });
+    try {
+      const descriptor = runtime.descriptor;
+      await runtime.client.shutdownRuntime();
+      runtime.close();
+
+      await waitForExactRuntimeExit(descriptor.pid, descriptor.startIdentity);
+    } finally {
+      runtime.close();
+    }
+  }, 20_000);
+
   it('rejects a Trae launch contract missing a managed capability before retaining an app server or attachment', async () => {
     chmodSync(fakeCli, 0o755);
     const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-capability-denial-'));
@@ -120,6 +138,7 @@ describe('managed BTW runtime session commands', () => {
     expect(second.attachment.appServerUrl).toBe(ensured.attachment.appServerUrl);
     expect(second.attachment.nativeThreadId).toBe(ensured.attachment.nativeThreadId);
     await second.detach();
+    await runtime.client.shutdownRuntime();
     runtime.close();
   }, 20_000);
 
@@ -183,6 +202,7 @@ describe('managed BTW runtime session commands', () => {
     });
 
     await second.detach();
+    await runtime.client.shutdownRuntime();
     runtime.close();
   }, 20_000);
 });

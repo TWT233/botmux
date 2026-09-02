@@ -32,7 +32,7 @@ export type ManagedBtwLaunchContract = Omit<BtwCapabilities, 'persistentRuntime'
 
 export function managedBtwLaunchContract(cliId: string): ManagedBtwLaunchContract | undefined {
   if (cliId !== 'traex') return undefined;
-  return { nativeBtw: false, structuredTerminal: true, stableParentThread: true };
+  return { nativeBtw: true, structuredTerminal: true, stableParentThread: true };
 }
 
 export function supportsManagedBtw(capabilities: BtwCapabilities): boolean {

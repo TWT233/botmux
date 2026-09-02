@@ -1,7 +1,7 @@
 // Stateful Codex app-server session.  The legacy CodexRpcEngine remains the
 // worker-facing compatibility facade while this class is the reusable owner of
 // one app-server process, its WebSocket and native-turn routing state.
-import { CodexRpcEngineCore, type CodexRpcEngineOpts, type CodexRpcTurnIdentity } from './codex-rpc-engine.js';
+import { CodexRpcEngineCore, type CodexRpcEngineOpts, type CodexRpcNativeToolEvent, type CodexRpcTurnIdentity } from './codex-rpc-engine.js';
 import type { BtwFirstTurnResult, BtwRuntimeClient } from './features/btw/runtime-protocol.js';
 
 export type CodexRpcDispatchBoundaryResult =
@@ -14,11 +14,22 @@ export interface CodexRpcDispatchBoundaryOpts {
   fatalOnTimeout?: boolean;
   /** Testable client-side boundary: runs immediately before WebSocket.send. */
   beforeSend?: () => void;
+  /** Runs only after WebSocket.send accepted the JSON-RPC frame. */
+  onDispatched?: () => Promise<void> | void;
 }
 
 export interface CodexRpcSessionOpts extends CodexRpcEngineOpts {
   /** Receives parsed app-server notifications without introducing another WS parser. */
   onNotification?: (notification: { method: string; params: unknown }) => void;
+  /** BTW-only seam: native tool activity attributed by exact native turn id. */
+  onNativeToolEvent?: (event: CodexRpcNativeToolEvent) => void;
+}
+
+export interface CodexRpcSessionObserver {
+  onTurnTerminal?: CodexRpcEngineOpts['onTurnTerminal'];
+  onBtwTurnTerminal?: CodexRpcEngineOpts['onBtwTurnTerminal'];
+  onDuplicateTurnTerminal?: CodexRpcEngineOpts['onDuplicateTurnTerminal'];
+  onNativeToolEvent?: (event: CodexRpcNativeToolEvent) => void;
 }
 
 /**
@@ -29,12 +40,27 @@ export interface CodexRpcSessionOpts extends CodexRpcEngineOpts {
  */
 export class CodexRpcSession extends CodexRpcEngineCore {
   private observerAttached = true;
+  private readonly observers = new Set<CodexRpcSessionObserver>();
 
   constructor(opts: CodexRpcSessionOpts) {
     super({
       ...opts,
       onDead: () => { if (this.observerAttached) opts.onDead?.(); },
-      onTurnTerminal: terminal => { if (this.observerAttached) opts.onTurnTerminal?.(terminal); },
+      onTurnTerminal: terminal => {
+        if (!this.observerAttached) return;
+        opts.onTurnTerminal?.(terminal);
+        for (const observer of this.observers) observer.onTurnTerminal?.(terminal);
+      },
+      onBtwTurnTerminal: async terminal => {
+        if (!this.observerAttached) return;
+        await opts.onBtwTurnTerminal?.(terminal);
+        await Promise.all([...this.observers].map(observer => observer.onBtwTurnTerminal?.(terminal)));
+      },
+      onDuplicateTurnTerminal: terminal => {
+        if (!this.observerAttached) return;
+        opts.onDuplicateTurnTerminal?.(terminal);
+        for (const observer of this.observers) observer.onDuplicateTurnTerminal?.(terminal);
+      },
       onRequestUserInput: async params => {
         if (!this.observerAttached || !opts.onRequestUserInput) return { answers: {} };
         return opts.onRequestUserInput(params);
@@ -44,12 +70,30 @@ export class CodexRpcSession extends CodexRpcEngineCore {
         // dedicated callback; ordinary notifications remain exactly once here.
         if (this.observerAttached && !notification.method.startsWith('turn/')) opts.onNotification?.(notification);
       },
+      onNativeToolEvent: event => {
+        if (!this.observerAttached) return;
+        opts.onNativeToolEvent?.(event);
+        for (const observer of this.observers) observer.onNativeToolEvent?.(event);
+      },
     });
+  }
+
+  observe(observer: CodexRpcSessionObserver): () => void {
+    this.observers.add(observer);
+    return () => { this.observers.delete(observer); };
   }
 
   /** Bind a native turn before submitting bytes when its owner is already known. */
   registerNativeTurnOwner(nativeTurnId: string, owner: CodexRpcTurnIdentity): void {
     super.registerNativeTurnOwner(nativeTurnId, owner);
+  }
+
+  registerNativeBtwTurnOwner(nativeTurnId: string, owner: CodexRpcTurnIdentity): void {
+    super.registerNativeBtwTurnOwner(nativeTurnId, owner);
+  }
+
+  releaseNativeBtwTurnOwner(nativeTurnId: string, owner: CodexRpcTurnIdentity): void {
+    super.releaseNativeBtwTurnOwner(nativeTurnId, owner);
   }
 
   /**

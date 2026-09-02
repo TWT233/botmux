@@ -17,6 +17,7 @@ import type { CodexRpcTurnIdentity } from '../../codex-rpc-engine.js';
 import { startSessionMcpGatewayHost, type SessionMcpGatewayHost } from '../../core/plugins/mcp/host.js';
 import { MCP_GATEWAY_REQUIRED_ENV, MCP_GATEWAY_SOCKET_ENV } from '../../core/plugins/mcp/environment.js';
 import { applySessionOwnerEnv } from '../../utils/child-env.js';
+import { createTraeBtwAdapter, type TraeBtwAdapter } from './trae-adapter.js';
 import {
   BTW_RUNTIME_PROTOCOL_VERSION,
   type BtwProjectionWake,
@@ -27,6 +28,8 @@ import {
   type BtwRuntimeResultMap,
   type BtwRuntimeNotification,
 } from './runtime-protocol.js';
+import type { BtwAdapter, BtwNativeTerminalOutcome } from '../../adapters/cli/btw.js';
+import { deriveBtwIdentifiers, type BtwOperation, type BtwOperationScope } from './types.js';
 
 const AUTH_TIMEOUT_MS = 2_000;
 const MAX_AUTH_BYTES = 1024;
@@ -106,6 +109,8 @@ interface RuntimeState {
   projectionWakeScheduled: boolean;
   executorWakeQueue: BtwExecutorWakeQueue;
   executorWakeScheduled: boolean;
+  executorInFlight: Set<string>;
+  shuttingDown: boolean;
   managedSessions: Map<string, ManagedSession>;
 }
 
@@ -119,6 +124,7 @@ interface ManagedSession {
   subscribers: Set<Socket>;
   pendingUserInputs: Map<string, { resolve(result: unknown): void; reject(error: Error): void }>;
   mcpGatewayHost: SessionMcpGatewayHost | null;
+  btwAdapter?: TraeBtwAdapter;
   activeTurnIdentity?: CodexRpcTurnIdentity;
 }
 
@@ -244,9 +250,15 @@ async function ensureManagedSession(
         }
       });
     },
-    onDead: () => publishManagedNotification(managed, {
-      kind: 'app_server_dead', payload: { errorCode: 'app_server_dead', message: 'Trae app server exited' },
-    }),
+    onDead: () => {
+      publishManagedNotification(managed, {
+        kind: 'app_server_dead', payload: { errorCode: 'app_server_dead', message: 'Trae app server exited' },
+      });
+      managed.btwAdapter?.close();
+      managed.btwAdapter = undefined;
+      state.managedSessions.delete(profile.sessionId);
+      reconcileBtwForLiveSessions(state);
+    },
   });
   managed = {
     profile, engine, appServerUrl: '', nativeThreadId: '', nextSeq: 0, journal: [], subscribers: new Set(), pendingUserInputs: new Map(), mcpGatewayHost,
@@ -258,6 +270,9 @@ async function ensureManagedSession(
       : await engine.startThread();
     managed.appServerUrl = engine.wsUrl;
     state.managedSessions.set(profile.sessionId, managed);
+    for (const operation of state.store.listExecutableBtwOperations(state.descriptor.epoch)) {
+      if (operation.parent.botmuxSessionId === profile.sessionId) scheduleExecutorWake(state, operation.btwOpId);
+    }
     return { attachment: managedAttachment(state, managed), capabilities: admissionCapabilities(profile, true), configDrift: false };
   } catch (error) {
     await mcpGatewayHost?.close().catch(() => undefined);
@@ -432,6 +447,10 @@ function removePublishedDescriptor(paths: RuntimePaths): void {
   try { unlinkSync(paths.descriptorPath); } catch { /* absent or concurrently removed */ }
 }
 
+function removePublishedToken(paths: RuntimePaths): void {
+  try { unlinkSync(paths.tokenPath); } catch { /* absent or concurrently removed */ }
+}
+
 function readDescriptor(paths: RuntimePaths): RuntimeDescriptorOnDisk {
   const raw = JSON.parse(readFileSync(paths.descriptorPath, 'utf8')) as Record<string, unknown>;
   const descriptor = {
@@ -592,9 +611,178 @@ function publishProjectionWake(state: RuntimeState, larkAppId: string): void {
 }
 
 function scheduleExecutorWake(state: RuntimeState, btwOpId: string): void {
+  if (state.shuttingDown) return;
   state.executorWakeQueue.enqueue(btwOpId);
-  // Coalescing is represented by the retained Set. Task 9 calls the explicit
-  // consumer above; Task 6 deliberately has no automatic dispatcher.
+  if (state.executorWakeScheduled) return;
+  state.executorWakeScheduled = true;
+  const timer = setTimeout(() => {
+    state.executorWakeScheduled = false;
+    void drainExecutorQueue(state);
+  }, 0);
+  timer.unref?.();
+}
+
+function operationScope(operation: BtwOperation) {
+  return {
+    larkAppId: operation.replyTarget.larkAppId,
+    botmuxSessionId: operation.parent.botmuxSessionId,
+  };
+}
+
+function executorKey(operation: BtwOperation): string {
+  return `${operation.replyTarget.larkAppId}\0${operation.parent.botmuxSessionId}\0${operation.btwOpId}`;
+}
+
+function scopeKey(scope: BtwOperationScope): string {
+  return `${scope.larkAppId}\0${scope.botmuxSessionId}`;
+}
+
+function findBtwOperationByNativeTurnId(
+  state: RuntimeState,
+  scope: BtwOperationScope,
+  requestId: string,
+  nativeTurnId: string,
+): BtwOperation | undefined {
+  const btwOpId = deriveBtwIdentifiers(scope, requestId).btwOpId;
+  const operation = state.store.getBtwOperation(scope, btwOpId);
+  if (!operation || operation.execution.nativeTurnId !== nativeTurnId) return undefined;
+  return operation;
+}
+
+function findBtwOperationByRequestId(
+  state: RuntimeState,
+  scope: BtwOperationScope,
+  requestId: string,
+): BtwOperation | undefined {
+  return state.store.getBtwOperation(scope, deriveBtwIdentifiers(scope, requestId).btwOpId);
+}
+
+function resolveBtwAdapter(state: RuntimeState, operation: BtwOperation): BtwAdapter | undefined {
+  const managed = state.managedSessions.get(operation.parent.botmuxSessionId);
+  if (!managed) return undefined;
+  if (managed.profile.cliId !== 'traex') return undefined;
+  if (!supportsManagedBtw(admissionCapabilities(managed.profile, true))) return undefined;
+  if (managed.profile.configHash !== operation.parent.configHash) return undefined;
+  if (managed.nativeThreadId !== operation.parent.nativeThreadId) return undefined;
+  if (state.descriptor.epoch !== operation.parent.runtimeEpoch) return undefined;
+  if (managed.btwAdapter) return managed.btwAdapter;
+  const frozenScope: BtwOperationScope = {
+    larkAppId: managed.profile.larkAppId,
+    botmuxSessionId: managed.profile.sessionId,
+  };
+  managed.btwAdapter = createTraeBtwAdapter({
+    session: managed.engine,
+    threadId: managed.nativeThreadId,
+    runtimeEpoch: state.descriptor.epoch,
+    nativeTurnIdForRequest: (requestId) => {
+      // `prepareBtwSubmission` intentionally removes this operation from the
+      // executable scan before adapter.run() asks for its durable native ID.
+      // The frozen request scope deterministically derives the operation key.
+      const current = findBtwOperationByRequestId(state, frozenScope, requestId);
+      if (!current) throw new Error(`btw operation not found for request: ${requestId}`);
+      return current.execution.nativeTurnId;
+    },
+    onFrameState: async event => {
+      const current = findBtwOperationByNativeTurnId(state, frozenScope, event.requestId, event.nativeTurnId);
+      if (!current) return;
+      const scope = operationScope(current);
+      if (event.state === 'acknowledged') {
+        state.store.recordBtwRunning(scope, current.btwOpId, event.nativeTurnId);
+        return;
+      }
+      if (event.state === 'definitely_unsent') {
+        state.store.recordBtwDefinitelyUnsent(scope, current.btwOpId, event.runtimeEpoch);
+        return;
+      }
+      if (event.state === 'may_have_been_sent') return;
+    },
+    onTerminal: async event => {
+      const current = findBtwOperationByNativeTurnId(state, frozenScope, event.requestId, event.nativeTurnId);
+      if (!current) return;
+      const scope = operationScope(current);
+      state.store.recordBtwTerminal(scope, current.btwOpId, event.terminal);
+      publishProjectionWake(state, scope.larkAppId);
+    },
+  });
+  return managed.btwAdapter;
+}
+
+function reconcileBtwForLiveSessions(state: RuntimeState): void {
+  for (const operation of state.store.reconcileBtwOperations({
+    runtimeEpoch: state.descriptor.epoch,
+    liveSessionIds: new Set(state.managedSessions.keys()),
+  })) {
+    publishProjectionWake(state, operation.replyTarget.larkAppId);
+  }
+}
+
+async function executeBtwOperation(state: RuntimeState, operation: BtwOperation): Promise<void> {
+  if (state.shuttingDown) return;
+  const adapter = resolveBtwAdapter(state, operation);
+  if (!adapter) return;
+  const scope = operationScope(operation);
+  const prepared = state.store.prepareBtwSubmission(scope, operation.btwOpId, state.descriptor.epoch);
+  publishProjectionWake(state, scope.larkAppId);
+  const outcome = await adapter.run({
+    requestId: prepared.requestId,
+    question: prepared.question,
+  });
+  const latest = state.store.getBtwOperation(scope, operation.btwOpId);
+  if (!latest || latest.execution.state === 'submit_prepared' && latest.execution.frameState === 'definitely_unsent') {
+    scheduleExecutorWake(state, operation.btwOpId);
+    return;
+  }
+  if (outcome.status === 'submission_unknown') {
+    state.store.recordBtwSubmissionUnknown(scope, operation.btwOpId, outcome.message ?? 'btw submission result unknown');
+    publishProjectionWake(state, scope.larkAppId);
+  } else if (outcome.status === 'failed' || outcome.status === 'cancelled' || outcome.status === 'completed') {
+    state.store.recordBtwTerminal(scope, operation.btwOpId, outcome as BtwNativeTerminalOutcome);
+    publishProjectionWake(state, scope.larkAppId);
+  }
+}
+
+function recordBtwExecutorFailure(state: RuntimeState, operation: BtwOperation, error: unknown): void {
+  const scope = operationScope(operation);
+  const message = error instanceof Error ? error.message : String(error);
+  const latest = state.store.getBtwOperation(scope, operation.btwOpId);
+  if (!latest) return;
+  if (latest.execution.state === 'submit_prepared' && latest.execution.frameState === 'definitely_unsent') {
+    scheduleExecutorWake(state, operation.btwOpId);
+    return;
+  }
+  if (latest.execution.state === 'submit_prepared' && latest.execution.frameState === 'may_have_been_sent') {
+    state.store.recordBtwSubmissionUnknown(scope, operation.btwOpId, message);
+    publishProjectionWake(state, scope.larkAppId);
+    return;
+  }
+  if (latest.execution.state === 'running' || latest.execution.state === 'submission_unknown') {
+    state.store.recordBtwTerminal(scope, operation.btwOpId, {
+      status: 'failed',
+      errorCode: 'btw_executor_error',
+      message,
+    });
+    publishProjectionWake(state, scope.larkAppId);
+  }
+}
+
+async function drainExecutorQueue(state: RuntimeState): Promise<void> {
+  if (state.shuttingDown) return;
+  state.executorWakeQueue.consume();
+  const executable = state.store.listExecutableBtwOperations(state.descriptor.epoch);
+  for (const operation of executable) {
+    const key = executorKey(operation);
+    if (state.executorInFlight.has(key)) continue;
+    state.executorInFlight.add(key);
+    void executeBtwOperation(state, operation)
+      .catch(error => {
+        try { recordBtwExecutorFailure(state, operation, error); }
+        catch { /* the runtime keeps running; a later reconcile handles the record */ }
+      })
+      .finally(() => {
+        state.executorInFlight.delete(key);
+        if (state.executorWakeQueue.size > 0) scheduleExecutorWake(state, operation.btwOpId);
+      });
+  }
 }
 
 async function handleRuntimeCommand(
@@ -672,6 +860,7 @@ async function handleRuntimeCommand(
     case 'record_card': {
       const operation = state.store.recordBtwCard(command.scope, command.btwOpId, command.messageId);
       publishProjectionWake(state, command.scope.larkAppId);
+      scheduleExecutorWake(state, command.btwOpId);
       return operation;
     }
     case 'submit_btw': {
@@ -904,6 +1093,7 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
   const deadline = Date.now() + STARTUP_PUBLICATION_TIMEOUT_MS;
   while (Date.now() < deadline) {
     let waitingForDeadParentClaim = false;
+    let waitingForLiveUnauthenticatedRuntime = false;
     await withFileLock(paths.lockPath, async () => {
       let live: RuntimeDescriptorOnDisk | undefined;
       try {
@@ -919,7 +1109,8 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
           // would make callers wait for a publication that can never occur, or
           // tempt a later change to replace a process we have not authenticated.
           if (await authenticatePublishedRuntime(paths, live)) return;
-          throw new Error('btw runtime is live but unavailable or unauthenticated');
+          waitingForLiveUnauthenticatedRuntime = true;
+          return;
         }
         // A marker is only an in-flight-publication lease while no descriptor
         // exists.  Once we have rejected a published descriptor (especially
@@ -1003,6 +1194,9 @@ export async function ensureBtwRuntime(input: EnsureRuntimeInput): Promise<BtwRu
       // child has not atomically published both descriptor and token yet
     }
     if (waitingForDeadParentClaim) await runtimeTestHooks?.onStartupClaimLeaseWait?.();
+    if (waitingForLiveUnauthenticatedRuntime && Date.now() + STARTUP_POLL_MS >= deadline) {
+      throw new Error('btw runtime is live but unavailable or unauthenticated');
+    }
     await new Promise(resolvePromise => {
       const timer = setTimeout(resolvePromise, STARTUP_POLL_MS);
       timer.unref?.();
@@ -1036,11 +1230,15 @@ export async function connectBtwRuntime(input: ConnectRuntimeInput): Promise<{
 export async function shutdownRuntime(input: { dataDir: string }): Promise<void> {
   const state = runtimeStates.get(canonicalDataDir(input.dataDir));
   if (!state) return;
+  const paths = runtimePaths(input.dataDir);
+  state.shuttingDown = true;
   for (const managed of state.managedSessions.values()) {
     for (const pending of managed.pendingUserInputs.values()) {
       pending.reject(new Error('managed Trae runtime shutting down'));
     }
     managed.pendingUserInputs.clear();
+    managed.btwAdapter?.close();
+    managed.btwAdapter = undefined;
     managed.engine.closeOwnedProcess();
     await managed.mcpGatewayHost?.close().catch(() => undefined);
   }
@@ -1053,6 +1251,10 @@ export async function shutdownRuntime(input: { dataDir: string }): Promise<void>
     state.server.close(() => resolvePromise());
   });
   runtimeStates.delete(canonicalDataDir(input.dataDir));
+  cleanupSocketFile(paths.socketPath);
+  removePublishedDescriptor(paths);
+  removePublishedToken(paths);
+  removeStartupMarker(paths);
 }
 
 export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
@@ -1109,7 +1311,7 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
 
   writeToken(paths, token);
   writeDescriptor(paths, descriptor);
-  runtimeStates.set(dataDir, {
+  const state = {
     dataDir,
     server,
     store,
@@ -1121,6 +1323,13 @@ export async function runBtwRuntime(input: { dataDir: string }): Promise<void> {
     projectionWakeScheduled: false,
     executorWakeQueue: new RetainedBtwExecutorWakeQueue(),
     executorWakeScheduled: false,
+    executorInFlight: new Set(),
+    shuttingDown: false,
     managedSessions: new Map(),
-  });
+  } satisfies RuntimeState;
+  runtimeStates.set(dataDir, state);
+  reconcileBtwForLiveSessions(state);
+  for (const operation of store.listExecutableBtwOperations(descriptor.epoch)) {
+    scheduleExecutorWake(state, operation.btwOpId);
+  }
 }
