@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterEach } from 'vitest';
 import { chmodSync, mkdirSync, writeFileSync, existsSync, rmSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { spawn, execFileSync } from 'node:child_process';
@@ -6,18 +6,29 @@ import { homedir, tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { CodexRpcEngine } from '../src/codex-rpc-engine.js';
 import { CodexRpcSession } from '../src/codex-rpc-session.js';
+import { cleanupRegisteredFakeAppServers } from './helpers/btw-runtime-test-cleanup.js';
 
 const isAlive = (pid: number) => { try { process.kill(pid, 0); return true; } catch { return false; } };
 
 // A real subprocess app-server stand-in (HTTP /readyz + JSON-RPC WS on one port).
 const FIXTURE = fileURLToPath(new URL('./fixtures/fake-codex-rpc-server.mjs', import.meta.url));
+const fakePidDir = join(tmpdir(), `botmux-codex-rpc-fake-pids-${process.pid}`);
 beforeAll(() => { chmodSync(FIXTURE, 0o755); });
+afterEach(async () => {
+  await cleanupRegisteredFakeAppServers({ pidDir: fakePidDir, fixturePath: FIXTURE });
+});
+
+function testEnv(over: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  return { ...process.env, FAKE_PID_DIR: fakePidDir, ...over };
+}
 
 function makeEngine(over: Partial<ConstructorParameters<typeof CodexRpcEngine>[0]> = {}) {
+  const env = testEnv(over.env ?? {});
   return new CodexRpcEngine({
-    cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+    cliBin: FIXTURE, cwd: '/tmp', env,
     sessionId: `test-${Math.round(performance.now())}-${over.sessionId ?? ''}`,
     ...over,
+    env,
   });
 }
 const owner = (turnId: string, dispatchAttempt?: number) => ({
@@ -667,7 +678,7 @@ describe('CodexRpcEngine — failure/recovery paths', () => {
 describe('CodexRpcSession — dispatch boundary', () => {
   it('distinguishes definitely-unsent from accepted-frame unknown and registers an owner before send', async () => {
     const session = new CodexRpcSession({
-      cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+      cliBin: FIXTURE, cwd: '/tmp', env: testEnv(),
       sessionId: `dispatch-boundary-${Math.round(performance.now())}`,
       requestTimeoutMs: 250,
     });
@@ -676,7 +687,7 @@ describe('CodexRpcSession — dispatch boundary', () => {
 
     const terminals: any[] = [];
     const ownerSession = new CodexRpcSession({
-      cliBin: FIXTURE, cwd: '/tmp', env: process.env,
+      cliBin: FIXTURE, cwd: '/tmp', env: testEnv(),
       sessionId: `dispatch-owner-${Math.round(performance.now())}`,
       onTurnTerminal: terminal => terminals.push(terminal),
     });
@@ -707,7 +718,7 @@ describe('CodexRpcSession — dispatch boundary', () => {
 
     const ackDroppingSession = new CodexRpcSession({
       cliBin: FIXTURE, cwd: '/tmp',
-      env: { ...process.env, FAKE_HANG_TURN: '1' },
+      env: testEnv({ FAKE_HANG_TURN: '1' }),
       sessionId: `dispatch-boundary-drop-ack-${Math.round(performance.now())}`,
       requestTimeoutMs: 50,
     });
@@ -726,7 +737,7 @@ describe('CodexRpcSession — dispatch boundary', () => {
   it('keeps a dispatch boundary private to its request while unrelated RPC traffic proceeds', async () => {
     const session = new CodexRpcSession({
       cliBin: FIXTURE, cwd: '/tmp',
-      env: { ...process.env, FAKE_DELAY_THREAD_READ_MS: '100' },
+      env: testEnv({ FAKE_DELAY_THREAD_READ_MS: '100' }),
       sessionId: `dispatch-concurrent-${Math.round(performance.now())}`,
     });
     await session.start();
@@ -747,7 +758,7 @@ describe('CodexRpcSession — dispatch boundary', () => {
     const inputs: any[] = [];
     const session = new CodexRpcSession({
       cliBin: FIXTURE, cwd: '/tmp',
-      env: { ...process.env, FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1' },
+      env: testEnv({ FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1' }),
       sessionId: `notifications-${Math.round(performance.now())}`,
       onNotification: notification => notifications.push(notification),
       onTurnTerminal: terminal => terminals.push(terminal),
@@ -763,11 +774,95 @@ describe('CodexRpcSession — dispatch boundary', () => {
     session.closeOwnedProcess();
   }, 20_000);
 
+  it('surfaces native tool events keyed by native turn id for BTW enforcement', async () => {
+    const toolEvents: any[] = [];
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: testEnv({ FAKE_BTW_MODE: 'tool-request' }),
+      sessionId: `native-tool-events-${Math.round(performance.now())}`,
+      // Task 9 narrow seam: BTW must be able to distinguish a tool event from
+      // ordinary notifications and attribute it to the exact native turn.
+      onNativeToolEvent: event => toolEvents.push(event),
+    } as any);
+    try {
+      await session.start();
+      await session.startThread();
+      session.registerNativeTurnOwner('native-tool', owner('btw-tool-owner', 1));
+      await session.requestWithDispatchBoundary(
+        'turn/btw',
+        { threadId: session.activeThreadId, turnId: 'native-tool', question: 'use a tool' },
+        {},
+      ).catch(() => undefined);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      expect(toolEvents).toEqual([expect.objectContaining({
+        nativeTurnId: 'native-tool',
+        kind: 'request',
+        method: 'item/tool/call',
+        identity: { turnId: 'btw-tool-owner', dispatchAttempt: 1 },
+      })]);
+    } finally {
+      session.closeOwnedProcess();
+    }
+  }, 20_000);
+
+  it('retains native BTW ownership until async terminal persistence resolves', async () => {
+    let releaseTerminal!: () => void;
+    const terminalPersisted = new Promise<void>(resolve => { releaseTerminal = resolve; });
+    const terminalOrder: string[] = [];
+    const duplicateTerminals: any[] = [];
+    const session = new CodexRpcSession({
+      cliBin: FIXTURE, cwd: '/tmp',
+      env: testEnv({
+        FAKE_BTW_MODE: 'terminal-before-ack',
+        FAKE_CONFLICTING_TERMINAL: '1',
+        FAKE_BTW_MAP: JSON.stringify({
+          'native-owned-until-persisted': { answer: 'first terminal', ackDelayMs: 30 },
+        }),
+      }),
+      sessionId: `native-btw-owner-release-${Math.round(performance.now())}`,
+      onTurnTerminal: terminal => {
+        terminalOrder.push(`main:${terminal.status}`);
+      },
+      onBtwTurnTerminal: async terminal => {
+        await terminalPersisted;
+        terminalOrder.push(`done:${terminal.status}`);
+      },
+      onDuplicateTurnTerminal: terminal => duplicateTerminals.push(terminal),
+    } as any);
+    try {
+      await session.start();
+      await session.startThread();
+      session.registerNativeBtwTurnOwner('native-owned-until-persisted', owner('btw-owned', 1));
+      const run = session.requestWithDispatchBoundary(
+        'turn/btw',
+        { threadId: session.activeThreadId, turnId: 'native-owned-until-persisted', question: 'hold terminal persistence' },
+        {},
+      );
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect(terminalOrder).toEqual([]);
+      expect((session as any).turnOwners.has('native-owned-until-persisted')).toBe(true);
+
+      releaseTerminal();
+      await expect(run).resolves.toMatchObject({ kind: 'acknowledged' });
+      await new Promise(resolve => setTimeout(resolve, 50));
+      expect((session as any).turnOwners.has('native-owned-until-persisted')).toBe(false);
+      expect(terminalOrder).toEqual(['done:completed']);
+      expect(duplicateTerminals).toEqual([expect.objectContaining({
+        nativeTurnId: 'native-owned-until-persisted',
+        status: 'failed',
+        errorCode: 'fake_conflicting_terminal',
+      })]);
+    } finally {
+      releaseTerminal();
+      session.closeOwnedProcess();
+    }
+  }, 20_000);
+
   it('detachObserver suppresses all callbacks without killing its child; closeOwnedProcess is destructive', async () => {
     let callbackCount = 0;
     const session = new CodexRpcSession({
       cliBin: FIXTURE, cwd: '/tmp',
-      env: { ...process.env, FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1', FAKE_DIE_AFTER_MS: '600' },
+      env: testEnv({ FAKE_NOTIFY_ON_TURN: '1', FAKE_REQUEST_USER_INPUT: '1', FAKE_DIE_AFTER_MS: '600' }),
       sessionId: `detach-${Math.round(performance.now())}`,
       onNotification: () => { callbackCount += 1; },
       onTurnTerminal: () => { callbackCount += 1; },

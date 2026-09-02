@@ -86,13 +86,29 @@ export interface CodexRpcEngineOpts {
    *  resolving the ack. The worker uses that identity to release only the
    *  matching rpcActive bridge entry. */
   onTurnTerminal?: (terminal: CodexRpcTurnTerminal) => void;
+  /** BTW terminal persistence gate for a specific native turn. Existing
+   *  main-turn callback semantics stay synchronous/fire-and-forget. */
+  onBtwTurnTerminal?: (terminal: CodexRpcTurnTerminal) => Promise<void> | void;
+  /** BTW observer seam: repeats are not main-turn callbacks, but are retained
+   *  as durable conflict evidence for the exact native owner. */
+  onDuplicateTurnTerminal?: (terminal: CodexRpcTurnTerminal) => void;
   /** Parsed transport notification hook; the WebSocket payload is parsed once
    *  before the normal terminal/input routing consumes it. */
   onNotification?: (notification: CodexRpcNotification) => void;
+  /** BTW-only seam: exact native tool activity keyed by native turn id. */
+  onNativeToolEvent?: (event: CodexRpcNativeToolEvent) => void;
 }
 
 export interface CodexRpcNotification {
   method: string;
+  params: unknown;
+}
+
+export interface CodexRpcNativeToolEvent {
+  kind: 'request' | 'execution';
+  method: string;
+  nativeTurnId: string;
+  identity: CodexRpcTurnIdentity;
   params: unknown;
 }
 
@@ -115,6 +131,8 @@ export interface CodexRpcTurnTerminal {
   nativeTurnId: string;
   status: CodexRpcTurnTerminalStatus;
   errorCode?: string;
+  answer?: string;
+  message?: string;
 }
 
 /** Server→client requests are auto-answered so codex never blocks on a human;
@@ -164,8 +182,11 @@ export class CodexRpcEngineCore {
     beforeSend?: () => void;
   }>();
   private readonly turnOwners = new Map<string, CodexRpcTurnIdentity>();
+  private readonly nativeBtwTurnIds = new Set<string>();
+  private readonly nativeBtwTerminalReleaseChains = new Map<string, Promise<void>>();
   private readonly nativeTurnByOwner = new Map<string, string>();
   private readonly terminalNativeTurns = new Set<string>();
+  private readonly terminalOwners = new Map<string, CodexRpcTurnIdentity>();
   private readonly deferredUnownedTerminals = new Map<string, {
     status: CodexRpcTurnTerminalStatus;
     errorCode?: string;
@@ -218,16 +239,59 @@ export class CodexRpcEngineCore {
     const deferred = this.deferredUnownedTerminals.get(nativeTurnId);
     if (deferred) {
       this.deferredUnownedTerminals.delete(nativeTurnId);
-      this.emitTurnTerminal(nativeTurnId, deferred.status, deferred.errorCode);
+      void this.emitTurnTerminal(nativeTurnId, deferred.status, deferred.errorCode);
     }
   }
 
-  private emitTurnTerminal(
+  /** Mark an already-bound native turn as a read-only BTW turn. Tool events
+   *  for this exact ID must be interrupted before the generic approval path. */
+  registerNativeBtwTurnOwner(nativeTurnId: string, identity: CodexRpcTurnIdentity): void {
+    this.registerNativeTurnOwner(nativeTurnId, identity);
+    this.nativeBtwTurnIds.add(nativeTurnId);
+    if (this.nativeBtwTurnIds.size > 1024) {
+      const oldest = this.nativeBtwTurnIds.values().next().value as string | undefined;
+      if (oldest) this.nativeBtwTurnIds.delete(oldest);
+    }
+  }
+
+  releaseNativeBtwTurnOwner(nativeTurnId: string, identity: CodexRpcTurnIdentity): void {
+    const existingOwner = this.turnOwners.get(nativeTurnId);
+    if (existingOwner && this.ownerKey(existingOwner) !== this.ownerKey(identity)) {
+      throw new Error(`native turn ${nativeTurnId} was released by a different Botmux attempt`);
+    }
+    this.turnOwners.delete(nativeTurnId);
+    this.nativeBtwTurnIds.delete(nativeTurnId);
+    this.nativeBtwTerminalReleaseChains.delete(nativeTurnId);
+    const ownerKey = this.ownerKey(identity);
+    if (this.nativeTurnByOwner.get(ownerKey) === nativeTurnId) {
+      this.nativeTurnByOwner.delete(ownerKey);
+    }
+  }
+
+  private async emitTurnTerminal(
     nativeTurnId: string,
     status: CodexRpcTurnTerminalStatus,
     errorCode?: string,
-  ): void {
-    if (!nativeTurnId || this.terminalNativeTurns.has(nativeTurnId)) return;
+    detail?: { answer?: string; message?: string },
+  ): Promise<void> {
+    if (!nativeTurnId) return;
+    const terminal = (identity: CodexRpcTurnIdentity): CodexRpcTurnTerminal => ({
+      identity: { ...identity },
+      nativeTurnId,
+      status,
+      ...(errorCode ? { errorCode } : {}),
+      ...(detail?.answer !== undefined ? { answer: detail.answer } : {}),
+      ...(detail?.message !== undefined ? { message: detail.message } : {}),
+    });
+    if (this.terminalNativeTurns.has(nativeTurnId)) {
+      const releaseChain = this.nativeBtwTerminalReleaseChains.get(nativeTurnId);
+      if (releaseChain) await releaseChain;
+      const duplicateOwner = this.terminalOwners.get(nativeTurnId) ?? this.turnOwners.get(nativeTurnId);
+      if (duplicateOwner) {
+        try { this.opts.onDuplicateTurnTerminal?.(terminal(duplicateOwner)); } catch { /* observer only */ }
+      }
+      return;
+    }
     const identity = this.turnOwners.get(nativeTurnId);
     if (!identity) {
       // An attached TUI can broadcast turns not submitted by this engine. Never
@@ -252,19 +316,36 @@ export class CodexRpcEngineCore {
       const oldest = this.terminalNativeTurns.values().next().value as string | undefined;
       if (oldest) this.terminalNativeTurns.delete(oldest);
     }
-    this.turnOwners.delete(nativeTurnId);
     // Keep owner→native through the request continuation. A fast app-server can
     // send turn/completed in the same socket read as the turn/start response;
     // deleting here would make the awaiting sender falsely conclude that the
     // accepted response carried no native id.
+    const releaseOwner = () => {
+      this.turnOwners.delete(nativeTurnId);
+      this.terminalOwners.set(nativeTurnId, { ...identity });
+      if (this.terminalOwners.size > 1024) {
+        const oldest = this.terminalOwners.keys().next().value as string | undefined;
+        if (oldest) this.terminalOwners.delete(oldest);
+      }
+    };
     try {
-      this.opts.onTurnTerminal?.({
-        identity: { ...identity },
-        nativeTurnId,
-        status,
-        ...(errorCode ? { errorCode } : {}),
-      });
+      const event = terminal(identity);
+      const isBtwTurn = this.nativeBtwTurnIds.has(nativeTurnId);
+      if (!isBtwTurn) this.opts.onTurnTerminal?.(event);
+      if (isBtwTurn) {
+        const releaseChain = Promise.resolve(this.opts.onBtwTurnTerminal?.(event))
+          .catch(() => undefined)
+          .finally(() => {
+            releaseOwner();
+            this.nativeBtwTurnIds.delete(nativeTurnId);
+            this.nativeBtwTerminalReleaseChains.delete(nativeTurnId);
+          });
+        this.nativeBtwTerminalReleaseChains.set(nativeTurnId, releaseChain);
+        await releaseChain;
+        return;
+      }
     } catch { /* worker callback is best-effort; engine transport must continue */ }
+    releaseOwner();
   }
 
   private emitAllTurnTerminals(
@@ -272,8 +353,28 @@ export class CodexRpcEngineCore {
     errorCode: string,
   ): void {
     for (const nativeTurnId of [...this.turnOwners.keys()]) {
-      this.emitTurnTerminal(nativeTurnId, status, errorCode);
+      void this.emitTurnTerminal(nativeTurnId, status, errorCode);
     }
+  }
+
+  private emitNativeToolEvent(
+    kind: CodexRpcNativeToolEvent['kind'],
+    method: string,
+    nativeTurnId: string,
+    params: unknown,
+  ): void {
+    if (!nativeTurnId) return;
+    const identity = this.turnOwners.get(nativeTurnId);
+    if (!identity) return;
+    try {
+      this.opts.onNativeToolEvent?.({
+        kind,
+        method,
+        nativeTurnId,
+        identity: { ...identity },
+        params,
+      });
+    } catch { /* observer only */ }
   }
 
   /** Spawn the app-server, connect, and complete the initialize handshake. */
@@ -459,11 +560,17 @@ export class CodexRpcEngineCore {
 
   /** Per-request dispatch boundary used by the reusable session. */
   async requestAtDispatchBoundary(
-    method: string, params: unknown, opts: { timeoutMs?: number; fatalOnTimeout?: boolean; beforeSend?: () => void } = {},
+    method: string, params: unknown, opts: { timeoutMs?: number; fatalOnTimeout?: boolean; beforeSend?: () => void; onDispatched?: () => Promise<void> | void } = {},
   ): Promise<{ result?: unknown; error?: Error; dispatched: boolean }> {
     let dispatched = false;
     try {
-      const result = await this.request(method, params, { timeoutMs: opts.timeoutMs, fatalOnTimeout: opts.fatalOnTimeout ?? false }, () => { dispatched = true; }, undefined, opts.beforeSend);
+      let dispatchedPersistence: Promise<void> | undefined;
+      const resultPromise = this.request(method, params, { timeoutMs: opts.timeoutMs, fatalOnTimeout: opts.fatalOnTimeout ?? false }, () => {
+        dispatched = true;
+        dispatchedPersistence = Promise.resolve(opts.onDispatched?.());
+      }, undefined, opts.beforeSend);
+      await dispatchedPersistence;
+      const result = await resultPromise;
       return { result, dispatched };
     } catch (error) { return { error: error instanceof Error ? error : new Error(String(error)), dispatched }; }
   }
@@ -722,6 +829,15 @@ export class CodexRpcEngineCore {
    *  still completes (the ask is silently skipped). `turn/interrupt` is the only
    *  path that actually stops the turn (status → 'interrupted'); the pending
    *  server request is cancelled along with it, so we do NOT also respond. */
+  private interruptNativeTurn(threadId: string | undefined, turnId: string | undefined, reason: string): void {
+    if (!threadId || !turnId) return;
+    this.request('turn/interrupt', { threadId, turnId }, { timeoutMs: 10_000, fatalOnTimeout: false })
+      .then(() => this.log(reason === 'requestUserInput failure'
+        ? '[codex-rpc] turn interrupted after requestUserInput failure'
+        : `[codex-rpc] turn interrupted (${reason})`))
+      .catch(err => this.failAll(new Error(`turn/interrupt failed: ${err instanceof Error ? err.message : String(err)}`)));
+  }
+
   private interruptTurnFor(id: number, params: unknown, reason: string): void {
     const p = (params && typeof params === 'object') ? params as Record<string, unknown> : {};
     const threadId = typeof p.threadId === 'string' ? p.threadId : undefined;
@@ -733,15 +849,7 @@ export class CodexRpcEngineCore {
       this.respondError(id, reason);
       return;
     }
-    this.request('turn/interrupt', { threadId, turnId }, { timeoutMs: 10_000, fatalOnTimeout: false })
-      .then(() => this.log('[codex-rpc] turn interrupted after requestUserInput failure'))
-      .catch(err => {
-        // If the interrupt itself errors or times out, the turn is still wedged
-        // and we have no other lever. Declare the engine dead so the worker
-        // replaces the pane (onDead → restartCliProcess) rather than leaking a
-        // permanently stuck turn — the whole point of this failure path.
-        this.failAll(new Error(`turn/interrupt failed: ${err instanceof Error ? err.message : String(err)}`));
-      });
+    this.interruptNativeTurn(threadId, turnId, 'requestUserInput failure');
   }
 
   /** Reply to a server→client request with a JSON-RPC error. Used only as a
@@ -758,7 +866,11 @@ export class CodexRpcEngineCore {
   private onMessage(line: string): void {
     let msg: Json;
     try { msg = JSON.parse(line); } catch { return; }
-    if (typeof msg.method === 'string' && typeof msg.id !== 'number') {
+    const notificationNativeTurnId = typeof msg.params?.turn?.id === 'string'
+      ? msg.params.turn.id
+      : typeof msg.params?.turnId === 'string' ? msg.params.turnId : '';
+    if (typeof msg.method === 'string' && typeof msg.id !== 'number'
+      && (!notificationNativeTurnId || !this.nativeBtwTurnIds.has(notificationNativeTurnId))) {
       try { this.opts.onNotification?.({ method: msg.method, params: msg.params }); } catch { /* observer only */ }
     }
     // Response to one of our requests.
@@ -787,6 +899,15 @@ export class CodexRpcEngineCore {
     // wait for a human. In botmux this callback posts a Lark card and returns
     // the protocol-shaped answers object. Keep all approval requests automatic.
     if (typeof msg.id === 'number' && typeof msg.method === 'string') {
+      const requestTurnId = typeof msg.params?.turnId === 'string' ? msg.params.turnId : '';
+      if (msg.method === 'item/tool/call' && requestTurnId) {
+        this.emitNativeToolEvent('request', msg.method, requestTurnId, msg.params);
+        if (this.nativeBtwTurnIds.has(requestTurnId)) {
+          const requestThreadId = typeof msg.params?.threadId === 'string' ? msg.params.threadId : undefined;
+          this.interruptNativeTurn(requestThreadId, requestTurnId, 'BTW native tool request forbidden');
+          return;
+        }
+      }
       if (msg.method === 'item/tool/requestUserInput' && this.opts.onRequestUserInput) {
         const requestParams = msg.params;
         void this.opts.onRequestUserInput(requestParams).then(
@@ -812,6 +933,16 @@ export class CodexRpcEngineCore {
     if (typeof msg.method === 'string') {
       const params = msg.params ?? {};
       const nativeTurnId = String(params.turn?.id ?? params.turnId ?? '');
+      if (msg.method.startsWith('item/') && nativeTurnId) {
+        const itemType = typeof params.item?.type === 'string' ? params.item.type : '';
+        if (itemType === 'toolCall' || itemType === 'toolResult' || msg.method === 'item/tool/result') {
+          this.emitNativeToolEvent('execution', msg.method, nativeTurnId, params);
+          if (this.nativeBtwTurnIds.has(nativeTurnId)) {
+            const notificationThreadId = typeof params.threadId === 'string' ? params.threadId : undefined;
+            this.interruptNativeTurn(notificationThreadId, nativeTurnId, 'BTW native tool execution forbidden');
+          }
+        }
+      }
       if (msg.method === 'turn/started' && nativeTurnId && !this.turnOwners.has(nativeTurnId)) {
         // Pre-response start notifications are not necessarily ours: the
         // attached TUI can start an unrelated local turn on the same thread.
@@ -830,6 +961,14 @@ export class CodexRpcEngineCore {
           nativeTurnId,
           aborted ? 'aborted' : failed ? 'failed' : 'completed',
           errorCode || undefined,
+          {
+            ...(typeof turn.answer === 'string' ? { answer: turn.answer } : {}),
+            ...(typeof turn.message === 'string'
+              ? { message: turn.message }
+              : typeof turn.error?.message === 'string'
+                ? { message: turn.error.message }
+                : {}),
+          },
         );
         return;
       }
@@ -842,6 +981,7 @@ export class CodexRpcEngineCore {
           nativeTurnId,
           'failed',
           String(params.error?.code ?? params.error?.message ?? 'rpc_turn_failed'),
+          typeof params.error?.message === 'string' ? { message: params.error.message } : undefined,
         );
         return;
       }

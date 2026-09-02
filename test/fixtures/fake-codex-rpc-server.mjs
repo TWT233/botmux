@@ -19,7 +19,9 @@
 //   FAKE_NOTIFY_ON_TURN=1 → emit one ordinary notification while processing turn/start
 import { createServer } from 'node:http';
 import { WebSocketServer } from 'ws';
-import { writeFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const listenArg = process.argv[process.argv.indexOf('--listen') + 1] || '';
 const m = listenArg.match(/ws:\/\/127\.0\.0\.1:(\d+)/);
@@ -29,6 +31,7 @@ const HANG_TURN_NOTIFY = process.env.FAKE_HANG_TURN_NOTIFY === '1';
 const TERMINAL_BEFORE_RESPONSE = process.env.FAKE_TERMINAL_BEFORE_RESPONSE === '1';
 const ERROR_AFTER_STARTED = process.env.FAKE_ERROR_AFTER_STARTED === '1';
 const DUPLICATE_TERMINAL = process.env.FAKE_DUPLICATE_TERMINAL === '1';
+const CONFLICTING_TERMINAL = process.env.FAKE_CONFLICTING_TERMINAL === '1';
 const NO_TURN_TERMINAL = process.env.FAKE_NO_TURN_TERMINAL === '1';
 const DELAY_TURN_TERMINAL_MS = Number(process.env.FAKE_DELAY_TURN_TERMINAL_MS ?? '0');
 const TURN_STATUS = process.env.FAKE_TURN_STATUS ?? '';
@@ -43,6 +46,12 @@ const REQUEST_USER_INPUT = process.env.FAKE_REQUEST_USER_INPUT === '1';
 const DELAY_THREAD_READ_MS = Number(process.env.FAKE_DELAY_THREAD_READ_MS ?? '0');
 const NOTIFY_ON_TURN = process.env.FAKE_NOTIFY_ON_TURN === '1';
 const TRACE_FILE = process.env.FAKE_TRACE_FILE;
+const PID_FILE = process.env.FAKE_PID_FILE;
+const PID_DIR = process.env.FAKE_PID_DIR;
+const BTW_MODE = process.env.FAKE_BTW_MODE ?? '';
+const BTW_MAP = (() => {
+  try { return JSON.parse(process.env.FAKE_BTW_MAP ?? '{}'); } catch { return {}; }
+})();
 let turnCount = 0;
 
 function trace(event, detail = {}) {
@@ -52,7 +61,27 @@ function trace(event, detail = {}) {
   } catch { /* test-only observation */ }
 }
 
+function traceRpc(method, params) {
+  trace('rpc', { method, params });
+}
+
 trace('spawn', { argv: process.argv.slice(2), env: { FAKE_TRACE_ENV: process.env.FAKE_TRACE_ENV } });
+if (PID_FILE) {
+  try {
+    writeFileSync(PID_FILE, JSON.stringify({ pid: process.pid, listen: listenArg }) + '\n', { mode: 0o600 });
+  } catch { /* test-owned cleanup hint only */ }
+}
+if (PID_DIR) {
+  try {
+    mkdirSync(PID_DIR, { recursive: true });
+    writeFileSync(join(PID_DIR, `${process.pid}.json`), JSON.stringify({
+      pid: process.pid,
+      listen: listenArg,
+      fixturePath: fileURLToPath(import.meta.url),
+      argv: process.argv.slice(1),
+    }) + '\n', { flag: 'wx', mode: 0o600 });
+  } catch { /* test-owned cleanup hint only */ }
+}
 
 const httpServer = createServer((req, res) => {
   if (req.url === '/readyz') { res.writeHead(200); res.end('ok'); return; }
@@ -91,9 +120,91 @@ wss.on('connection', (ws) => {
     emitTurnStarted(threadId, nativeTurnId);
     emitTurnCompleted(threadId, nativeTurnId, status);
   };
+  const emitBtwCompleted = (threadId, nativeTurnId, answer, status = 'completed', extra = {}) => {
+    const completed = JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'turn/completed',
+      params: {
+        threadId,
+        turn: {
+          id: nativeTurnId,
+          status,
+          ...(status === 'completed' ? { answer } : {}),
+          ...extra,
+        },
+      },
+    });
+    ws.send(completed);
+    if (CONFLICTING_TERMINAL) {
+      ws.send(JSON.stringify({
+        jsonrpc: '2.0',
+        method: 'turn/completed',
+        params: {
+          threadId,
+          turn: {
+            id: nativeTurnId,
+            status: 'failed',
+            error: { code: 'fake_conflicting_terminal', message: 'conflicting terminal' },
+          },
+        },
+      }));
+    }
+  };
+  const scheduleBtwTerminal = (threadId, nativeTurnId) => {
+    const config = BTW_MAP?.[nativeTurnId] ?? {};
+    const delayMs = Number(config.delayMs ?? 0);
+    const answer = config.answer ?? `answer-for-${nativeTurnId}`;
+    const status = config.status ?? 'completed';
+    const send = () => {
+      if (status === 'failed') {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'turn/completed',
+          params: {
+            threadId,
+            turn: {
+              id: nativeTurnId,
+              status: 'failed',
+              error: {
+                code: config.errorCode ?? 'fake_btw_failed',
+                message: config.message ?? 'fake btw failure',
+              },
+            },
+          },
+        }));
+        return;
+      }
+      if (status === 'cancelled') {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          method: 'turn/completed',
+          params: {
+            threadId,
+            turn: {
+              id: nativeTurnId,
+              status: 'cancelled',
+              message: config.message ?? 'fake btw cancelled',
+            },
+          },
+        }));
+        return;
+      }
+      if (config.replayTerminalTurnId) {
+        emitBtwCompleted(
+          threadId,
+          config.replayTerminalTurnId,
+          config.replayAnswer ?? `answer-for-${config.replayTerminalTurnId}`,
+          'completed',
+        );
+      }
+      emitBtwCompleted(threadId, nativeTurnId, answer, 'completed');
+    };
+    if (delayMs > 0) setTimeout(send, delayMs);
+    else send();
+  };
   ws.on('message', (data) => {
     let msg; try { msg = JSON.parse(data.toString()); } catch { return; }
-    if (typeof msg.method === 'string') trace('rpc', { method: msg.method });
+    if (typeof msg.method === 'string') traceRpc(msg.method, msg.params);
     if (REQUEST_USER_INPUT && msg.id === 900 && (msg.result !== undefined || msg.error !== undefined)) {
       if (!pendingTurnReply) return;
       // Real traex 0.200.19 normalizes ANY reply to requestUserInput (empty
@@ -228,6 +339,75 @@ wss.on('connection', (ws) => {
             emitTurnLifecycle(threadId, nativeTurnId);
           }
         }
+        return;
+      }
+      case 'turn/btw': {
+        const threadId = msg.params?.threadId ?? 'thread-fake-1';
+        const nativeTurnId = msg.params?.turnId ?? `btw-turn-${turnCount + 1}`;
+        const config = BTW_MAP?.[nativeTurnId] ?? {};
+        if (config.delta) {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'item/agentMessage/delta',
+            params: { threadId, turnId: nativeTurnId, delta: config.delta },
+          }));
+        }
+        if (config.tracePayload !== false) {
+          trace('btw_submission', {
+            nativeTurnId,
+            params: msg.params ?? null,
+          });
+        }
+        if (BTW_MODE === 'pre-send-throw') {
+          return reply({ rejected: true });
+        }
+        if (BTW_MODE === 'terminal-before-ack') {
+          scheduleBtwTerminal(threadId, nativeTurnId);
+          return setTimeout(() => reply({ turn: { id: nativeTurnId } }), Number(config.ackDelayMs ?? 10));
+        }
+        if (BTW_MODE === 'tool-request') {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1900,
+            method: 'item/tool/call',
+            params: { threadId, turnId: nativeTurnId, tool: 'forbidden-btw-tool' },
+          }));
+          return reply({ turn: { id: nativeTurnId } });
+        }
+        if (BTW_MODE === 'tool-execution') {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0',
+            method: 'item/tool/result',
+            params: {
+              threadId,
+              turnId: nativeTurnId,
+              item: { type: 'toolResult' },
+              result: { success: true },
+            },
+          }));
+          return reply({ turn: { id: nativeTurnId } });
+        }
+        if (BTW_MODE === 'post-send-timeout-then-terminal') {
+          scheduleBtwTerminal(threadId, nativeTurnId);
+          return;
+        }
+        if (BTW_MODE === 'post-send-error-then-terminal') {
+          ws.send(JSON.stringify({
+            jsonrpc: '2.0', id: msg.id,
+            error: { code: -32000, message: 'fake BTW acknowledgement lost after send' },
+          }));
+          scheduleBtwTerminal(threadId, nativeTurnId);
+          return;
+        }
+        if (BTW_MODE === 'post-send-disconnect') {
+          scheduleBtwTerminal(threadId, nativeTurnId);
+          setTimeout(() => {
+            try { ws.close(); } catch { /* already gone */ }
+          }, Number(config.disconnectDelayMs ?? 20));
+          return;
+        }
+        reply({ turn: { id: nativeTurnId } });
+        scheduleBtwTerminal(threadId, nativeTurnId);
         return;
       }
       default: return reply({});
