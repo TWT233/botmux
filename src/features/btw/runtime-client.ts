@@ -200,6 +200,7 @@ function isValidRuntimeResult(commandType: BtwRuntimeCommand['type'], value: unk
     case 'record_card':
     case 'submit_btw': return isOperation(value);
     case 'list_pending_initial_cards': return Array.isArray(value) && value.every(isOperation);
+    case 'next_btw_retry_at': return value === undefined || (typeof value === 'string' && !Number.isNaN(Date.parse(value)));
     case 'list_pending_projections': return Array.isArray(value) && value.every(isProjectionItem);
     case 'record_projection_failure':
     case 'ack_projection': return isRecord(value) && (value.kind === 'applied' || value.kind === 'stale') && isOperation(value.operation);

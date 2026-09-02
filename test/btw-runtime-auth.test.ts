@@ -598,6 +598,28 @@ describe('BTW runtime auth and singleton boot', () => {
     await new Promise<void>(resolve => server.close(() => resolve()));
   });
 
+  it('accepts the optional durable next_btw_retry_at result through the real RPC validator', async () => {
+    const socketPath = `/tmp/btw-runtime-next-retry-${process.pid}-${Date.now()}.sock`;
+    staleSocketPaths.push(socketPath);
+    const server = createServer(socket => {
+      socket.on('data', chunk => {
+        for (const line of String(chunk).trim().split('\n')) {
+          const frame = JSON.parse(line) as { kind?: string; requestId?: string; command?: { type?: string } };
+          if (frame.kind === 'auth') socket.write('{"kind":"auth_ok"}\n');
+          else socket.write(`${JSON.stringify({
+            kind: 'reply', ok: true, requestId: frame.requestId, commandType: frame.command!.type,
+            result: '2026-09-02T00:00:10.000Z',
+          })}\n`);
+        }
+      });
+    });
+    await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
+    const client = new BtwRuntimeClientImpl({ descriptor: { pid: 1, startIdentity: 'test', socket: socketPath, protocolVersion: BTW_RUNTIME_PROTOCOL_VERSION, buildId: 'test', epoch: 'epoch' }, token: 'token' });
+    await expect(client.nextBtwRetryAt('cli_app')).resolves.toBe('2026-09-02T00:00:10.000Z');
+    client.close();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  });
+
   it('rejects a malformed nested list_pending_projections item', async () => {
     const socketPath = `/tmp/btw-runtime-invalid-projection-${process.pid}-${Date.now()}.sock`;
     staleSocketPaths.push(socketPath);

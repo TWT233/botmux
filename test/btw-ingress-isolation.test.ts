@@ -5,30 +5,32 @@ const daemonSource = readFileSync(new URL('../src/daemon.ts', import.meta.url), 
 const zhSource = readFileSync(new URL('../src/i18n/zh.ts', import.meta.url), 'utf8');
 
 describe('Task 11 BTW ingress isolation', () => {
-  it('intercepts /btw before generic passthrough in both daemon ingress paths', () => {
+  it('routes /btw through the executable router before generic passthrough in both daemon ingress paths', () => {
     const firstIngressStart = daemonSource.indexOf('if (cmd === \'/card\')');
     const firstIngressEnd = daemonSource.indexOf('if (DAEMON_COMMANDS.has(cmd))', firstIngressStart);
     const firstIngress = daemonSource.slice(firstIngressStart, firstIngressEnd);
-    expect(firstIngress).toContain('if (cmd === \'/btw\')');
-    expect(firstIngress.indexOf('if (cmd === \'/btw\')')).toBeLessThan(firstIngress.indexOf('if (resolvePassthroughCommands(larkAppId).has(cmd))'));
+    expect(firstIngress).toContain('routeBtwIngress({');
+    expect(firstIngress.indexOf('routeBtwIngress({')).toBeLessThan(firstIngress.indexOf('if (resolvePassthroughCommands(larkAppId).has(cmd))'));
 
     const secondIngressStart = daemonSource.indexOf('const passthroughCliId = existingDs?.session.cliLaunchSnapshot?.cliId');
     const secondIngressEnd = daemonSource.indexOf('if (DAEMON_COMMANDS.has(cmd))', secondIngressStart);
     const secondIngress = daemonSource.slice(secondIngressStart, secondIngressEnd);
-    expect(secondIngress).toContain('if (cmd === \'/btw\')');
-    expect(secondIngress.indexOf('if (cmd === \'/btw\')')).toBeLessThan(secondIngress.indexOf('if (resolvePassthroughCommands(larkAppId, passthroughCliId).has(cmd))'));
+    expect(secondIngress).toContain('routeBtwIngress({');
+    expect(secondIngress.indexOf('routeBtwIngress({')).toBeLessThan(secondIngress.indexOf('if (resolvePassthroughCommands(larkAppId, passthroughCliId).has(cmd))'));
   });
 
-  it('does not call the generic passthrough helpers for /btw', () => {
+  it('returns from the BTW router before the generic passthrough helpers', () => {
     const secondIngressStart = daemonSource.indexOf('const passthroughCliId = existingDs?.session.cliLaunchSnapshot?.cliId');
     const secondIngressEnd = daemonSource.indexOf('if (DAEMON_COMMANDS.has(cmd))', secondIngressStart);
     const secondIngress = daemonSource.slice(secondIngressStart, secondIngressEnd);
-    expect(secondIngress).not.toContain('if (cmd === \'/btw\') {\n        deliverPassthroughToExistingSession');
+    expect(secondIngress).toContain('if (await routeBtwIngress({');
+    expect(secondIngress.indexOf('if (await routeBtwIngress({')).toBeLessThan(secondIngress.indexOf('deliverPassthroughToExistingSession'));
 
     const firstIngressStart = daemonSource.indexOf('if (cmd === \'/card\')');
     const firstIngressEnd = daemonSource.indexOf('if (DAEMON_COMMANDS.has(cmd))', firstIngressStart);
     const firstIngress = daemonSource.slice(firstIngressStart, firstIngressEnd);
-    expect(firstIngress).not.toContain('if (cmd === \'/btw\') {\n        await startInitialPassthroughSession');
+    expect(firstIngress).toContain('if (await routeBtwIngress({');
+    expect(firstIngress.indexOf('if (await routeBtwIngress({')).toBeLessThan(firstIngress.indexOf('startInitialPassthroughSession'));
   });
 
   it('keeps the exact legacy warning text available for immediate settlement', () => {

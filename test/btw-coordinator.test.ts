@@ -37,13 +37,20 @@ describe('Task 11 BTW coordinator seam', () => {
     expect(region).not.toContain("type: 'raw_input'");
   });
 
-  it('keeps legacy BTW delivery out of main-turn lifecycle helpers', () => {
+  it('keeps dedicated BTW delivery out of main-turn lifecycle and UI helpers', () => {
     const regionStart = daemonSource.indexOf('async function handleDedicatedBtwCommand(');
     const regionEnd = daemonSource.indexOf('function shouldAcceptSlashFromExternalBot', regionStart);
     const region = daemonSource.slice(regionStart, regionEnd > regionStart ? regionEnd : regionStart + 4000);
     expect(region).not.toContain('beginNewTurn(');
     expect(region).not.toContain('beginReplyTargetTurn(');
     expect(region).not.toContain('markSessionActivity(');
+    expect(region).not.toContain('sendMessage(');
+    expect(region).not.toContain('updateMessage(');
+    expect(region).not.toContain('addReaction(');
+    expect(region).not.toContain('removeReaction(');
+    expect(region).not.toContain('scheduleCardPatch(');
+    expect(region).not.toContain('setTimeout(');
+    expect(region).not.toContain('final_output');
   });
 
   it('adds a worker handler dedicated to legacy BTW raw writes', () => {
@@ -91,6 +98,56 @@ function makeDs(overrides: Partial<DaemonSession> = {}): DaemonSession {
 }
 
 describe('handleBtwInvocation behavior', () => {
+  it.each(['managed', 'legacy', 'unsupported', 'usage'] as const)('keeps representative main-turn state untouched for %s outcomes', async outcome => {
+    const ds = makeDs() as any;
+    ds.session.replyTargets = { om_main: { replyRootId: 'om_root_1' } };
+    ds.session.pendingInput = 'main input';
+    ds.session.cardMessageId = 'om_main_card';
+    if (outcome === 'unsupported') ds.session.cliId = 'codex-app';
+    const before = structuredClone({
+      session: ds.session, lastMessageAt: ds.lastMessageAt, hasHistory: ds.hasHistory, workingDir: ds.workingDir,
+    });
+    const capabilities = outcome === 'managed'
+      ? { nativeBtw: true, persistentRuntime: true, structuredTerminal: true, stableParentThread: true }
+      : { nativeBtw: false, persistentRuntime: false, structuredTerminal: false, stableParentThread: false };
+    const commandContent = outcome === 'usage' ? '/btw' : '/btw isolated question';
+    const operation = { btwOpId: 'btwop_isolated', replyTarget: makeBtwReplyTarget(), parent: makeBtwParent() };
+    await handleBtwInvocation({
+      ds, commandContent, requestId: `om_${outcome}`, capabilities, replyTarget: makeBtwReplyTarget(), parent: makeBtwParent(),
+      deps: {
+        runtime: { prepareBtw: vi.fn(async () => ({ kind: 'created', operation })), submitBtw: vi.fn(async () => operation) },
+        projector: { ensureInitialCard: vi.fn(async () => ({ kind: 'recorded', operation })) },
+        reply: vi.fn(async () => 'om_notice'), sendLegacy: vi.fn(() => true),
+      },
+    } as any);
+    expect({ session: ds.session, lastMessageAt: ds.lastMessageAt, hasHistory: ds.hasHistory, workingDir: ds.workingDir }).toEqual(before);
+  });
+
+  it('shares a prepared operation/card across duplicate inbound and recovery, while the runtime submit is idempotent', async () => {
+    const ds = makeDs();
+    const operation = { btwOpId: 'btwop_duplicate', replyTarget: makeBtwReplyTarget(), parent: makeBtwParent() };
+    const operations = new Map<string, typeof operation>();
+    let adapterSubmissions = 0;
+    const runtime = {
+      prepareBtw: vi.fn(async ({ requestId }: { requestId: string }) => {
+        const existing = operations.get(requestId);
+        if (existing) return { kind: 'duplicate' as const, operation: existing };
+        operations.set(requestId, operation);
+        return { kind: 'created' as const, operation };
+      }),
+      submitBtw: vi.fn(async () => { if (adapterSubmissions === 0) adapterSubmissions += 1; return operation; }),
+    };
+    const cards = new Set<string>();
+    const projector = { ensureInitialCard: vi.fn(async (candidate: typeof operation) => { cards.add(candidate.btwOpId); return { kind: 'recorded' as const, operation: candidate }; }) };
+    const input = { ds, commandContent: '/btw duplicate', requestId: 'om_duplicate', capabilities: { nativeBtw: true, persistentRuntime: true, structuredTerminal: true, stableParentThread: true }, replyTarget: makeBtwReplyTarget(), parent: makeBtwParent(), deps: { runtime, projector, reply: vi.fn(async () => 'om'), sendLegacy: vi.fn(() => true) } };
+    const before = structuredClone({ session: ds.session, lastMessageAt: ds.lastMessageAt, hasHistory: ds.hasHistory, workingDir: ds.workingDir });
+    await Promise.all([handleBtwInvocation(input as any), handleBtwInvocation(input as any), projector.ensureInitialCard(operation)]);
+    expect(operations).toHaveLength(1);
+    expect(cards).toEqual(new Set(['btwop_duplicate']));
+    expect(adapterSubmissions).toBe(1);
+    expect({ session: ds.session, lastMessageAt: ds.lastMessageAt, hasHistory: ds.hasHistory, workingDir: ds.workingDir }).toEqual(before);
+  });
+
   it('orders managed preparation, card recording, and submit without touching legacy delivery', async () => {
     const order: string[] = [];
     const deps = {

@@ -7,7 +7,7 @@ import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { CodexRpcSession } from '../src/codex-rpc-session.js';
-import { createBtwOperationStore } from '../src/features/btw/operation-store.js';
+import { btwOperationPath, createBtwOperationStore } from '../src/features/btw/operation-store.js';
 import { connectBtwRuntime } from '../src/features/btw/runtime-client.js';
 import type { FrozenBtwSessionProfile } from '../src/features/btw/runtime-protocol.js';
 import type { BtwOperationScope, PrepareBtwInput } from '../src/features/btw/types.js';
@@ -702,6 +702,7 @@ describe('Trae native BTW runtime executor', () => {
   it('auto-submits an accepted BTW after record_card and persists a late authoritative terminal after submission_unknown', async () => {
     chmodSync(fakeCli, 0o755);
     const dataDir = mkdtempSync(join(tmpdir(), 'botmux-btw-trae-runtime-'));
+    const traceFile = join(dataDir, 'record-card-crash-trace.jsonl');
     dirs.push(dataDir);
     const runtime = await connectBtwRuntime({ dataDir });
     try {
@@ -709,6 +710,7 @@ describe('Trae native BTW runtime executor', () => {
       const requestId = 'om_request_auto_submit';
       const nativeTurnId = deriveBtwIdentifiers({ ...makeBtwScope(), botmuxSessionId: sessionId }, requestId).nativeTurnId;
       const ensured = await runtime.client.ensureSession(profileWithEnv(dataDir, sessionId, {
+          FAKE_TRACE_FILE: traceFile,
           FAKE_BTW_MODE: 'post-send-error-then-terminal',
           FAKE_BTW_MAP: JSON.stringify({
             [nativeTurnId]: { answer: 'late authoritative answer', delayMs: 120 },
@@ -723,10 +725,26 @@ describe('Trae native BTW runtime executor', () => {
 
       const finalStore = createBtwOperationStore({ dataDir });
       await new Promise(resolve => setTimeout(resolve, 500));
-      expect(finalStore.getBtwOperation(scope, prepared.operation.btwOpId)?.execution).toMatchObject({
+      const finalOperation = finalStore.getBtwOperation(scope, prepared.operation.btwOpId);
+      expect(finalOperation).toMatchObject({
+        requestId,
+        card: { messageId: 'om_card_auto_submit' },
+      });
+      expect(finalOperation?.execution).toMatchObject({
         state: 'completed',
         answer: 'late authoritative answer',
       });
+      expect(finalStore.prepareBtw(input)).toMatchObject({ kind: 'duplicate' });
+      expect(readdirSync(dirname(btwOperationPath(dataDir, scope, prepared.operation.btwOpId)))
+        .filter(name => name.endsWith('.json'))).toHaveLength(1);
+      const submissions = readFileSync(traceFile, 'utf8')
+        .trim()
+        .split('\n')
+        .filter(Boolean)
+        .map(line => JSON.parse(line) as { event: string; nativeTurnId?: string })
+        .filter(entry => entry.event === 'btw_submission');
+      expect(submissions).toHaveLength(1);
+      expect(submissions[0]?.nativeTurnId).toBe(nativeTurnId);
     } finally {
       await cleanupRuntimeArtifacts(dataDir);
     }

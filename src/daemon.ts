@@ -300,6 +300,7 @@ import { connectBtwRuntime } from './features/btw/runtime-client.js';
 import { btwFrozenParent, btwFrozenReplyTarget, handleBtwInvocation } from './features/btw/coordinator.js';
 import { BtwProjectorService } from './features/btw/projector-service.js';
 import { createBtwProjector } from './features/btw/projector.js';
+import { routeBtwIngress } from './features/btw/ingress.js';
 import { sweepOrphanSandboxes } from './adapters/backend/sandbox.js';
 import { TmuxBackend } from './adapters/backend/tmux-backend.js';
 import { HerdrBackend } from './adapters/backend/herdr-backend.js';
@@ -18068,15 +18069,11 @@ async function handleNewTopicAdmitted(data: any, ctx: RoutingContext): Promise<v
       await handleTermLinkCommand(anchor, larkAppId, chatId, senderOpenId, commandContent, invocationDeps);
       return;
     }
-    if (cmd === '/btw') {
-      const ds = activeSessions.get(sessionKey(anchor, larkAppId));
-      if (!ds) {
-        await invocationDeps.sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
-        return;
-      }
-      await handleDedicatedBtwCommand(ds, anchor, commandContent, messageId, larkAppId, () => markIngressAdmitted(ctx));
-      return;
-    }
+    if (await routeBtwIngress({
+      cmd, ds: activeSessions.get(sessionKey(anchor, larkAppId)), commandContent, requestId: messageId,
+      invoke: (ds, content, requestId) => handleDedicatedBtwCommand(ds, anchor, content, requestId, larkAppId, () => markIngressAdmitted(ctx)),
+      noSession: () => invocationDeps.sessionReply(anchor, tr('daemon.cmd_requires_session', { cmd }, localeForBot(larkAppId)), 'text', larkAppId),
+    })) return;
     if (resolvePassthroughCommands(larkAppId).has(cmd)) {
       if (isInitialSessionPassthrough(larkAppId, cmd)) {
         await startInitialPassthroughSession({
@@ -19534,14 +19531,11 @@ async function handleThreadReplyAdmitted(
     const passthroughCliId = existingDs?.session.cliLaunchSnapshot?.cliId
       ?? existingDs?.session.cliId
       ?? getBot(larkAppId).config.cliId;
-    if (cmd === '/btw') {
-      if (existingDs) {
-        await handleDedicatedBtwCommand(existingDs, anchor, commandContent, parsed.messageId, larkAppId, () => markIngressAdmitted(ctx));
-      } else {
-        await invocationDeps.sessionReply(anchor, tr('daemon.cmd_needs_active_cli', { cmd }, localeForBot(larkAppId)), 'text', larkAppId);
-      }
-      return;
-    }
+    if (await routeBtwIngress({
+      cmd, ds: existingDs, commandContent, requestId: parsed.messageId,
+      invoke: (ds, content, requestId) => handleDedicatedBtwCommand(ds, anchor, content, requestId, larkAppId, () => markIngressAdmitted(ctx)),
+      noSession: () => invocationDeps.sessionReply(anchor, tr('daemon.cmd_needs_active_cli', { cmd }, localeForBot(larkAppId)), 'text', larkAppId),
+    })) return;
     if (resolvePassthroughCommands(larkAppId, passthroughCliId).has(cmd)) {
       if (!existingDs && threadChatId && isInitialSessionPassthrough(larkAppId, cmd)) {
         await startInitialPassthroughSession({
