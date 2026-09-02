@@ -2033,6 +2033,8 @@ export function BotAgentSection(props: {
   const [cliKey, setCliKey] = useState(initialKey);
   const [cliSelectionTouched, setCliSelectionTouched] = useState(false);
   const [model, setModel] = useState(typeof bot.model === 'string' ? bot.model : '');
+  const [modelBackendVariant, setModelBackendVariant] = useState<'' | 'standard' | 'max'>(bot.modelBackendVariant ?? '');
+  const [modelBackendVariantTouched, setModelBackendVariantTouched] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<'' | 'low' | 'medium' | 'high' | 'xhigh' | 'max' | 'ultra'>(bot.reasoningEffort ?? '');
   // dsh-only turn timeout, edited in minutes (bots.json stores ms). Empty = use
   // the runner default (10 min). `touched` gates whether a save sends the field
@@ -2063,6 +2065,8 @@ export function BotAgentSection(props: {
     setCliKey(agentSelectionKey(bot, props.sessionFallback));
     setCliSelectionTouched(false);
     setModel(typeof bot.model === 'string' ? bot.model : '');
+    setModelBackendVariant(bot.modelBackendVariant ?? '');
+    setModelBackendVariantTouched(false);
     setReasoningEffort(bot.reasoningEffort ?? '');
     setTurnTimeoutMin(turnTimeoutMinFromMs(bot.turnTimeoutMs));
     setTurnTimeoutTouched(false);
@@ -2079,6 +2083,7 @@ export function BotAgentSection(props: {
     bot.cliId,
     bot.larkAppId,
     bot.model,
+    bot.modelBackendVariant,
     bot.reasoningEffort,
     bot.turnTimeoutMs,
     bot.dshRuntime,
@@ -2140,6 +2145,10 @@ export function BotAgentSection(props: {
       setModel(current => current.trim() ? current : cliState.ttadkModelDefault);
     } else {
       setModel(current => current.trim() === cliState.ttadkModelDefault ? '' : current);
+    }
+    if (nextKey !== 'traex') {
+      setModelBackendVariant('');
+      setModelBackendVariantTouched(true);
     }
   }
 
@@ -2209,6 +2218,7 @@ export function BotAgentSection(props: {
       const body = {
         cliId: cliKey,
         model,
+        ...(cliKey === 'traex' && modelBackendVariantTouched ? { modelBackendVariant } : {}),
         reasoningEffort: (cliKey === 'grok' || cliKey === 'traex' || cliKey === 'codex' || cliKey === 'codex-app' || cliKey.endsWith('-codex')) ? reasoningEffort : '',
         // dsh-only: only send when the user actually edited the field. Omitting
         // it makes the daemon preserve the current value; non-dsh selections
@@ -2260,6 +2270,7 @@ export function BotAgentSection(props: {
             : res.body.cliPathOverride,
           wrapperCli: res.body.wrapperCli ?? null,
           model: res.body.model ?? '',
+          modelBackendVariant: res.body.modelBackendVariant ?? undefined,
           reasoningEffort: res.body.reasoningEffort ?? undefined,
           turnTimeoutMs: typeof res.body.turnTimeoutMs === 'number' ? res.body.turnTimeoutMs : undefined,
           dshRuntime: typeof res.body.dshRuntime === 'string' ? res.body.dshRuntime : bot.dshRuntime ?? null,
@@ -2272,6 +2283,8 @@ export function BotAgentSection(props: {
           typeof res.body.turnTimeoutMs === 'number' ? res.body.turnTimeoutMs : undefined,
         ));
         setTurnTimeoutTouched(false);
+        setModelBackendVariant(res.body.modelBackendVariant ?? '');
+        setModelBackendVariantTouched(false);
         setTurnTimeoutError(null);
         setDshRuntimeTouched(false);
         setRuntimeTouched(false);
@@ -2394,6 +2407,7 @@ export function BotAgentSection(props: {
 
   const siSupport = bot.skillInjectionSupport === 'dynamic' ? 'dynamic' : bot.skillInjectionSupport === 'global' ? 'global' : 'none';
   const isRiff = cliKey === 'riff';
+  const isTraex = cliKey === 'traex';
   const isCodexSelection = cliKey === 'codex' || cliKey === 'codex-app' || cliKey.endsWith('-codex');
   const isReasoningSelection = isCodexSelection || cliKey === 'grok' || cliKey === 'traex';
   // The dsh adapter is the only one that forwards a runner turn timeout.
@@ -2598,6 +2612,28 @@ export function BotAgentSection(props: {
                 : undefined}
             />
           </label>
+        </div>
+      )}
+      {isTraex && (
+        <div className="bd-row">
+          <div className="bd-field">
+            <FieldTitle help={tr('botDefaults.agentModelBackendVariantHelp')}>{tr('botDefaults.agentModelBackendVariant')}</FieldTitle>
+            <DropdownField
+              dataInput="agentModelBackendVariant"
+              ariaLabel={tr('botDefaults.agentModelBackendVariant')}
+              value={modelBackendVariant}
+              disabled={agentBusy}
+              options={[
+                { value: '', label: tr('botDefaults.agentModelBackendVariantDefault') },
+                { value: 'standard', label: tr('botDefaults.agentModelBackendVariantStandard') },
+                { value: 'max', label: tr('botDefaults.agentModelBackendVariantMax') },
+              ]}
+              onChange={next => {
+                setModelBackendVariant(next as '' | 'standard' | 'max');
+                setModelBackendVariantTouched(true);
+              }}
+            />
+          </div>
         </div>
       )}
       {isDsh && (
