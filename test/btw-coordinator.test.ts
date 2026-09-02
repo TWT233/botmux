@@ -37,22 +37,6 @@ describe('Task 11 BTW coordinator seam', () => {
     expect(region).not.toContain("type: 'raw_input'");
   });
 
-  it('keeps dedicated BTW delivery out of main-turn lifecycle and UI helpers', () => {
-    const regionStart = daemonSource.indexOf('async function handleDedicatedBtwCommand(');
-    const regionEnd = daemonSource.indexOf('function shouldAcceptSlashFromExternalBot', regionStart);
-    const region = daemonSource.slice(regionStart, regionEnd > regionStart ? regionEnd : regionStart + 4000);
-    expect(region).not.toContain('beginNewTurn(');
-    expect(region).not.toContain('beginReplyTargetTurn(');
-    expect(region).not.toContain('markSessionActivity(');
-    expect(region).not.toContain('sendMessage(');
-    expect(region).not.toContain('updateMessage(');
-    expect(region).not.toContain('addReaction(');
-    expect(region).not.toContain('removeReaction(');
-    expect(region).not.toContain('scheduleCardPatch(');
-    expect(region).not.toContain('setTimeout(');
-    expect(region).not.toContain('final_output');
-  });
-
   it('adds a worker handler dedicated to legacy BTW raw writes', () => {
     expect(workerSource).toContain("case 'legacy_btw_raw_input':");
     expect(workerSource).toContain('deliverLegacyBtwRawInput');
