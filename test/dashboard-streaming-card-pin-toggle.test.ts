@@ -15,6 +15,7 @@ import { StreamingCardPinToggle } from '../src/dashboard/web/streaming-card-pin-
 
 const groupsPageMount = vi.hoisted(() => ({ node: null as unknown }));
 const confirmDialog = vi.hoisted(() => ({ confirm: vi.fn(async () => false) }));
+const toastModule = vi.hoisted(() => ({ toast: vi.fn() }));
 
 vi.mock('../src/dashboard/web/react-mount.js', () => ({
   mountReactPage: (_root: HTMLElement, node: unknown) => {
@@ -25,6 +26,10 @@ vi.mock('../src/dashboard/web/react-mount.js', () => ({
 
 vi.mock('../src/dashboard/web/confirm-modal.js', () => ({
   confirm: confirmDialog.confirm,
+}));
+
+vi.mock('../src/dashboard/web/toast.js', () => ({
+  toast: toastModule.toast,
 }));
 
 function findByDataAction(
@@ -223,6 +228,7 @@ describe('group manage streaming-card pin rows', () => {
     groupsPageMount.node = null;
     confirmDialog.confirm.mockReset();
     confirmDialog.confirm.mockResolvedValue(false);
+    toastModule.toast.mockReset();
   });
 
   it('keeps the open manage dialog synced to reloads and falls back if the chat is missing', async () => {
@@ -1078,6 +1084,7 @@ describe('group manage streaming-card pin rows', () => {
 
     expect(renderer.root.findAllByType(ManageDialog)).toHaveLength(0);
     expect(requests).toContain(`POST /api/groups/oc_group/${action}`);
+    expect(toastModule.toast.mock.calls.filter(([, options]) => options?.kind === 'success')).toHaveLength(1);
     act(() => renderer.unmount());
   });
 
