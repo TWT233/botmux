@@ -115,8 +115,6 @@ export function sessionReadyHookCommand(): string {
 export function userPromptHookCommand(): string {
   return renderShellCommand(undefined, 'user-prompt-hook');
 }
-<<<<<<< HEAD
-=======
 
 /**
  * Construct the process-scoped TraeCode `spawn_agent` runtime-policy hook.
@@ -129,5 +127,3 @@ export function nativeSubagentRuntimeHookCommand(
 ): string {
   return `"${resolveNativeSubagentRuntimeHookWrapperPath(env, platform)}"`;
 }
-
->>>>>>> be1a303b (feat(subagent): 接入运行时策略钩子)
