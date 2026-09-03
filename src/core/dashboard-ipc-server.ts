@@ -24,6 +24,7 @@ import { applySessionRowCommand } from '../services/session-commands.js';
 import { cliSupportsNativeUsage } from '../services/transcript-resolver.js';
 import {
   cliModelSupportsReasoningEffort,
+  isBackendVariantCliId,
   isConfigurableReasoningCliId,
   isCodexReasoningEffort,
 } from '../services/codex-reasoning-effort.js';
@@ -5424,7 +5425,7 @@ ipcRoute('GET', '/api/bot-default-oncall', async (_req, res) => {
       : null;
     wrapperCli = typeof cfg.wrapperCli === 'string' && cfg.wrapperCli.trim() ? cfg.wrapperCli : null;
     model = typeof cfg.model === 'string' && cfg.model.trim() ? cfg.model : null;
-    modelBackendVariant = cfg.cliId === 'traex'
+    modelBackendVariant = isBackendVariantCliId(cfg.cliId)
       && (cfg.modelBackendVariant === 'standard' || cfg.modelBackendVariant === 'max')
       ? cfg.modelBackendVariant
       : null;
@@ -6130,7 +6131,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
   const model = typeof body.model === 'string' ? body.model.trim() : '';
   const modelBackendVariantFieldPresent = Object.prototype.hasOwnProperty.call(body, 'modelBackendVariant');
   let modelBackendVariant: 'standard' | 'max' | undefined;
-  const supportsModelBackendVariant = selected.cliId === 'traex';
+  const supportsModelBackendVariant = isBackendVariantCliId(selected.cliId);
   if (supportsModelBackendVariant
       && modelBackendVariantFieldPresent
       && body.modelBackendVariant !== null
@@ -6314,11 +6315,11 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     const storedModelBackendVariant = entry.modelBackendVariant === 'standard' || entry.modelBackendVariant === 'max'
       ? entry.modelBackendVariant
       : undefined;
-    const entryUsesTraex = entry.cliId === 'traex';
+    const entryUsesBackendVariantCli = isBackendVariantCliId(entry.cliId);
     const nextModelBackendVariant = supportsModelBackendVariant
       ? (modelBackendVariantFieldPresent
         ? modelBackendVariant
-        : entryUsesTraex ? storedModelBackendVariant : undefined)
+        : entryUsesBackendVariantCli ? storedModelBackendVariant : undefined)
       : undefined;
     const nextReasoningEffort = supportsReasoningEffort
       ? (reasoningEffortFieldPresent ? reasoningEffort ?? undefined : entry.reasoningEffort)
@@ -6347,7 +6348,7 @@ ipcRoute('PUT', '/api/bot-agent', async (req, res) => {
     else if (modelBackendVariantFieldPresent) {
       if (modelBackendVariant) entry.modelBackendVariant = modelBackendVariant;
       else delete entry.modelBackendVariant;
-    } else if (!entryUsesTraex) {
+    } else if (!entryUsesBackendVariantCli) {
       delete entry.modelBackendVariant;
     }
     if (!supportsReasoningEffort) delete entry.reasoningEffort;
