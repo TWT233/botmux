@@ -3924,6 +3924,40 @@ describe('managed turn authority worker generations', () => {
     }));
   });
 
+  it('clears retained policy authority when exit reconciliation kills the same worker', async () => {
+    initWorkerPool({
+      sessionReply: vi.fn(async () => 'om_reply'),
+      getSessionWorkingDir: () => '/repo',
+      getActiveCount: () => 1,
+      closeSession: vi.fn(),
+      // onCliExit is async in production. A reconciliation step can kill the
+      // worker while the handler awaits it, leaving ds.worker still pointing at
+      // this generation. The post-await no-live-worker branch must revoke the
+      // policy-only placeholder instead of leaving it daemon-readable.
+      onCliExit: async activeDs => {
+        (activeDs.worker as any).killed = true;
+      },
+    });
+    const ds = makeDs();
+    forkWorker(ds, 'first', false);
+    const worker = forkMock.mock.results.at(-1)!.value;
+    worker.emit('message', {
+      type: 'managed_turn_origin',
+      sessionId: ds.session.sessionId,
+      capability: 'reconciled-live-capability',
+      policyCapability: 'reconciled-policy-capability',
+      turnId: 'reconciled-turn',
+    });
+
+    worker.emit('message', { type: 'claude_exit', code: 17, signal: null });
+
+    await vi.waitFor(() => expect(ds.managedTurnOrigin).toBeUndefined());
+    expect(worker.send).not.toHaveBeenCalledWith(expect.objectContaining({
+      type: 'restart',
+      reason: 'cli_crash',
+    }));
+  });
+
   it('ignores claude_exit authority changes from a stale worker generation', async () => {
     const ds = makeDs();
     forkWorker(ds, 'first', false);
