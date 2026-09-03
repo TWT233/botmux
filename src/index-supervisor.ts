@@ -24,11 +24,11 @@ installStdioEpipeGuard();
 
 const configDir = join(homedir(), '.botmux');
 
-// The dotenv load above pulls in ~/.botmux/.env WHOLESALE, same as
-// index-daemon.ts — including the Dashboard-only Feishu H5 login family. The
-// supervisor is not that family's consumer (the dashboard reloads it itself
-// via index-dashboard.ts), and resolveFleetDaemonEnv() below spreads this
-// process's env into every supervised member, so an unstripped secret would
+// The supervisor deliberately does NOT wholesale-load ~/.botmux/.env: that file
+// carries the Dashboard-only Feishu H5 login family, and the supervisor is not
+// its consumer (the dashboard reloads it itself via index-dashboard.ts). Any
+// INHERITED copy still has to go, because resolveFleetDaemonEnv() below spreads
+// this process's env into every supervised member — an unstripped secret would
 // sit in this long-lived process for its whole life and ride into every bot
 // daemon (which then strips it again at its own boot).
 //
